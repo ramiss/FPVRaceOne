@@ -102,7 +102,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 7
+#define CONFIG_VERSION 8
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -143,6 +143,7 @@ typedef struct {
     uint32_t pilotColor;       // Pilot color (0xRRGGBB)
     char theme[21];            // UI theme name
     char selectedVoice[21];    // Voice selection (default, rachel, piper, etc)
+    uint8_t voiceEnabled;      // 0 = off, 1 = on
     char lapFormat[11];        // Lap announcement format (full, laptime, timeonly)
     char ssid[33];
     char password[33];
@@ -199,6 +200,7 @@ class Config {
     uint32_t getPilotColor();
     char* getTheme();
     char* getSelectedVoice();
+    uint8_t getVoiceEnabled();
     char* getLapFormat();
     
     // added because we use multiple bands with the same channels and revere freq lookup no longer works
@@ -228,6 +230,7 @@ class Config {
     void setWebhookRaceStart(uint8_t enabled);
     void setWebhookRaceStop(uint8_t enabled);
     void setWebhookLap(uint8_t enabled);
+    void setVoiceEnabled(uint8_t enabled);
 
    private:
     laptimer_config_t conf;

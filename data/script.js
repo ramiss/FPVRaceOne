@@ -558,8 +558,20 @@ onload = async function (e) {
 
     createRssiChart();
 
-    // Auto-enable voice on load
-    enableAudioLoop();
+    // Apply voice enabled state from device config (DO NOT auto-save here)
+    audioEnabled = !!Number(configData.voiceEnabled);
+
+    if (audioAnnouncer) {
+      if (audioEnabled) {
+        audioAnnouncer.enable();
+      } else {
+        audioAnnouncer.disable();
+      }
+    }
+    updateVoiceButtons();
+
+    console.log('[Script] Applied voiceEnabled from config:', configData.voiceEnabled);
+
 
     // Setup pilot color preview
     const colorSelect = document.getElementById('pilotColor');
@@ -670,7 +682,6 @@ onload = async function (e) {
   }
 };
 
-
 function confirmDiscardUnsavedChanges() {
   // If nothing staged, do not prompt
   if (!stagedDirty || !stagedConfig || Object.keys(stagedConfig).length === 0) {
@@ -680,6 +691,33 @@ function confirmDiscardUnsavedChanges() {
   return window.confirm(
     'You have unsaved changes.\n\nClose settings without saving?'
   );
+}
+
+async function saveVoiceEnabledImmediate(enabled) {
+  const patch = { voiceEnabled: enabled ? 1 : 0 };
+
+  if (usbConnected && transportManager) {
+    // USB transport path
+    const res = await transportManager.sendCommand('config', 'POST', patch);
+    console.log('[Config] voiceEnabled saved over USB:', patch, res);
+    return res;
+  }
+
+  // WiFi fetch path
+  const r = await fetch('/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+
+  if (!r.ok) {
+    const t = await r.text().catch(() => '');
+    throw new Error(`saveVoiceEnabledImmediate failed: HTTP ${r.status} ${r.statusText} ${t}`);
+  }
+
+  const json = await r.json().catch(() => null);
+  console.log('[Config] voiceEnabled saved over WiFi:', patch, json);
+  return json;
 }
 
 function setTrackDataSettingsVisible(visible) {
@@ -858,7 +896,6 @@ function createRssiChart() {
   rssiChart.streamTo(document.getElementById("rssiChart"), 200);
 }
 
-
 function openTab(evt, tabName) {
   // Declare all variables
   var i, tabcontent, tablinks;
@@ -876,19 +913,8 @@ function openTab(evt, tabName) {
   }
 
   // Show the current tab, and add an "active" class to the button that opened the tab
-  const tabEl = document.getElementById(tabName);
-  if (tabEl) tabEl.style.display = "block";
-  if (evt && evt.currentTarget) evt.currentTarget.className += " active";
-
-  // IMPORTANT: initialize calibration UI only after tab is visible
-  if (tabName === "calib") {
-    // Defer to next frame so layout has applied display:block
-    requestAnimationFrame(() => {
-      if (typeof initCalibrationTabOnce === 'function') {
-        initCalibrationTabOnce();
-      }
-    });
-  }
+  document.getElementById(tabName).style.display = "block";
+  evt.currentTarget.className += " active";
 
   // if event comes from calibration tab, signal to start sending RSSI events
   if (tabName === "calib" && !rssiSending) {
@@ -911,8 +937,7 @@ function openTab(evt, tabName) {
           if (response.ok) rssiSending = true;
           return response.json();
         })
-        .then((response) => console.log("/timer/rssiStart:" + JSON.stringify(response)))
-        .catch(err => console.error('Failed to start RSSI:', err));
+        .then((response) => console.log("/timer/rssiStart:" + JSON.stringify(response)));
     }
   } else if (rssiSending) {
     if (usbConnected && transportManager) {
@@ -934,17 +959,15 @@ function openTab(evt, tabName) {
           if (response.ok) rssiSending = false;
           return response.json();
         })
-        .then((response) => console.log("/timer/rssiStop:" + JSON.stringify(response)))
-        .catch(err => console.error('Failed to stop RSSI:', err));
+        .then((response) => console.log("/timer/rssiStop:" + JSON.stringify(response)));
     }
   }
-
+  
   // Load race history when opening history tab
   if (tabName === 'history') {
     loadRaceHistory();
   }
 }
-
 
 function updateEnterRssi(obj, value) {
   enterRssi = parseInt(value);
@@ -1728,16 +1751,56 @@ function updateVoiceButtons() {
 
 async function enableAudioLoop() {
   console.log('[Script] Enabling audio...');
+
+  // Runtime enable
   audioEnabled = true;
-  audioAnnouncer.enable();
+  try {
+    audioAnnouncer.enable();
+  } catch (e) {
+    console.error('[Script] audioAnnouncer.enable() failed:', e);
+  }
   updateVoiceButtons();
-  console.log('[Script] Audio enabled, audioEnabled:', audioEnabled);
+
+  // Immediate persist (flash)
+  try {
+    await saveVoiceEnabledImmediate(true);
+
+    // Keep UI model in sync (optional but recommended)
+    if (typeof baselineConfig === 'object' && baselineConfig) baselineConfig.voiceEnabled = 1;
+    if (typeof configData === 'object' && configData) configData.voiceEnabled = 1;
+
+    console.log('[Script] Audio enabled + persisted (voiceEnabled=1)');
+  } catch (e) {
+    console.error('[Script] Failed to persist voiceEnabled=1:', e);
+  }
 }
 
-function disableAudioLoop() {
+async function disableAudioLoop() {
+  console.log('[Script] Disabling audio...');
+
+  // Runtime disable
   audioEnabled = false;
-  audioAnnouncer.disable();
+  try {
+    if (audioAnnouncer && typeof audioAnnouncer.disable === 'function') {
+      audioAnnouncer.disable();
+    }
+  } catch (e) {
+    console.error('[Script] audioAnnouncer.disable() failed:', e);
+  }
   updateVoiceButtons();
+
+  // Immediate persist (flash)
+  try {
+    await saveVoiceEnabledImmediate(false);
+
+    // Keep UI model in sync (optional but recommended)
+    if (typeof baselineConfig === 'object' && baselineConfig) baselineConfig.voiceEnabled = 0;
+    if (typeof configData === 'object' && configData) configData.voiceEnabled = 0;
+
+    console.log('[Script] Audio disabled + persisted (voiceEnabled=0)');
+  } catch (e) {
+    console.error('[Script] Failed to persist voiceEnabled=0:', e);
+  }
 }
 
 // Pilot color preview

@@ -115,6 +115,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["pilotColor"] = conf.pilotColor;
     config["theme"] = conf.theme;
     config["selectedVoice"] = conf.selectedVoice;
+    config["voiceEnabled"] = conf.voiceEnabled;
     config["lapFormat"] = conf.lapFormat;
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
@@ -346,6 +347,11 @@ void Config::fromJson(JsonObject source) {
 
     if (source.containsKey("theme"))        setStr("theme",        conf.theme,        sizeof(conf.theme));
     if (source.containsKey("selectedVoice"))setStr("selectedVoice",conf.selectedVoice,sizeof(conf.selectedVoice));
+    if (source.containsKey("voiceEnabled")) {
+        int ve = source["voiceEnabled"].as<int>();
+        uint8_t nve = (ve != 0) ? 1 : 0;
+        if (conf.voiceEnabled != nve) { conf.voiceEnabled = nve; modified = true; }
+    }
     if (source.containsKey("lapFormat"))    setStr("lapFormat",    conf.lapFormat,    sizeof(conf.lapFormat));
 
     // ===== WiFi credentials (CRITICAL: must be guarded) =====
@@ -685,6 +691,10 @@ char* Config::getSelectedVoice() {
     return conf.selectedVoice;
 }
 
+uint8_t Config::getVoiceEnabled() {
+    return conf.webhookLap;
+}
+
 char* Config::getLapFormat() {
     return conf.lapFormat;
 }
@@ -802,6 +812,13 @@ void Config::setWebhooksEnabled(uint8_t enabled) {
     }
 }
 
+void Config::setVoiceEnabled(uint8_t enabled) {
+    if (conf.voiceEnabled != enabled) {
+        conf.voiceEnabled = enabled;
+        modified = true;
+    }
+}
+
 bool Config::addWebhookIP(const char* ip) {
     if (conf.webhookCount >= 10) {
         DEBUG("Max webhooks reached\n");
@@ -912,6 +929,7 @@ void Config::setDefaults(void) {
     conf.pilotColor = 0x0080FF;  // Default blue color
     strlcpy(conf.theme, "oceanic", sizeof(conf.theme));  // Default theme
     strlcpy(conf.selectedVoice, "piper", sizeof(conf.selectedVoice));  // Default voice
+    conf.voiceEnabled = 1;   // default ON 
     strlcpy(conf.lapFormat, "timeonly", sizeof(conf.lapFormat));  // Default lap format
     strlcpy(conf.ssid, "", sizeof(conf.ssid));  // Empty WiFi credentials
     strlcpy(conf.password, "", sizeof(conf.password));  // Empty WiFi credentials
