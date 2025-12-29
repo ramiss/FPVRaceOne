@@ -670,6 +670,7 @@ onload = async function (e) {
   }
 };
 
+
 function confirmDiscardUnsavedChanges() {
   // If nothing staged, do not prompt
   if (!stagedDirty || !stagedConfig || Object.keys(stagedConfig).length === 0) {
@@ -857,6 +858,7 @@ function createRssiChart() {
   rssiChart.streamTo(document.getElementById("rssiChart"), 200);
 }
 
+
 function openTab(evt, tabName) {
   // Declare all variables
   var i, tabcontent, tablinks;
@@ -874,8 +876,19 @@ function openTab(evt, tabName) {
   }
 
   // Show the current tab, and add an "active" class to the button that opened the tab
-  document.getElementById(tabName).style.display = "block";
-  evt.currentTarget.className += " active";
+  const tabEl = document.getElementById(tabName);
+  if (tabEl) tabEl.style.display = "block";
+  if (evt && evt.currentTarget) evt.currentTarget.className += " active";
+
+  // IMPORTANT: initialize calibration UI only after tab is visible
+  if (tabName === "calib") {
+    // Defer to next frame so layout has applied display:block
+    requestAnimationFrame(() => {
+      if (typeof initCalibrationTabOnce === 'function') {
+        initCalibrationTabOnce();
+      }
+    });
+  }
 
   // if event comes from calibration tab, signal to start sending RSSI events
   if (tabName === "calib" && !rssiSending) {
@@ -898,7 +911,8 @@ function openTab(evt, tabName) {
           if (response.ok) rssiSending = true;
           return response.json();
         })
-        .then((response) => console.log("/timer/rssiStart:" + JSON.stringify(response)));
+        .then((response) => console.log("/timer/rssiStart:" + JSON.stringify(response)))
+        .catch(err => console.error('Failed to start RSSI:', err));
     }
   } else if (rssiSending) {
     if (usbConnected && transportManager) {
@@ -920,15 +934,17 @@ function openTab(evt, tabName) {
           if (response.ok) rssiSending = false;
           return response.json();
         })
-        .then((response) => console.log("/timer/rssiStop:" + JSON.stringify(response)));
+        .then((response) => console.log("/timer/rssiStop:" + JSON.stringify(response)))
+        .catch(err => console.error('Failed to stop RSSI:', err));
     }
   }
-  
+
   // Load race history when opening history tab
   if (tabName === 'history') {
     loadRaceHistory();
   }
 }
+
 
 function updateEnterRssi(obj, value) {
   enterRssi = parseInt(value);
