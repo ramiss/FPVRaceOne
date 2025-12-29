@@ -380,7 +380,7 @@
               <div class="config-item">
                 <label for="maxLaps">Number of Laps:</label>
                 <div class="input-with-value">
-                  <span class="val">Inf.</span>
+                  <span class="val">Infinite  </span>
                   <input type="range" id="maxLaps" step="1" min="0" max="50" value="0" oninput="updateMaxLaps(this,value)" />
                 </div>
               </div>
@@ -822,51 +822,52 @@
             <!-- System Section -->
             <div id="settings-system" class="settings-section">
               <h2>System Settings</h2>
-              <!--
-              <h3 style="margin-top: 0;">Battery Monitoring</h3>
-              <div id="batteryMonitoringUnavailableNote" style="display:none; margin-top:8px; opacity:0.85;">
-                Battery monitoring is not available on this hardware build.
-              </div>
-              <div class="config-item">
-                <label for="batteryMonitorToggle">Battery Monitoring:</label>
-                <div style="flex: 1;">
-                  <label class="switch">
-                    <input type="checkbox" id="batteryMonitorToggle" onchange="toggleBatteryMonitor(this.checked)">
-                    <span class="slider"></span>
-                  </label>
+              <!-- Comment out Battery Monitoring Section because it is not supported on this hardware -->
+              <div style="display:none">
+                <h3 style="margin-top: 0;">Battery Monitoring</h3>
+                <div id="batteryMonitoringUnavailableNote" style="display:none; margin-top:8px; opacity:0.85;">
+                  Battery monitoring is not available on this hardware build.
                 </div>
-              </div>
-
-              <div id="batteryMonitoringSection" style="display: none;">
                 <div class="config-item">
-                  <label for="alarmThreshold">Low Battery Alarm:</label>
-                  <div class="input-with-value">
-                    <span class="val">3.6v</span>
-                    <input type="range" id="alarmThreshold" step="0.1" min="0.0" max="3.6" oninput="updateAlarmThreshold(this,value)" />
+                  <label for="batteryMonitorToggle">Battery Monitoring:</label>
+                  <div style="flex: 1;">
+                    <label class="switch">
+                      <input type="checkbox" id="batteryMonitorToggle" onchange="toggleBatteryMonitor(this.checked)">
+                      <span class="slider"></span>
+                    </label>
                   </div>
                 </div>
 
-                <div class="config-item">
-                  <label for="bvolt">Battery Voltage:</label>
-                  <span class="val" id="bvolt">--</span>
+                <div id="batteryMonitoringSection" style="display: none;">
+                  <div class="config-item">
+                    <label for="alarmThreshold">Low Battery Alarm:</label>
+                    <div class="input-with-value">
+                      <span class="val">3.6v</span>
+                      <input type="range" id="alarmThreshold" step="0.1" min="0.0" max="3.6" oninput="updateAlarmThreshold(this,value)" />
+                    </div>
+                  </div>
+
+                  <div class="config-item">
+                    <label for="bvolt">Battery Voltage:</label>
+                    <span class="val" id="bvolt">--</span>
+                  </div>
                 </div>
               </div>
-              -->
-              <!--
-              // not implemented yet - and likely not needed for this hardware with PCB antenna
-              <h3 style="margin-top: 0;">RSSI Detection</h3>
-              <div class="config-item">
-                <label for="rssiSensitivity">RSSI Sensitivity:</label>
-                <select id="rssiSensitivity" onchange="autoSaveConfig()">
-                  <option value="0">Normal (Legacy)</option>
-                  <option value="1" selected>High (1.5x Boost)</option>
-                </select>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                High sensitivity provides better weak signal detection. Use Normal if experiencing false triggers.
-              </div>
-              -->
 
+              <!-- Comment out RSSI Detection Section because it is not supported on this hardware -->
+              <div style="display:none">
+                <h3 style="margin-top: 0;">RSSI Detection</h3>
+                <div class="config-item">
+                  <label for="rssiSensitivity">RSSI Sensitivity:</label>
+                  <select id="rssiSensitivity" onchange="autoSaveConfig()">
+                    <option value="0">Normal (Legacy)</option>
+                    <option value="1" selected>High (1.5x Boost)</option>
+                  </select>
+                </div>
+                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                  High sensitivity provides better weak signal detection. Use Normal if experiencing false triggers.
+                </div>
+              </div>
               <h3>Appearance</h3>
               <div class="config-item">
                 <label for="themeSelect">Theme:</label>
