@@ -8,6 +8,12 @@ KalmanFilter::KalmanFilter() {
     A = 1;
     B = 0;
     C = 1;
+
+    // Ensure the filter starts in a known "uninitialized" state.
+    // If x/cov are left uninitialized, they may contain garbage and the
+    // filter can output incorrect values (which can cause false triggers).
+    x = NAN;
+    cov = NAN;
 }
 
 float KalmanFilter::filter(uint16_t z, uint16_t u = 0) {

@@ -60,12 +60,25 @@ class LapTimer {
     uint8_t rssiCount;
     uint32_t lapTimes[LAPTIMER_LAP_HISTORY];
     uint8_t rssi[LAPTIMER_RSSI_HISTORY];
-    uint8_t rssi_window[5];  // Small window for moving average
+    uint8_t rssi_window[7];  // Medium window for moving average (5 is lower latency)
     uint8_t rssi_window_index;
+    uint8_t lastLpRssi;
 
     uint8_t rssiPeak;
     uint32_t rssiPeakTimeMs;
-    bool gateExited;  // Track if drone has fully exited gate after lap
+
+    // Gate state tracking / debounce helpers
+    bool gateExited;          // True when we're confidently outside the gate region
+    bool enteredGate;         // True once we have crossed the enter threshold
+    uint8_t enterHoldSamples; // Number of consecutive samples at/above enter
+    uint32_t enterHoldStartMs;
+
+    // Debug helpers (last processed RSSI chain)
+    uint8_t lastRawRssi;
+    uint8_t lastKalmanRssi;
+    uint8_t lastAvgRssi;
+    uint8_t prevAvgRssi;
+    uint32_t lastRaceDebugPrintMs;
 
     bool lapAvailable = false;
     
