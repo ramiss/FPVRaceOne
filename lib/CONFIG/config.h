@@ -47,7 +47,8 @@
 // FPV Scanner Hardware (XIAO ESP32C6)
 #elif defined(APP_BOARD_XIAO_C6)
 
-#define USE_EXT_ANTENNA true
+#define USE_EXT_ANTENNA false
+#define WIFI_POWER WIFI_POWER_21dBm    // Max power for AP mode to improve range
 //#define PIN_LED 0
 //#define PIN_VBAT 35
 //#define VBAT_SCALE 2

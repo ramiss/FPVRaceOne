@@ -68,7 +68,7 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     WiFi.mode(WIFI_OFF);
     // Reduce TX power to prevent boot-looping in AP mode due to power consumption
     // WIFI_POWER_11dBm provides good range while keeping power consumption manageable
-    WiFi.setTxPower(WIFI_POWER_11dBm);
+    WiFi.setTxPower(WIFI_POWER);
     esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
     esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_LR);
     if (conf->getSsid()[0] == 0) {
@@ -190,7 +190,7 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 
                 // Power-saving settings for AP mode to prevent boot-looping
                 // Reduce TX power specifically for AP mode (already set globally but ensure it's applied)
-                WiFi.setTxPower(WIFI_POWER_11dBm);
+                WiFi.setTxPower(WIFI_POWER);
                 
                 //WiFi.softAPConfig(ipAddress, ipAddress, netMsk);
                 // Advertise NO default gateway. Helps Android keep cellular data for internet.
