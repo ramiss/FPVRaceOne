@@ -413,6 +413,8 @@ onload = async function (e) {
   // Load dark mode preference
   loadDarkMode();
 
+  loadFirmwareVersion();
+
   config.style.display = "none";
   race.style.display = "block";
   calib.style.display = "none";
@@ -420,7 +422,7 @@ onload = async function (e) {
   attachConfigStagingListeners();
 
   // Initialize transport (USB/WiFi)
-  await initializeTransport();
+  await initializeTransport(); 
 
   // IMPORTANT: Load race history immediately so the Race tab banner + History tab label
   // can reflect SD vs RAM-only mode on first landing.
@@ -1364,7 +1366,19 @@ function updateChannelOptionsForBand(bandIndex = bandSelect.selectedIndex) {
   }
 }
 
-
+async function loadFirmwareVersion() {
+  try {
+    const r = await fetch('/api/version');
+    if (!r.ok) return;
+    const data = await r.json();
+    const el = document.getElementById('firmwareVersion');
+    if (el && data && data.firmwareVersion) {
+      el.textContent = `FPVGate Personal Lap Timer. v${data.firmwareVersion}`;
+    }
+  } catch (e) {
+    console.warn('[UI] Failed to load firmware version:', e);
+  }
+}
 
 function populateFreqOutput() {
   if (!bandSelect || !channelSelect) return;
@@ -3628,39 +3642,62 @@ function wizardRecordingLoop() {
     });
 }
 
-function stopCalibrationWizard() {
+async function stopCalibrationWizard() {
   wizardState.recording = false;
-  
-  fetch('/calibration/stop', { method: 'POST' })
-    .then(response => response.json())
-    .then(() => {
-      // Fetch recorded data
-      return fetch('/calibration/data');
-    })
-    .then(response => response.json())
-    .then(data => {
-      console.log('Calibration data received:', data.count, 'samples');
-      wizardState.data = data.data;
-      
-      if (wizardState.data.length < 10) {
-        alert('Not enough data recorded. Please try again with at least 3 clear gate passes.');
-        closeCalibrationWizard();
-        return;
+
+  try {
+    const resp = await fetch('/calibration/stop', { method: 'POST' });
+
+    if (!resp.ok) {
+      // Try to read text to help debugging; may be empty
+      const t = await resp.text().catch(() => '');
+      throw new Error(`POST /calibration/stop failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
+    }
+
+    // Only parse JSON if there is actually a JSON body
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    if (ct.includes('application/json')) {
+      // Some servers still send application/json with empty body; guard that too
+      const txt = await resp.text();
+      if (txt && txt.trim().length) {
+        JSON.parse(txt); // we don't actually use it, just validate
       }
-      
-      // Show marking screen
-      document.getElementById('wizardRecording').style.display = 'none';
-      document.getElementById('wizardMarking').style.display = 'block';
-      
-      // Draw chart
-      drawWizardChart();
-    })
-    .catch(error => {
-      console.error('Error stopping calibration wizard:', error);
-      alert('Error processing calibration data');
+    } else {
+      // Not JSON (or empty) — that's fine.
+      // If it’s truly empty, resp.text() above would be empty anyway.
+      // We intentionally do nothing here.
+    }
+
+    // Fetch recorded data
+    const dataResp = await fetch('/calibration/data');
+    if (!dataResp.ok) {
+      const t = await dataResp.text().catch(() => '');
+      throw new Error(`GET /calibration/data failed: HTTP ${dataResp.status} ${dataResp.statusText} ${t}`);
+    }
+
+    const data = await dataResp.json();
+    console.log('Calibration data received:', data.count, 'samples');
+    wizardState.data = data.data;
+
+    if (!Array.isArray(wizardState.data) || wizardState.data.length < 10) {
+      alert('Not enough data recorded. Please try again with at least 3 clear gate passes.');
       closeCalibrationWizard();
-    });
+      return;
+    }
+
+    // Show marking screen
+    document.getElementById('wizardRecording').style.display = 'none';
+    document.getElementById('wizardMarking').style.display = 'block';
+
+    // Draw chart
+    drawWizardChart();
+  } catch (error) {
+    console.error('Error stopping calibration wizard:', error);
+    alert('Error processing calibration data');
+    closeCalibrationWizard();
+  }
 }
+
 
 function drawWizardChart() {
   const canvas = document.getElementById('wizardChart');

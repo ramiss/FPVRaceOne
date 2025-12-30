@@ -5,21 +5,8 @@
 #include <AsyncJson.h>
 #include <stdint.h>
 
-/*
-## Pinout ##
-| ESP32 | RX5880 |
-| :------------- |:-------------|
-| 33 | RSSI |
-| GND | GND |
-| 19 | CH1 |
-| 22 | CH2 |
-| 23 | CH3 |
-| 3V3 | +5V |
-
-* **Led** goes to pin 21 and GND
-* The optional **Buzzer** goes to pin 25 or 27 and GND
-
-*/
+// Firmware version (update for each release)
+#define FIRMWARE_VERSION "1.0.0"
 
 //ESP23-C3
 #if defined(ESP32C3)

@@ -10,8 +10,8 @@ extern "C" {
   #include "lwip/netif.h"
 }
 #include "esp_netif.h"
-
 #include "debug.h"
+#include "config.h"
 
 #ifdef ESP32S3
 #include "rgbled.h"
@@ -396,6 +396,11 @@ void Webserver::startServices() {
     server.on("/check_network_status.txt", handleRoot);
     server.on("/ncsi.txt", handleRoot);
     server.on("/fwlink", handleRoot);
+
+    server.on("/api/version", HTTP_GET, [](AsyncWebServerRequest *request) {
+        String json = String("{\"firmwareVersion\":\"") + FIRMWARE_VERSION + "\"}";
+        request->send(200, "application/json", json);
+    });
 
     server.on("/status", [this](AsyncWebServerRequest *request) {
         char buf[1536];

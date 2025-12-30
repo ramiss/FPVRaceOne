@@ -234,7 +234,13 @@
 
     </main>
 
-    <footer></footer>
+    <footer>
+      <div class="footer-bar" style="display:flex; align-items:center; justify-content:center; padding: 4px 12px;">
+        <span id="firmwareVersion" style="font-size: 12px; opacity: 0.85;">
+          FPVGate Personal Lap Timer. v —
+        </span>
+      </div>
+    </footer>
 
     <!-- Edit Race Modal -->
     <div id="editRaceModal" class="modal" style="display: none;" onclick="closeEditModalOnBackdrop(event)">
@@ -912,6 +918,9 @@
                 <label>Firmware Update:</label>
                 <a href="/update" target="_blank" class="update-link">Open Update Page</a>
               </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                Make sure to upload both the firmware and LittleFS images on the next page by choosing the correct option in the OTA Mode dropdown for each file.
+              </div>
             </div>
 
             <!-- Diagnostics Section -->
@@ -987,7 +996,6 @@
         </div>
       </div>
     </div>
-
     <script src="script.js"></script>
   </body>
 </html>
