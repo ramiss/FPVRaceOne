@@ -109,7 +109,7 @@ static void initParallelTask() {
 void setup() {
 
     // set antenna option
-    #ifdef USE_EXT_ANTENNA
+    if (USE_EXT_ANTENNA) {
         pinMode(WIFI_ENABLE, OUTPUT); // pinMode(3, OUTPUT);
         digitalWrite(WIFI_ENABLE, LOW); // digitalWrite(3, LOW); // Activate RF switch control
 
@@ -117,7 +117,7 @@ void setup() {
 
         pinMode(WIFI_ANT_CONFIG, OUTPUT); // pinMode(14, OUTPUT);
         digitalWrite(WIFI_ANT_CONFIG, HIGH); // digitalWrite(14, HIGH); // Use external antenna
-    #endif
+    }
 
 
     // ====================================================================

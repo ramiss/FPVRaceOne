@@ -12,6 +12,8 @@ let stagedConfig = {};
 let stagedDirty = false;    
 let settingsLoading = false;         // true while we are populating UI from device config
 let baselineConfig = {};             // last config loaded from device (for "same value" comparisons)
+let scannerPaused = false;
+const SCANNER_BUFFER_WHILE_PAUSED = false;
 
 const bcf = document.getElementById("bandChannelFreq");
 const bandSelect = document.getElementById("bandSelect");
@@ -855,10 +857,46 @@ async function getBatteryVoltage() {
 
 setInterval(getBatteryVoltage, 2000);
 
+// --- Calibration scanner pause (graphics only; incoming samples discarded) ---
+let rssiPaused = false;
+
+function setRssiPaused(paused) {
+  rssiPaused = !!paused;
+
+  // Update button label if it exists
+  const btn = document.getElementById('pauseCalibBtn');
+  if (btn) btn.textContent = rssiPaused ? 'Resume Scanner' : 'Pause Scanner';
+
+  // Freeze/Resume rendering
+  if (rssiChart) {
+    if (rssiPaused) rssiChart.stop();
+    else rssiChart.start();
+  }
+
+  // IMPORTANT: do not buffer while paused
+  // Drop any queued values so we resume with "next actual reading"
+  if (rssiPaused && Array.isArray(rssiBuffer)) {
+    rssiBuffer.length = 0;
+  }
+}
+
+function toggleRssiPaused() {
+  setRssiPaused(!rssiPaused);
+}
+
+
 function addRssiPoint() {
   if (!rssiChart) return; // Chart not initialized yet
   
   if (calib.style.display != "none") {
+
+    // If paused, freeze chart and discard incoming samples (no catch-up)
+    if (rssiPaused) {
+      rssiChart.stop();
+      if (rssiBuffer.length > 0) rssiBuffer.length = 0;
+      return;
+    }
+
     rssiChart.start();
     if (rssiBuffer.length > 0) {
       rssiValue = parseInt(rssiBuffer.shift());
@@ -944,6 +982,19 @@ function openTab(evt, tabName) {
 
   // Show the current tab, and add an "active" class to the button that opened the tab
   document.getElementById(tabName).style.display = "block";
+
+  // Hook pause button when entering Calibration tab
+  if (tabName === "calib") {
+    const btn = document.getElementById('pauseCalibBtn');
+    if (btn && !btn.dataset.bound) {
+      btn.dataset.bound = "1";
+      btn.addEventListener('click', toggleRssiPaused);
+      // Ensure label is correct on entry
+      btn.textContent = rssiPaused ? 'Resume' : 'Pause';
+    }
+  }
+
+
   evt.currentTarget.className += " active";
 
   // if event comes from calibration tab, signal to start sending RSSI events
@@ -4009,43 +4060,148 @@ function calculateThresholds() {
     alert('Please mark all 3 peaks before calculating thresholds');
     return;
   }
-  
-  // Get peak RSSI values
-  const peakRssiValues = wizardState.markers.map(m => wizardState.data[m.index].rssi);
-  
-  // Calculate baseline RSSI (minimum value from all data)
-  const allRssiValues = wizardState.data.map(d => d.rssi);
-  const baselineRssi = Math.min(...allRssiValues);
-  
-  // Calculate average peak
-  const avgPeakRssi = peakRssiValues.reduce((a, b) => a + b, 0) / peakRssiValues.length;
-  
-  // Calculate thresholds as drops from peak (more intuitive and accurate)
-  // Enter: 25% down from peak (catches rising edge well into the spike)
-  // Exit: 40% down from peak (catches falling edge, still above baseline)
-  // This typically results in ~20-30 RSSI difference between entry and exit
-  const peakRange = avgPeakRssi - baselineRssi;
-  let calculatedEnter = Math.round(avgPeakRssi - (peakRange * 0.25));
-  let calculatedExit = Math.round(avgPeakRssi - (peakRange * 0.40));
-  
-  // Ensure enter > exit with minimum gap and both above baseline
-  calculatedExit = Math.max(baselineRssi + 5, calculatedExit);
-  if (calculatedEnter <= calculatedExit) {
-    calculatedEnter = calculatedExit + 20;
+
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  function windowMin(a, b) {
+    a = Math.max(0, Math.min(a, wizardState.data.length - 1));
+    b = Math.max(0, Math.min(b, wizardState.data.length - 1));
+    if (b < a) [a, b] = [b, a];
+    let m = Infinity;
+    for (let i = a; i <= b; i++) m = Math.min(m, wizardState.data[i].rssi);
+    return m;
   }
-  
-  // Clamp to valid range
-  calculatedEnter = Math.max(50, Math.min(255, calculatedEnter));
-  calculatedExit = Math.max(50, Math.min(255, calculatedExit));
-  
-  // Store calculated values
+
+  function windowMax(a, b) {
+    a = Math.max(0, Math.min(a, wizardState.data.length - 1));
+    b = Math.max(0, Math.min(b, wizardState.data.length - 1));
+    if (b < a) [a, b] = [b, a];
+    let m = -Infinity;
+    for (let i = a; i <= b; i++) m = Math.max(m, wizardState.data[i].rssi);
+    return m;
+  }
+
+  // Markers in time order
+  const markers = [...wizardState.markers].sort((a, b) => a.index - b.index);
+
+  const allRssiValues = wizardState.data.map(d => d.rssi);
+  const globalBaseline = Math.min(...allRssiValues);
+
+  // --- Tunables aligned to your goals ---
+  const PEAK_HALF_WINDOW = 20;      // re-find true peak near click
+  const EDGE_GUARD = 10;            // exclude immediate peak area
+  const VALLEY_SEARCH_SPAN = 180;   // valley window between peaks
+  const MIN_AMPLITUDE = 15;         // if peak-valley too small, fall back
+
+  // Enter near peak: 0.75..0.90 is typical. Higher = closer to peak.
+  const ENTER_FRAC_HIGH = 0.90;
+
+  // Exit close to enter: fraction of amplitude below enter.
+  // Smaller = closer (less hysteresis), but risk chatter/false exit.
+  const EXIT_DELTA_FRAC = 0.08;
+
+  // Minimum absolute gap between enter and exit (in RSSI units)
+  const MIN_GAP = 10;
+
+  // Keep exit above valley by at least this margin to avoid dip/noise chatter
+  const VALLEY_MARGIN = 4;
+
+  // Clamp thresholds into UI range
+  const MIN_RSSI = 50;
+  const MAX_RSSI = 255;
+
+  // 1) Recompute peaks near each marker
+  const peakInfo = markers.map(m => {
+    const idx = m.index;
+    const peak = windowMax(idx - PEAK_HALF_WINDOW, idx + PEAK_HALF_WINDOW);
+    return { idx, peak };
+  });
+
+  // 2) Valleys between peaks (and pre/post)
+  function valleyBetween(i, j) {
+    const left = peakInfo[i].idx;
+    const right = peakInfo[j].idx;
+    const start = left + EDGE_GUARD;
+    const end = right - EDGE_GUARD;
+    if (end <= start) return globalBaseline;
+
+    const mid = Math.floor((left + right) / 2);
+    const a = Math.max(start, mid - Math.floor(VALLEY_SEARCH_SPAN / 2));
+    const b = Math.min(end, mid + Math.floor(VALLEY_SEARCH_SPAN / 2));
+    return windowMin(a, b);
+  }
+
+  const preValley = windowMin(0, Math.max(0, peakInfo[0].idx - EDGE_GUARD));
+  const postValley = windowMin(Math.min(wizardState.data.length - 1, peakInfo[2].idx + EDGE_GUARD), wizardState.data.length - 1);
+  const v01 = valleyBetween(0, 1);
+  const v12 = valleyBetween(1, 2);
+
+  const localValleys = [
+    Math.min(preValley, v01),
+    Math.min(v01, v12),
+    Math.min(v12, postValley)
+  ].map(v => Math.max(v, globalBaseline));
+
+  // 3) Compute per-pass enter/exit candidates
+  const enterCandidates = [];
+  const exitCandidates = [];
+
+  for (let i = 0; i < 3; i++) {
+    const peak = peakInfo[i].peak;
+    const valley = localValleys[i];
+    const amp = peak - valley;
+
+    if (amp < MIN_AMPLITUDE) {
+      // Fallback: use global range but still keep "enter high" and "exit close"
+      const globalRange = (Math.max(...allRssiValues) - globalBaseline) || 1;
+      const enter = Math.round(globalBaseline + globalRange * 0.80);
+      const exit = Math.max(globalBaseline + VALLEY_MARGIN, enter - Math.max(MIN_GAP, Math.round(globalRange * 0.10)));
+      enterCandidates.push(enter);
+      exitCandidates.push(exit);
+      continue;
+    }
+
+    // Enter near peak but still tied to local valley+amplitude
+    const enter = Math.round(valley + amp * ENTER_FRAC_HIGH);
+
+    // Exit close to enter (small hysteresis), but not allowed to drop into valley noise
+    const delta = Math.max(MIN_GAP, Math.round(amp * EXIT_DELTA_FRAC));
+    const exit = Math.max(valley + VALLEY_MARGIN, enter - delta);
+
+    enterCandidates.push(enter);
+    exitCandidates.push(exit);
+  }
+
+  // 4) Choose final thresholds for consistency across all 3 passes
+  // Enter: pick the LOWEST of the "high" enters so all three passes can hit it.
+  let calculatedEnter = Math.min(...enterCandidates);
+
+  // Exit: keep it as CLOSE as possible to enter, but ensure it will still be hit reliably.
+  // Using min(exitCandidates) makes it easiest to drop below on all 3 passes.
+  let calculatedExit = Math.min(...exitCandidates);
+
+  // Ensure exit is close to enter (but still below)
+  calculatedExit = Math.min(calculatedExit, calculatedEnter - MIN_GAP);
+
+  // Guardrails
+  calculatedExit = Math.max(globalBaseline + VALLEY_MARGIN, calculatedExit);
+  calculatedEnter = Math.max(calculatedExit + MIN_GAP, calculatedEnter);
+
+  // Clamp
+  calculatedEnter = clamp(calculatedEnter, MIN_RSSI, MAX_RSSI);
+  calculatedExit = clamp(calculatedExit, MIN_RSSI, MAX_RSSI);
+
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit = calculatedExit;
-  
-  // Show results screen
+
+  console.log('[Wizard] peaks:', peakInfo.map(p => p.peak));
+  console.log('[Wizard] valleys:', localValleys);
+  console.log('[Wizard] enterCandidates:', enterCandidates, 'exitCandidates:', exitCandidates);
+  console.log('[Wizard] final:', { enter: calculatedEnter, exit: calculatedExit, globalBaseline });
+
+  // Show results
   document.getElementById('wizardMarking').style.display = 'none';
   document.getElementById('wizardResults').style.display = 'block';
-  
   document.getElementById('calculatedEnterRssi').textContent = calculatedEnter;
   document.getElementById('calculatedExitRssi').textContent = calculatedExit;
 }
