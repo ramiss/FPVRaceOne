@@ -83,15 +83,28 @@ static void parallelTask(void *pvArgs) {
         rx.handleFrequencyChange(currentTimeMs, config.getFrequency());
         // Battery monitoring removed
         // monitor.checkBatteryState(currentTimeMs, config.getAlarmThreshold());
-        buzzer.handleBuzzer(currentTimeMs);
-        led.handleLed(currentTimeMs);
+        
+        // Let other tasks run (WiFi/AsyncWebServer/etc.)
+        vTaskDelay(1);
     }
 }
 
 static void initParallelTask() {
     disableCore0WDT();
-    xTaskCreatePinnedToCore(parallelTask, "parallelTask", 8192, NULL, 0, &xTimerTask, 0);
+
+    // Priority 2 so it reliably runs even when loop() is busy.
+    // (Arduino loop task is typically priority 1.)
+    xTaskCreatePinnedToCore(
+        parallelTask,
+        "parallelTask",
+        8192,
+        NULL,
+        2,
+        &xTimerTask,
+        0
+    );
 }
+
 
 void setup() {
 
@@ -277,10 +290,15 @@ void loop() {
     // LED Flashing
     static bool led_on = false;
     static uint32_t t = 0;
-    if (currentTimeMs - t > 500) {
-        t = millis();
-        led_on = !led_on;
-        digitalWrite(LED_BUILTIN, led_on ? HIGH : LOW);
+    
+    if (ws.servicesStarted) {
+        if (currentTimeMs - t > 500) {
+            t = millis();
+            led_on = !led_on;
+            digitalWrite(LED_BUILTIN, led_on ? HIGH : LOW);
+        }
+    } else {
+        digitalWrite(LED_BUILTIN, HIGH); // LED off when services not started
     }
     
     // Timing always runs
@@ -367,4 +385,6 @@ void loop() {
         monitor.checkBatteryState(currentTimeMs, config.getAlarmThreshold());
     }
     */
+
+    vTaskDelay(1); // so we don't hog the CPU
 }

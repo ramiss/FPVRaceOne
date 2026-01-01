@@ -438,6 +438,12 @@ EEPROM:\n\
         led->on(200);
     });
 
+    server.on("/tuningstatus", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        const char* status = (rx && rx->isSettingFrequency()) ? "setting" : "idle";
+        String json = String("{\"tuningstatus\":\"") + status + "\"}";
+        request->send(200, "application/json", json);
+    });
+
     server.on("/timer/start", HTTP_POST, [this](AsyncWebServerRequest *request) {
         timer->start();
         if (transportMgr) {

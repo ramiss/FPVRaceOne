@@ -18,6 +18,7 @@ public:
     }
     
     void log(const char* format, ...) {
+        vTaskDelay(50); // small delay to allow other tasks to run
         va_list args;
         va_start(args, format);
         

@@ -30,18 +30,32 @@ void RX5808::init() {
 }
 
 void RX5808::handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyNewFreq) {
-    if ((currentFrequency != potentiallyNewFreq) && ((currentTimeMs - lastSetFreqTimeMs) > RX5808_MIN_BUSTIME)) {
+    // If a frequency change is requested and bus is free, program it
+    if ((currentFrequency != potentiallyNewFreq) &&
+        ((currentTimeMs - lastSetFreqTimeMs) > RX5808_MIN_BUSTIME)) {
+        settingFrequency = true;
+        // Start timing window from the moment we issued the write
         lastSetFreqTimeMs = currentTimeMs;
+
         setFrequency(potentiallyNewFreq);
+        // setFrequency() sets recentSetFreqFlag = true
+        return; // avoid falling through and "tune done" on the same tick
     }
 
-    if (recentSetFreqFlag && (currentTimeMs - lastSetFreqTimeMs) > RX5808_MIN_TUNETIME) {
-        lastSetFreqTimeMs = currentTimeMs;
-        DEBUG("RX5808 Tune done\n");
-        verifyFrequency();
-        recentSetFreqFlag = false;  // don't need to check again until next freq change
+    // If we recently set frequency, wait for tune time then verify once
+    if (recentSetFreqFlag) {
+        const uint32_t dt = currentTimeMs - lastSetFreqTimeMs;
+        if (dt > RX5808_MIN_TUNETIME + 100) {
+            DEBUG("RX5808 Tune done: %u\n", currentFrequency);
+            verifyFrequency();     // NOTE: consider making this debug-only if flaky
+
+            settingFrequency = false;
+            recentSetFreqFlag = false;  // don't need to check again until next freq change
+            // Do NOT update lastSetFreqTimeMs here; it is used as the write timestamp
+        }
     }
 }
+
 
 bool RX5808::verifyFrequency() {
     // Start of Read Reg code :
@@ -94,13 +108,14 @@ bool RX5808::verifyFrequency() {
         DEBUG("RX5808 frequency not matching, register = %u, currentFreq = %u\n", vtxRegisterHex, currentFrequency);
         return false;
     }
-    DEBUG("RX5808 frequency verified properly\n");
+    DEBUG("RX5808 frequency verified properly %u\n", currentFrequency);
     return true;
 }
 
 // Set frequency on RX5808 module to given value
 void RX5808::setFrequency(uint16_t vtxFreq) {
-    DEBUG("Setting frequency to %u\n", vtxFreq);
+    vTaskDelay(50); // small delay before changing frequency
+    DEBUG("RX5808 Setting frequency to %u\n", vtxFreq);
 
     currentFrequency = vtxFreq;
 
@@ -151,6 +166,10 @@ void RX5808::setFrequency(uint16_t vtxFreq) {
     digitalWrite(rx5808DataPin, LOW);
 
     recentSetFreqFlag = true;  // indicate need to wait RX5808_MIN_TUNETIME before reading RSSI
+}
+
+bool RX5808::isSettingFrequency() {
+    return settingFrequency;
 }
 
 // Read the RSSI value

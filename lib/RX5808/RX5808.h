@@ -16,6 +16,7 @@ class RX5808 {
     uint8_t readRssi();
     void handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyNewFreq);
     bool verifyFrequency();
+    bool isSettingFrequency();
     bool recentSetFreqFlag = false;
 
    private:
@@ -25,6 +26,7 @@ class RX5808 {
     uint8_t rssiInputPin = 0;   // RSSI input from RX5808
 
     uint16_t currentFrequency = 0;
+    bool settingFrequency = false;
 
     bool rxPoweredDown = false;
     uint32_t lastSetFreqTimeMs = 0;

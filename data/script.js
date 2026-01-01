@@ -409,6 +409,31 @@ async function selectComPort() {
   await connectUSB(portPath);
 }
 
+async function checkTuningStatusOnStartup() {
+  try {
+    const r = await fetch('/tuningstatus', { cache: 'no-store' });
+    if (!r.ok) {
+      console.warn('[Startup] /tuningstatus HTTP', r.status);
+      return;
+    }
+
+    const data = await r.json();
+    console.log('[Startup] tuningstatus:', data.tuningstatus);
+
+    if (data.tuningstatus === 'setting') {
+      if (typeof showCalibrationBanner === 'function') {
+        showCalibrationBanner();
+      } else {
+        console.warn('[Startup] showCalibrationBanner() not defined');
+      }
+    }
+  } catch (e) {
+    // Fail silently — startup should not break if this endpoint is unavailable
+    console.warn('[Startup] tuningstatus check failed:', e);
+  }
+}
+
+
 onload = async function (e) {
   // Load dark mode preference
   loadDarkMode();
@@ -682,6 +707,9 @@ onload = async function (e) {
       rssiSensitivitySelect.value = configData.rssiSens;
     }
   }
+
+  checkTuningStatusOnStartup();
+
 };
 
 function confirmDiscardUnsavedChanges() {
@@ -3638,7 +3666,7 @@ function wizardRecordingLoop() {
       }
     })
     .catch(error => {
-      console.error('Error fetching calibration data:', error);
+      console.error('[wizardRecordingLoop] Error fetching calibration data:', error);
     });
 }
 

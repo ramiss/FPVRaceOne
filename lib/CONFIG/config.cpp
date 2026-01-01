@@ -57,22 +57,37 @@ void Config::load(void) {
 }
 
 void Config::write(void) {
+    static bool inWrite = false;
+    static uint32_t writeCount = 0;
+
     if (!modified) return;
 
-    DEBUG("Writing to EEPROM\n");
+    // Prevent re-entry/races
+    if (inWrite) {
+        //DEBUG("Writing to EEPROM skipped (re-entry)\n");
+        return;
+    }
+    inWrite = true;
+
+    writeCount++;
+    DEBUG("Writing to EEPROM");
 
     EEPROM.put(0, conf);
     EEPROM.commit();
 
-    DEBUG("Writing to EEPROM done\n");
-    
+    DEBUG("Writing to EEPROM done");
+
+    // Mark unmodified BEFORE SD backup to prevent back-to-back writes
+    modified = false;
+
     // Also backup to SD card if available
     if (saveToSD()) {
         DEBUG("Config backed up to SD card\n");
     }
 
-    modified = false;
+    inWrite = false;
 }
+
 
 void Config::toJson(AsyncResponseStream& destination) {
     // Use https://arduinojson.org/v6/assistant to estimate memory

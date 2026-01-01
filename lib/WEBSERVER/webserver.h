@@ -27,6 +27,8 @@ class Webserver : public TransportInterface {
     void sendRaceStateEvent(const char* state) override;
     bool isConnected() override;
     void update(uint32_t currentTimeMs) override;
+    bool servicesStarted = false;
+    bool wifiConnected = false;
 
    private:
     void startServices();
@@ -48,9 +50,6 @@ class Webserver : public TransportInterface {
     wl_status_t lastStatus = WL_IDLE_STATUS;
     volatile wifi_mode_t changeMode = WIFI_OFF;
     volatile uint32_t changeTimeMs = 0;
-    bool servicesStarted = false;
-    bool wifiConnected = false;
-
     bool sendRssi = false;
     uint32_t rssiSentMs = 0;
     uint32_t sseKeepaliveMs = 0;
