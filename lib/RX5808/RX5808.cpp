@@ -12,10 +12,12 @@ RX5808::RX5808(uint8_t _rssiInputPin, uint8_t _rx5808DataPin, uint8_t _rx5808Sel
 }
 
 void RX5808::init() {
-    pinMode(rssiInputPin, INPUT);
+    pinMode(rssiInputPin, INPUT_PULLUP);
     pinMode(rx5808DataPin, OUTPUT);
     pinMode(rx5808SelPin, OUTPUT);
     pinMode(rx5808ClkPin, OUTPUT);
+    analogReadResolution(12); // set resultion to 12 bit
+    
     digitalWrite(rx5808SelPin, HIGH);
     digitalWrite(rx5808ClkPin, LOW);
     digitalWrite(rx5808DataPin, LOW);
@@ -174,24 +176,29 @@ bool RX5808::isSettingFrequency() {
 
 // Read the RSSI value
 uint8_t RX5808::readRssi() {
-    volatile uint16_t rssi = 0;
+    if (recentSetFreqFlag) return 0; // RSSI unstable immediately after tune
 
-    if (recentSetFreqFlag) return rssi;  // RSSI is unstable
+    uint16_t raw = analogRead(rssiInputPin); // expected 0..1023 (10-bit)
 
-    // for (uint8_t i = 0; i < RSSI_READS; i++) {
-    //   rssi += map(analogRead(rssiInputPin), 0, analogRead(vbatPin), 0, 4095);
-    // }
-
-    // rssi = rssi / RSSI_READS; // average of RSSI_READS readings
-
-    // reads 5V value as 0-4095, RX5808 is 3.3V powered so RSSI pin will never output the full range
-    //Serial.println("[DEBUG] Analog pin: " + String(rssiInputPin));
-    rssi = analogRead(rssiInputPin);
-    // clamp upper range to fit scaling
-    if (rssi > 2047) rssi = 2047;
-    // rescale to fit into a byte and remove some jitter TODO: experiment with exp or log
-    return rssi >> 3;
+    static uint16_t rawMax = 0;
+    static unsigned long lastPrint = millis();
+      
+    // Scale 12-bit raw (0..4095) to 8-bit (0..255), with rounding
+    // 4095 >> 4 = 255
+    uint8_t scaled = (uint8_t)((raw * 255UL) / 1500UL);
+    
+    /* 
+    // Debugging output 
+    if (raw > rawMax) rawMax = raw;
+    if (millis() > lastPrint + 250) { 
+        Serial.printf("[RSSI] raw=%u rawMax=%u scaled=%u\n", raw, rawMax, scaled); 
+        lastPrint = millis();
+    }
+    */
+    
+    return scaled;
 }
+
 
 void RX5808::rx5808SerialSendBit1() {
     digitalWrite(rx5808DataPin, HIGH);

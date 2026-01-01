@@ -3726,6 +3726,111 @@ async function stopCalibrationWizard() {
   }
 }
 
+function smoothArray(values, windowSize) {
+  const out = [];
+  const half = Math.floor(windowSize / 2);
+  for (let i = 0; i < values.length; i++) {
+    let sum = 0;
+    let count = 0;
+    const start = Math.max(0, i - half);
+    const end = Math.min(values.length - 1, i + half);
+    for (let j = start; j <= end; j++) {
+      sum += values[j];
+      count++;
+    }
+    out.push(sum / count);
+  }
+  return out;
+}
+
+// Find up to N prominent peaks that are well separated
+function detectTopPeaks(values, desiredCount = 3) {
+  const n = values.length;
+  if (n < 20) return [];
+
+  const minVal = Math.min(...values);
+  const maxVal = Math.max(...values);
+  const range = maxVal - minVal;
+  if (range <= 0) return [];
+
+  // Candidate must be a local maximum and above a prominence threshold
+  const threshold = minVal + range * 0.55; // adjust if needed
+  const candidates = [];
+
+  // Local maxima check radius
+  const r = 6;
+  for (let i = r; i < n - r; i++) {
+    const v = values[i];
+    if (v < threshold) continue;
+
+    let isMax = true;
+    for (let k = 1; k <= r; k++) {
+      if (values[i - k] > v || values[i + k] > v) {
+        isMax = false;
+        break;
+      }
+    }
+    if (isMax) {
+      candidates.push({ index: i, value: v });
+    }
+  }
+
+  if (candidates.length === 0) return [];
+
+  // Sort by peak height desc
+  candidates.sort((a, b) => b.value - a.value);
+
+  // Enforce minimum separation between selected peaks
+  const minSep = Math.max(40, Math.floor(n * 0.12)); // 12% of series or 40 samples
+  const chosen = [];
+
+  for (const c of candidates) {
+    if (chosen.length >= desiredCount) break;
+    const tooClose = chosen.some(p => Math.abs(p.index - c.index) < minSep);
+    if (!tooClose) chosen.push(c);
+  }
+
+  // If we still don't have enough, relax separation a bit and try again
+  if (chosen.length < desiredCount) {
+    const relaxedSep = Math.max(25, Math.floor(n * 0.08));
+    for (const c of candidates) {
+      if (chosen.length >= desiredCount) break;
+      const tooClose = chosen.some(p => Math.abs(p.index - c.index) < relaxedSep);
+      if (!tooClose) chosen.push(c);
+    }
+  }
+
+  // Return indices sorted in time order
+  return chosen
+    .slice(0, desiredCount)
+    .sort((a, b) => a.index - b.index)
+    .map(p => p.index);
+}
+
+function autoPopulateWizardPeaksIfEmpty(rawRssi, smoothedRssi) {
+  // Only run once per wizard run (only when no markers exist)
+  if (wizardState.markers.length !== 0) return;
+
+  // We use smoothed data to pick visually obvious peaks, but markers refer to raw indexes
+  const peakIdx = detectTopPeaks(smoothedRssi, 3);
+
+  if (peakIdx.length === 3) {
+    wizardState.markers = peakIdx.map((idx, i) => ({ index: idx, lap: i + 1 }));
+    wizardState.currentLap = 4; // done
+    updateWizardStatus('Auto-detected 3 peaks. Undo or click to adjust, then "Calculate Thresholds".');
+
+    // Enable buttons
+    document.getElementById('wizardUndoButton').disabled = false;
+    document.getElementById('wizardCalculateButton').disabled = false;
+
+    console.log('[Wizard] Auto-peaks:', wizardState.markers.map(m => ({ lap: m.lap, index: m.index, rssi: rawRssi[m.index] })));
+  } else {
+    // If we couldn't confidently find 3 peaks, keep manual workflow
+    updateWizardStatus(`Mark Peak ${wizardState.currentLap}`);
+    console.log('[Wizard] Auto-peak detection found', peakIdx.length, 'peaks; leaving manual.');
+  }
+}
+
 
 function drawWizardChart() {
   const canvas = document.getElementById('wizardChart');
@@ -3760,6 +3865,10 @@ function drawWizardChart() {
     }
     smoothedRssi.push(sum / count);
   }
+
+  // Auto-detect and pre-populate 3 peaks the first time we draw the marking chart
+  autoPopulateWizardPeaksIfEmpty(rssiValues, smoothedRssi);
+
   
   // Clear canvas
   ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg-primary').trim();
