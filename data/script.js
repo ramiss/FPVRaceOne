@@ -14,6 +14,9 @@ let settingsLoading = false;         // true while we are populating UI from dev
 let baselineConfig = {};             // last config loaded from device (for "same value" comparisons)
 let scannerPaused = false;
 const SCANNER_BUFFER_WHILE_PAUSED = false;
+
+const CALIBRATION_PAGE_SIZE = 500;  // number of RSSI points per page when fetching calibration data
+
 // --- Calibration overview mode (draw full wizard dataset on the live scanner canvas) ---
 let calibOverviewMode = false;     // true when we're showing the full recorded dataset on the live chart canvas
 let calibOverviewData = null;      // [{ rssi: number }, ...] downsampled for display
@@ -889,7 +892,13 @@ function setRssiPaused(paused) {
   rssiPaused = !!paused;
 
   const btn = document.getElementById('pauseCalibBtn');
-  if (btn) btn.textContent = rssiPaused ? 'Resume' : 'Pause';
+  if (calibOverviewMode)
+  {
+    if (btn) btn.textContent = rssiPaused ? 'Exit Wizard' : 'Exit Wizard';
+  } else {
+    if (btn) btn.textContent = rssiPaused ? 'Resume' : 'Pause';
+  }
+  
 
   if (rssiPaused) {
     // Freeze the plot so it doesn’t scroll off screen
@@ -2649,6 +2658,10 @@ function stopRace() {
   // Auto-save race if there are laps
   if (lapTimes.length > 0) {
     saveCurrentRace();
+    if (confirm("Download race data? (it will be lost once you lose power")) {
+        // YES / OK clicked
+        downloadRaces()
+    } 
   }
 
   lapNo = -1;
@@ -3583,11 +3596,21 @@ function renderDetailFastestRound() {
 }
 
 function downloadRaces() {
-  window.open('/races/download', '_blank');
+  const a = document.createElement('a');
+  a.href = '/api/races/download';
+  a.download = 'races.json';   // browser-enforced
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
 }
 
 function downloadSingleRace(timestamp) {
-  window.open('/races/downloadOne?timestamp=' + timestamp, '_blank');
+    const a = document.createElement('a');
+    a.href = '/races/downloadOne?timestamp=' + timestamp, '_blank';
+    a.download = 'races.json';   // browser-enforced
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
 }
 
 let editingRaceIndex = null;
@@ -4084,20 +4107,57 @@ function startCalibrationWizard() {
     });
 }
 
+async function fetchCalibrationMeta() {
+  const resp = await fetch(`/calibration/data?limit=0`);
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(`GET /calibration/data?limit=0 failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
+  }
+  return await resp.json(); // { total: N }
+}
+
+async function fetchCalibrationPage(offset, limit) {
+  const resp = await fetch(`/calibration/data?offset=${offset}&limit=${limit}`);
+  if (!resp.ok) {
+    const t = await resp.text().catch(() => '');
+    throw new Error(`GET /calibration/data page failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
+  }
+  return await resp.json(); // { total, offset, limit, count, data:[...] }
+}
+
+async function fetchAllCalibrationData() {
+  const meta = await fetchCalibrationMeta();
+  const total = meta.total || 0;
+
+  const all = [];
+  let offset = 0;
+
+  while (offset < total) {
+    const page = await fetchCalibrationPage(offset, CALIBRATION_PAGE_SIZE);
+    if (Array.isArray(page.data) && page.data.length) {
+      all.push(...page.data);
+      offset += page.data.length;
+    } else {
+      // Safety break to avoid infinite loop if something weird happens
+      break;
+    }
+  }
+
+  return { total, data: all };
+}
+
+
 function wizardRecordingLoop() {
   if (!wizardState.recording) return;
-  
-  // Fetch current sample count
-  fetch('/calibration/data')
-    .then(response => response.json())
-    .then(data => {
-      document.getElementById('wizardSampleCount').textContent = `Samples: ${data.count}`;
-      if (wizardState.recording) {
-        setTimeout(wizardRecordingLoop, 200);
-      }
+
+  fetchCalibrationMeta()
+    .then(meta => {
+      document.getElementById('wizardSampleCount').textContent = `Samples: ${meta.total || 0}`;
+      if (wizardState.recording) setTimeout(wizardRecordingLoop, 200);
     })
     .catch(error => {
-      console.error('[wizardRecordingLoop] Error fetching calibration data:', error);
+      console.error('[wizardRecordingLoop] Error fetching calibration meta:', error);
+      if (wizardState.recording) setTimeout(wizardRecordingLoop, 500);
     });
 }
 
@@ -4128,15 +4188,10 @@ async function stopCalibrationWizard() {
     }
 
     // Fetch recorded data
-    const dataResp = await fetch('/calibration/data');
-    if (!dataResp.ok) {
-      const t = await dataResp.text().catch(() => '');
-      throw new Error(`GET /calibration/data failed: HTTP ${dataResp.status} ${dataResp.statusText} ${t}`);
-    }
-
-    const data = await dataResp.json();
-    console.log('Calibration data received:', data.count, 'samples');
-    wizardState.data = data.data;
+    // Fetch recorded data (paged)
+    const { total, data } = await fetchAllCalibrationData();
+    console.log('Calibration data received:', total, 'samples');
+    wizardState.data = data;
 
     if (!Array.isArray(wizardState.data) || wizardState.data.length < 10) {
       alert('Not enough data recorded. Please try again with at least 3 clear gate passes.');

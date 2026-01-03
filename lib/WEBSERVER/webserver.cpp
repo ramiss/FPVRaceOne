@@ -688,12 +688,23 @@ EEPROM:\n\
         led->on(200);
     });
 
-    server.on("/races/download", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    server.on("/api/races/download", HTTP_GET, [this](AsyncWebServerRequest *request) {
+
         String json = history->toJsonString();
-        AsyncWebServerResponse *response = request->beginResponse(200, "application/octet-stream", json);
-        response->addHeader("Content-Disposition", "attachment; filename=\"races.json\"");
-        response->addHeader("Content-Type", "application/json");
+
+        AsyncResponseStream *response =
+            request->beginResponseStream("application/octet-stream");
+
+        response->addHeader("Content-Disposition",
+                            "attachment; filename=\"races.json\"");
+        response->addHeader("X-Content-Type-Options", "nosniff");
+        response->addHeader("Cache-Control", "no-store, no-cache, must-revalidate");
+        response->addHeader("Pragma", "no-cache");
+        response->addHeader("Expires", "0");
+
+        response->print(json);
         request->send(response);
+
         led->on(200);
     });
 
@@ -1233,20 +1244,78 @@ EEPROM:\n\
         led->on(200);
     });
 
+    // updated to serve paged calibration data
     server.on("/calibration/data", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        uint16_t count = timer->getCalibrationRssiCount();
-        
-        // Build JSON response
-        String json = "{\"count\":" + String(count) + ",\"data\":[";
-        for (uint16_t i = 0; i < count; i++) {
-            if (i > 0) json += ",";
-            json += "{\"rssi\":" + String(timer->getCalibrationRssi(i)) + ",\"time\":" + String(timer->getCalibrationTimestamp(i)) + "}";
+        const uint16_t total = timer->getCalibrationRssiCount();
+
+        // Optional query params:
+        //   offset = starting index (default 0)
+        //   limit  = number of samples to return (default 500)
+        // Special:
+        //   limit=0 returns meta only (just total)
+        uint32_t offset = 0;
+        uint32_t limit  = 500;
+
+        if (request->hasParam("offset")) {
+            offset = request->getParam("offset")->value().toInt();
         }
+        if (request->hasParam("limit")) {
+            limit = request->getParam("limit")->value().toInt();
+        }
+
+        if (offset > total) offset = total;
+
+        // Meta-only mode (fast for wizard sample count polling)
+        if (limit == 0) {
+            String meta = String("{\"total\":") + total + "}";
+            request->send(200, "application/json", meta);
+            led->on(50);
+            return;
+        }
+
+        // Clamp limit to a sane upper bound to avoid huge responses
+        if (limit > 1000) limit = 1000;
+
+        const uint32_t end = (offset + limit > total) ? total : (offset + limit);
+        const uint32_t count = (end > offset) ? (end - offset) : 0;
+
+        // Build a paged JSON response
+        // Shape:
+        // {
+        //   "total": 5000,
+        //   "offset": 0,
+        //   "limit": 500,
+        //   "count": 500,
+        //   "data":[{"rssi":58,"time":123}, ...]
+        // }
+        String json;
+        json.reserve(64 + (count * 28)); // rough reserve to reduce fragmentation
+
+        json += "{\"total\":";
+        json += total;
+        json += ",\"offset\":";
+        json += offset;
+        json += ",\"limit\":";
+        json += limit;
+        json += ",\"count\":";
+        json += count;
+        json += ",\"data\":[";
+
+        for (uint32_t i = offset; i < end; i++) {
+            if (i > offset) json += ",";
+            json += "{\"rssi\":";
+            json += timer->getCalibrationRssi((uint16_t)i);
+            json += ",\"time\":";
+            json += timer->getCalibrationTimestamp((uint16_t)i);
+            json += "}";
+        }
+
         json += "]}";
-        
+
         request->send(200, "application/json", json);
-        led->on(200);
+        led->on(50);
     });
+
 
     // Self-test endpoint
     server.on("/api/selftest", HTTP_GET, [this](AsyncWebServerRequest *request) {
