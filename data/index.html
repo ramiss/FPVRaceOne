@@ -193,7 +193,10 @@
             <input type="range" min="50" max="255" step="1" id="exit" value="100" oninput="updateExitRssi(this,value)" />
           </div>
         </div>
-        <button onclick="saveConfig()">Save RSSI Thresholds</button>
+        <div id="calibrationOverviewNotice" style="display:none; margin: 10px 0; font-weight: 600;">
+          Calibration updated. Tweak as necessary to your peaks and click one of the buttons below to continue
+        </div>
+        <button onclick="saveRSSIThresholds()">Save RSSI Thresholds</button>
         <button
           id="pauseCalibBtn"
           class="btn"
@@ -309,10 +312,10 @@
         <div id="wizardMarking" style="display: none;">
           <h3>Calibration Wizard - Mark Lap Peaks</h3>
           <div class="wizard-instructions">
-            <p><strong>Click on the chart to mark the highest point (peak) for each lap:</strong></p>
+            <p><strong>3 peaks (one for each lap) need to be marked to calibrate:</strong></p>
+            <p><strong></strong></p>
             <ul>
-              <li>Click at the <span style="color: #ff5555;">highest peak</span> for each gate pass</li>
-              <li>Mark 3 peaks total (one for each lap)</li>
+              <li>Use the Auto-detected peaks or undo and mark manually</li>
               <li>Entry/Exit thresholds will be calculated automatically</li>
             </ul>
           </div>
@@ -342,7 +345,7 @@
             </div>
           </div>
           <div style="margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
-            <strong>Note:</strong> These values have been calculated based on your lap data with safety margins. You can apply them now and fine-tune manually if needed.
+            <strong>Note:</strong> These values have been calculated based on your lap data with safety margins. You can apply them now and fine-tune manually in the next step.
           </div>
           <div style="display: flex; gap: 12px; margin-top: 16px;">
             <button onclick="applyCalculatedThresholds()" style="flex: 1;">Apply Thresholds</button>

@@ -14,6 +14,16 @@ let settingsLoading = false;         // true while we are populating UI from dev
 let baselineConfig = {};             // last config loaded from device (for "same value" comparisons)
 let scannerPaused = false;
 const SCANNER_BUFFER_WHILE_PAUSED = false;
+// --- Calibration overview mode (draw full wizard dataset on the live scanner canvas) ---
+let calibOverviewMode = false;     // true when we're showing the full recorded dataset on the live chart canvas
+let calibOverviewData = null;      // [{ rssi: number }, ...] downsampled for display
+const CALIB_OVERVIEW_MAX_POINTS = 900; // cap so very large logs still render fast
+let pausedScannerFrame = null;      // ImageData snapshot of the live scanner when pause is pressed
+let pausedScannerFrameW = 0, pausedScannerFrameH = 0;
+let pausedEnterStart = null;               
+let pausedExitStart = null;           
+
+
 
 const bcf = document.getElementById("bandChannelFreq");
 const bandSelect = document.getElementById("bandSelect");
@@ -863,20 +873,67 @@ let rssiPaused = false;
 function setRssiPaused(paused) {
   rssiPaused = !!paused;
 
-  // Update button label if it exists
   const btn = document.getElementById('pauseCalibBtn');
-  if (btn) btn.textContent = rssiPaused ? 'Resume Scanner' : 'Pause Scanner';
+  if (btn) btn.textContent = rssiPaused ? 'Resume' : 'Pause';
 
-  // Freeze/Resume rendering
-  if (rssiChart) {
-    if (rssiPaused) rssiChart.stop();
-    else rssiChart.start();
-  }
+  if (rssiPaused) {
+    // Freeze the plot so it doesn’t scroll off screen
+    if (rssiChart) rssiChart.stop();
 
-  // IMPORTANT: do not buffer while paused
-  // Drop any queued values so we resume with "next actual reading"
-  if (rssiPaused && Array.isArray(rssiBuffer)) {
-    rssiBuffer.length = 0;
+    // No buffering / no catch-up
+    if (Array.isArray(rssiBuffer)) rssiBuffer.length = 0;
+
+    // Capture "start" threshold positions so we can draw them as gray reference lines
+    pausedEnterStart = enterRssi;
+    pausedExitStart = exitRssi;
+
+    // Snapshot the frozen scanner canvas (ONLY for regular paused scanner, not overview mode)
+    pausedScannerFrame = null;
+    pausedScannerFrameW = 0;
+    pausedScannerFrameH = 0;
+
+    if (!calibOverviewMode) {
+      const canvas = document.getElementById('rssiChart');
+      if (canvas) {
+        const ctx = canvas.getContext('2d');
+        if (ctx) {
+          // Ensure backing bitmap matches display size before snapshot
+          const dw = canvas.offsetWidth || canvas.width;
+          const dh = canvas.offsetHeight || canvas.height;
+          if (canvas.width !== dw) canvas.width = dw;
+          if (canvas.height !== dh) canvas.height = dh;
+
+          pausedScannerFrameW = canvas.width;
+          pausedScannerFrameH = canvas.height;
+
+          try {
+            pausedScannerFrame = ctx.getImageData(0, 0, pausedScannerFrameW, pausedScannerFrameH);
+          } catch (e) {
+            pausedScannerFrame = null;
+          }
+        }
+      }
+    }
+
+    // Keep lines visible and adjustable while paused
+    if (calibOverviewMode) drawCalibrationOverview();
+    else drawPausedOverlayLines();
+  } else {
+    // Leaving pause: if we were in overview mode, exit it back to live
+    if (calibOverviewMode) {
+      exitCalibrationOverviewModeByUserAction();
+      calibOverviewMode = false;
+      calibOverviewData = null;
+    }
+
+    // Clear pause snapshot state
+    pausedScannerFrame = null;
+    pausedScannerFrameW = 0;
+    pausedScannerFrameH = 0;
+    pausedEnterStart = null;
+    pausedExitStart = null;
+
+    if (rssiChart) rssiChart.start();
   }
 }
 
@@ -884,18 +941,167 @@ function toggleRssiPaused() {
   setRssiPaused(!rssiPaused);
 }
 
+function drawPausedOverlayLines() {
+  // Only used when paused AND not in overview mode.
+  const canvas = document.getElementById('rssiChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  // IMPORTANT: ensure backing bitmap matches display size
+  const dw = canvas.offsetWidth || canvas.width;
+  const dh = canvas.offsetHeight || canvas.height;
+  if (canvas.width !== dw) canvas.width = dw;
+  if (canvas.height !== dh) canvas.height = dh;
+
+  const h = canvas.height;
+  const w = canvas.width;
+
+  // Restore frozen frame first so we don't "stack" lines.
+  // If size changed and we haven't rescaled yet, rescale on-demand.
+  if (!calibOverviewMode && pausedScannerFrame) {
+    if (pausedScannerFrameW !== w || pausedScannerFrameH !== h) {
+      rescalePausedScannerFrameToCanvas(); // will call drawPausedOverlayLines() again
+      return;
+    }
+    try {
+      ctx.putImageData(pausedScannerFrame, 0, 0);
+    } catch (e) {
+      // If restore fails, at least clear so lines don't multiply
+      ctx.clearRect(0, 0, w, h);
+    }
+  }
+
+  // Use the same value range Smoothie was using
+  const minV = (rssiChart && rssiChart.options && typeof rssiChart.options.minValue === 'number')
+    ? rssiChart.options.minValue
+    : Math.max(0, Math.min(minRssiValue, exitRssi - 10));
+
+  const maxV = (rssiChart && rssiChart.options && typeof rssiChart.options.maxValue === 'number')
+    ? rssiChart.options.maxValue
+    : Math.max(maxRssiValue, enterRssi + 10);
+
+  if (maxV <= minV) return;
+
+  const yOf = (v) => {
+    const t = (v - minV) / (maxV - minV);
+    return h - Math.round(t * (h - 1));
+  };
+
+  ctx.save();
+
+  // Draw the "starting" reference lines in gray (where the pause began)
+  if (pausedEnterStart != null && pausedExitStart != null) {
+    ctx.strokeStyle = 'rgba(200,200,200,0.45)';
+    ctx.lineWidth = 2;
+
+    ctx.beginPath();
+    ctx.moveTo(0, yOf(pausedEnterStart));
+    ctx.lineTo(w, yOf(pausedEnterStart));
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(0, yOf(pausedExitStart));
+    ctx.lineTo(w, yOf(pausedExitStart));
+    ctx.stroke();
+  }
+
+  // Current Enter line (red)
+  ctx.strokeStyle = "hsl(8.2, 86.5%, 53.7%)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, yOf(enterRssi));
+  ctx.lineTo(w, yOf(enterRssi));
+  ctx.stroke();
+
+  // Current Exit line (orange)
+  ctx.strokeStyle = "hsl(25, 85%, 55%)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(0, yOf(exitRssi));
+  ctx.lineTo(w, yOf(exitRssi));
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function rescalePausedScannerFrameToCanvas() {
+  if (!rssiPaused) return;
+  if (calibOverviewMode) return;
+  if (!pausedScannerFrame) return;
+
+  const canvas = document.getElementById('rssiChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  const newW = canvas.offsetWidth || canvas.width;
+  const newH = canvas.offsetHeight || canvas.height;
+
+  // If unchanged, nothing to do
+  if (newW === pausedScannerFrameW && newH === pausedScannerFrameH) return;
+
+  // Build an offscreen canvas from the old ImageData
+  const src = document.createElement('canvas');
+  src.width = pausedScannerFrameW;
+  src.height = pausedScannerFrameH;
+  const sctx = src.getContext('2d');
+  if (!sctx) return;
+
+  try {
+    sctx.putImageData(pausedScannerFrame, 0, 0);
+  } catch (e) {
+    return;
+  }
+
+  // Resize visible canvas to new dimensions
+  canvas.width = newW;
+  canvas.height = newH;
+
+  // Draw scaled frozen frame
+  ctx.clearRect(0, 0, newW, newH);
+  ctx.drawImage(src, 0, 0, newW, newH);
+
+  // Re-snapshot scaled image for future redraws
+  pausedScannerFrameW = newW;
+  pausedScannerFrameH = newH;
+  try {
+    pausedScannerFrame = ctx.getImageData(0, 0, newW, newH);
+  } catch (e) {
+    pausedScannerFrame = null;
+  }
+
+  // Redraw overlay lines (gray start + current)
+  drawPausedOverlayLines();
+}
 
 function addRssiPoint() {
   if (!rssiChart) return; // Chart not initialized yet
   
   if (calib.style.display != "none") {
 
-    // If paused, freeze chart and discard incoming samples (no catch-up)
     if (rssiPaused) {
-      rssiChart.stop();
-      if (rssiBuffer.length > 0) rssiBuffer.length = 0;
+      // discard live data while paused so it doesn’t scroll and doesn’t “catch up”
+      if (Array.isArray(rssiBuffer)) rssiBuffer.length = 0;
+
+      // Ensure Smoothie has up-to-date ranges/lines for when we unpause,
+      // and redraw overlay lines so slider changes show immediately.
+      rssiChart.options.horizontalLines = [
+        { color: "hsl(8.2, 86.5%, 53.7%)", lineWidth: 1.7, value: enterRssi }, // red
+        { color: "hsl(25, 85%, 55%)", lineWidth: 1.7, value: exitRssi }, // orange
+      ];
+      rssiChart.options.maxValue = Math.max(maxRssiValue, enterRssi + 10);
+      rssiChart.options.minValue = Math.max(0, Math.min(minRssiValue, exitRssi - 10));
+
+      // If we're in overview mode, keep that view (lines included) fresh.
+      if (calibOverviewMode) {
+        drawCalibrationOverview();
+      } else {
+        drawPausedOverlayLines();
+      }
       return;
     }
+
 
     rssiChart.start();
     if (rssiBuffer.length > 0) {
@@ -931,6 +1137,143 @@ function addRssiPoint() {
     maxRssiValue = enterRssi + 10;
     minRssiValue = exitRssi - 10;
   }
+}
+
+function setStartWizardEnabled(enabled) {
+  const btn = document.getElementById('startWizardButton');
+  if (!btn) return;
+  btn.disabled = !enabled;
+  btn.classList.toggle('disabled', !enabled); // optional, if you style .disabled
+}
+
+function setOverviewNoticeVisible(visible) {
+  const el = document.getElementById('calibrationOverviewNotice');
+  if (!el) return;
+  el.style.display = visible ? 'block' : 'none';
+}
+
+
+function downsampleWizardDataForOverview(data, maxPoints) {
+  if (!Array.isArray(data) || data.length === 0) return [];
+  if (data.length <= maxPoints) return data;
+
+  const step = data.length / maxPoints;
+  const out = [];
+  for (let i = 0; i < maxPoints; i++) {
+    out.push(data[Math.floor(i * step)]);
+  }
+  return out;
+}
+
+function drawCalibrationOverview() {
+  if (!calibOverviewMode || !calibOverviewData || calibOverviewData.length === 0) return;
+
+  // Use the SAME canvas as the live scanner uses
+  const canvas = document.getElementById('rssiChart');
+  if (!canvas) return;
+  const ctx = canvas.getContext('2d');
+
+  // Ensure canvas matches its displayed size
+  canvas.width = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+
+  const w = canvas.width;
+  const h = canvas.height;
+
+  // Background
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--tabcontent-bg').trim() || '#000';
+  ctx.fillRect(0, 0, w, h);
+
+  // Compute bounds
+  const values = calibOverviewData.map(d => d.rssi ?? 0);
+  let minV = Math.min(...values);
+  let maxV = Math.max(...values);
+  if (maxV <= minV) maxV = minV + 1;
+
+  // Draw polyline
+  ctx.strokeStyle = '#3bd16f'; // match your vibe; change if you want
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < calibOverviewData.length; i++) {
+    const x = (i / (calibOverviewData.length - 1)) * w;
+    const v = calibOverviewData[i].rssi ?? 0;
+    const y = h - ((v - minV) / (maxV - minV)) * h;
+    if (i === 0) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  // Draw Enter/Exit lines based on current UI values
+  // (These IDs match your calibration tab sliders)
+  const enterEl = document.getElementById('enter');
+  const exitEl  = document.getElementById('exit');
+  const enterVal = enterEl ? parseInt(enterEl.value, 10) : null;
+  const exitVal  = exitEl  ? parseInt(exitEl.value, 10)  : null;
+
+  function drawHLine(val, color) {
+    if (val == null || Number.isNaN(val)) return;
+    const y = h - ((val - minV) / (maxV - minV)) * h;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, y);
+    ctx.lineTo(w, y);
+    ctx.stroke();
+  }
+
+  // Enter slightly brighter than Exit
+  drawHLine(enterVal, '#00ff99');
+  drawHLine(exitVal,  '#ffcc00');
+}
+
+function enterCalibrationOverviewModeFromWizard() {
+  if (!wizardState || !Array.isArray(wizardState.data) || wizardState.data.length < 2) return;
+
+  // Use the recorded wizard dataset, scaled to fit screen
+  calibOverviewData = downsampleWizardDataForOverview(wizardState.data, CALIB_OVERVIEW_MAX_POINTS);
+
+  calibOverviewMode = true;
+
+  // Pause live scrolling
+  setRssiPaused(true);
+
+  // Draw overview onto chart
+  drawCalibrationOverview();
+
+  // Disable Start Wizard while in post-wizard overview mode
+  setStartWizardEnabled(false);
+
+  // Show notice
+  setOverviewNoticeVisible(true);
+}
+
+function exitCalibrationOverviewModeByUserAction() {
+  // Only act if we are actually in overview mode
+  if (!calibOverviewMode) return;
+
+  // Hide the notice
+  setOverviewNoticeVisible(false);
+
+  // Re-enable Start Wizard now that user acknowledged the overview step
+  setStartWizardEnabled(true);
+
+  // Exit overview mode back to normal calibration tab (paused or live depends on your existing flow)
+  calibOverviewMode = false;
+  calibOverviewData = null;
+
+  // If you want the chart to resume live immediately when leaving overview:
+  setRssiPaused(false);
+  //
+  // If you prefer to keep it paused until user explicitly hits Resume, leave it paused.
+}
+
+
+function exitCalibrationOverviewMode() {
+  calibOverviewMode = false;
+  calibOverviewData = null;
+
+  // Restart the live chart if you stopped it
+  try { if (window.rssiChart && typeof window.rssiChart.start === 'function') window.rssiChart.start(); } catch (e) {}
 }
 
 setInterval(addRssiPoint, 200);
@@ -1050,6 +1393,22 @@ function openTab(evt, tabName) {
   }
 }
 
+function redrawCalibrationLinesIfPaused() {
+  // Only redraw overlays when we're paused on the Calibration tab
+  if (!window.rssiPaused) return;
+
+  // If you're in "overview" mode, that draw should include lines
+  if (window.calibOverviewMode && typeof drawCalibrationOverview === 'function') {
+    drawCalibrationOverview();
+    return;
+  }
+
+  // Otherwise redraw the paused overlay lines on top of the frozen chart
+  if (typeof drawPausedOverlayLines === 'function') {
+    drawPausedOverlayLines();
+  }
+}
+
 function updateEnterRssi(obj, value) {
   enterRssi = parseInt(value);
   enterRssiSpan.textContent = enterRssi;
@@ -1060,11 +1419,14 @@ function updateEnterRssi(obj, value) {
     exitRssiSpan.textContent = exitRssi;
   }
 
-  // Persist via staged config model (Save button commits to /config)
-  // Stage BOTH values because this function may adjust exitRssi automatically.
+  // Stage both (your existing behavior)
   stageConfig('enterRssi', enterRssi);
   stageConfig('exitRssi', exitRssi);
+
+  // NEW: if paused, redraw overlay so the line moves immediately
+  redrawCalibrationLinesIfPaused();
 }
+
 
 function updateExitRssi(obj, value) {
   exitRssi = parseInt(value);
@@ -1076,12 +1438,13 @@ function updateExitRssi(obj, value) {
     enterRssiSpan.textContent = enterRssi;
   }
 
-  // Persist via staged config model (Save button commits to /config)
-  // Stage BOTH values because this function may adjust enterRssi automatically.
+  // Stage both (your existing behavior)
   stageConfig('exitRssi', exitRssi);
   stageConfig('enterRssi', enterRssi);
-}
 
+  // NEW: if paused, redraw overlay so the line moves immediately
+  redrawCalibrationLinesIfPaused();
+}
 
 function stageBandChan() {
   // band index is 0-based
@@ -1247,7 +1610,10 @@ function autoSaveConfig() {
   Object.keys(snap).forEach(k => stageConfig(k, snap[k]));
 }
 
-
+function saveRSSIThresholds() {
+  if (calibOverviewMode) exitCalibrationOverviewModeByUserAction();
+  saveConfig();
+}
 
 async function saveConfig() {
   // Commit staged config to device (single write)
@@ -3764,6 +4130,9 @@ async function stopCalibrationWizard() {
       return;
     }
 
+    // Auto-pause live scanner and show full recorded dataset scaled to the screen
+    enterCalibrationOverviewModeFromWizard();
+
     // Show marking screen
     document.getElementById('wizardRecording').style.display = 'none';
     document.getElementById('wizardMarking').style.display = 'block';
@@ -4220,7 +4589,7 @@ function applyCalculatedThresholds() {
   closeCalibrationWizard();
   
   // Show success message
-  alert('Calibration thresholds applied! You can now fine-tune them manually if needed.');
+  //alert('Calibration thresholds applied! You can now fine-tune them manually if needed.');
 }
 
 function cancelCalibrationWizard() {
@@ -5302,4 +5671,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.querySelectorAll('.nav-links .tablinks').forEach(a => a.classList.remove('active'));
   const raceLink = document.getElementById('nav-link-race');
   if (raceLink) raceLink.classList.add('active');
+
+  // Keep paused scanner overlays correct on resize/rotation
+  window.addEventListener('resize', () => {
+    clearTimeout(window.__rssiResizeT);
+    window.__rssiResizeT = setTimeout(() => {
+      rescalePausedScannerFrameToCanvas();
+    }, 100);
+  });
+
 });
