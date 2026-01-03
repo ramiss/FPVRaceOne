@@ -22,8 +22,7 @@ let pausedScannerFrame = null;      // ImageData snapshot of the live scanner wh
 let pausedScannerFrameW = 0, pausedScannerFrameH = 0;
 let pausedEnterStart = null;               
 let pausedExitStart = null;           
-
-
+let _rssiCanvasCtx = null;
 
 const bcf = document.getElementById("bandChannelFreq");
 const bandSelect = document.getElementById("bandSelect");
@@ -650,7 +649,7 @@ onload = async function (e) {
 
     if (configData.ledBrightness !== undefined && ledBrightnessInput) {
       ledBrightnessInput.value = configData.ledBrightness;
-      updateLedBrightness(ledBrightnessInput, configData.ledBrightness);
+      //updateLedBrightness(ledBrightnessInput, configData.ledBrightness);
     }
 
     if (configData.ledColor !== undefined && ledColorInput) {
@@ -778,6 +777,22 @@ function setTrackDataSettingsVisible(visible) {
   }
 }
 
+function getRssiCanvasCtx() {
+  const canvas = document.getElementById('rssiChart');
+  if (!canvas) return null;
+
+  // If canvas node changed (replaced), reset cache
+  if (_rssiCanvasCtx && _rssiCanvasCtx.canvas !== canvas) {
+    _rssiCanvasCtx = null;
+  }
+
+  if (!_rssiCanvasCtx) {
+    _rssiCanvasCtx = canvas.getContext('2d', { willReadFrequently: true });
+  }
+  return _rssiCanvasCtx;
+}
+
+
 function setLEDSettingsVisible(visible) {
   const navItems = document.querySelectorAll('.settings-nav-item');
 
@@ -895,14 +910,9 @@ function setRssiPaused(paused) {
     if (!calibOverviewMode) {
       const canvas = document.getElementById('rssiChart');
       if (canvas) {
-        const ctx = canvas.getContext('2d');
+        // IMPORTANT: do NOT touch canvas.width/height here (it clears the frame!)
+        const ctx = getRssiCanvasCtx();
         if (ctx) {
-          // Ensure backing bitmap matches display size before snapshot
-          const dw = canvas.offsetWidth || canvas.width;
-          const dh = canvas.offsetHeight || canvas.height;
-          if (canvas.width !== dw) canvas.width = dw;
-          if (canvas.height !== dh) canvas.height = dh;
-
           pausedScannerFrameW = canvas.width;
           pausedScannerFrameH = canvas.height;
 
@@ -918,6 +928,7 @@ function setRssiPaused(paused) {
     // Keep lines visible and adjustable while paused
     if (calibOverviewMode) drawCalibrationOverview();
     else drawPausedOverlayLines();
+
   } else {
     // Leaving pause: if we were in overview mode, exit it back to live
     if (calibOverviewMode) {
@@ -945,20 +956,22 @@ function drawPausedOverlayLines() {
   // Only used when paused AND not in overview mode.
   const canvas = document.getElementById('rssiChart');
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
+
+  const ctx = getRssiCanvasCtx();
   if (!ctx) return;
 
-  // IMPORTANT: ensure backing bitmap matches display size
+  // If CSS size changed while paused, rescale the stored snapshot instead of resizing here.
   const dw = canvas.offsetWidth || canvas.width;
   const dh = canvas.offsetHeight || canvas.height;
-  if (canvas.width !== dw) canvas.width = dw;
-  if (canvas.height !== dh) canvas.height = dh;
+  if (pausedScannerFrame && (dw !== canvas.width || dh !== canvas.height)) {
+    rescalePausedScannerFrameToCanvas(); // will redraw overlays
+    return;
+  }
 
   const h = canvas.height;
   const w = canvas.width;
 
   // Restore frozen frame first so we don't "stack" lines.
-  // If size changed and we haven't rescaled yet, rescale on-demand.
   if (!calibOverviewMode && pausedScannerFrame) {
     if (pausedScannerFrameW !== w || pausedScannerFrameH !== h) {
       rescalePausedScannerFrameToCanvas(); // will call drawPausedOverlayLines() again
@@ -967,7 +980,6 @@ function drawPausedOverlayLines() {
     try {
       ctx.putImageData(pausedScannerFrame, 0, 0);
     } catch (e) {
-      // If restore fails, at least clear so lines don't multiply
       ctx.clearRect(0, 0, w, h);
     }
   }
@@ -1032,8 +1044,6 @@ function rescalePausedScannerFrameToCanvas() {
 
   const canvas = document.getElementById('rssiChart');
   if (!canvas) return;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
 
   const newW = canvas.offsetWidth || canvas.width;
   const newH = canvas.offsetHeight || canvas.height;
@@ -1045,7 +1055,8 @@ function rescalePausedScannerFrameToCanvas() {
   const src = document.createElement('canvas');
   src.width = pausedScannerFrameW;
   src.height = pausedScannerFrameH;
-  const sctx = src.getContext('2d');
+
+  const sctx = src.getContext('2d', { willReadFrequently: true });
   if (!sctx) return;
 
   try {
@@ -1054,9 +1065,12 @@ function rescalePausedScannerFrameToCanvas() {
     return;
   }
 
-  // Resize visible canvas to new dimensions
+  // Resize visible canvas to new dimensions (this clears it, which is OK here)
   canvas.width = newW;
   canvas.height = newH;
+
+  const ctx = getRssiCanvasCtx();
+  if (!ctx) return;
 
   // Draw scaled frozen frame
   ctx.clearRect(0, 0, newW, newH);

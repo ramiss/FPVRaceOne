@@ -388,14 +388,16 @@ void Webserver::startServices() {
     history->init(storage);
 
     server.on("/", handleRoot);
-    server.on("/generate_204", handleRoot);  // handle Andriod phones doing shit to detect if there is 'real' internet and possibly dropping conn.
-    server.on("/gen_204", handleRoot);
-    server.on("/library/test/success.html", handleRoot);
-    server.on("/hotspot-detect.html", handleRoot);
-    server.on("/connectivity-check.html", handleRoot);
-    server.on("/check_network_status.txt", handleRoot);
-    server.on("/ncsi.txt", handleRoot);
-    server.on("/fwlink", handleRoot);
+    if (captiveDnsEnabled) {
+        server.on("/generate_204", handleRoot);  // handle Andriod phones doing shit to detect if there is 'real' internet and possibly dropping conn.
+        server.on("/gen_204", handleRoot);
+        server.on("/library/test/success.html", handleRoot);
+        server.on("/hotspot-detect.html", handleRoot);
+        server.on("/connectivity-check.html", handleRoot);
+        server.on("/check_network_status.txt", handleRoot);
+        server.on("/ncsi.txt", handleRoot);
+        server.on("/fwlink", handleRoot);
+    }
 
     server.on("/api/version", HTTP_GET, [](AsyncWebServerRequest *request) {
         String json = String("{\"firmwareVersion\":\"") + FIRMWARE_VERSION + "\"}";
