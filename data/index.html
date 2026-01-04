@@ -118,7 +118,7 @@
         <div class="history-controls">
           <button id="downloadRacesBtn" onclick="downloadRaces()">Download Races</button>
           <button id="importRacesBtn" onclick="document.getElementById('importFile').click()">Import Races</button>
-          <input type="file" id="importFile" accept=".json" style="display: none;" onchange="importRaces(this)" />
+          <input type="file" id="importFile" accept=".json" style="display: none;" onclick="this.value='';" onchange="importRaces(this)" />
           <button id="clearAllRacesBtn" onclick="clearAllRaces()" class="danger-button">Clear All</button>
         </div>
         <div id="raceHistoryList" class="history-list">

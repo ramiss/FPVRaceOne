@@ -15,6 +15,10 @@ let baselineConfig = {};             // last config loaded from device (for "sam
 let scannerPaused = false;
 const SCANNER_BUFFER_WHILE_PAUSED = false;
 
+// --- Wizard loop control (prevents stale timers/fetches blocking restart) ---
+let wizardRecordingTimerId = null;
+let wizardAbortController = null;
+
 const CALIBRATION_PAGE_SIZE = 500;  // number of RSSI points per page when fetching calibration data
 
 // --- Calibration overview mode (draw full wizard dataset on the live scanner canvas) ---
@@ -2658,7 +2662,7 @@ function stopRace() {
   // Auto-save race if there are laps
   if (lapTimes.length > 0) {
     saveCurrentRace();
-    if (confirm("Download race data? (it will be lost once you lose power")) {
+    if (confirm("Download race data? (it will be lost once you lose power)")) {
         // YES / OK clicked
         downloadRaces()
     } 
@@ -2938,9 +2942,15 @@ function renderLapHistory() {
   
   let html = '<div class="analysis-bars">';
   recentLaps.forEach((time, index) => {
-    const lapNumber = startIndex + index + 1;
+    const lapNumber = startIndex + index;
     const colorIndex = (startIndex + index) % barColors.length;
-    html += createBarItemWithColor(`Lap ${lapNumber}`, time, maxTime, `${time.toFixed(2)}s`, colorIndex);
+    if (lapNumber === 0) {
+      // Special label for Gate 1
+      html += createBarItemWithColor(`Gate 1`, time, maxTime, `${time.toFixed(2)}s`, colorIndex);
+    } else {
+      html += createBarItemWithColor(`Lap ${lapNumber}`, time, maxTime, `${time.toFixed(2)}s`, colorIndex);
+    }
+    
   });
   html += '</div>';
   
@@ -3532,7 +3542,7 @@ function renderDetailHistory() {
   displayLaps.forEach((time, index) => {
     const actualIndex = lapTimes.length - displayLaps.length + index;
     let label;
-    
+        
     // First entry is Gate 1 (start), not a lap
     if (actualIndex === 0) {
       label = 'Gate 1';
@@ -3780,40 +3790,124 @@ function saveRaceEdit() {
   });
 }
 
-function importRaces(input) {
-  const file = input.files[0];
+async function importRaces(input) {
+  const file = input?.files?.[0];
   if (!file) return;
-  
-  const reader = new FileReader();
-  reader.onload = function(e) {
-    try {
-      const json = JSON.parse(e.target.result);
-      
-      fetch('/races/upload', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify(json)
-      })
-      .then(response => response.json())
-      .then(data => {
-        console.log('Races imported:', data);
-        loadRaceHistory();
-        alert('Races imported successfully!');
-      })
-      .catch(error => {
-        console.error('Error importing races:', error);
-        alert('Error importing races');
-      });
-    } catch (error) {
-      console.error('Error parsing JSON:', error);
-      alert('Invalid JSON file');
+
+  // Allow re-selecting the same file
+  input.value = '';
+
+  let json;
+  try {
+    const text = await file.text();
+    json = JSON.parse(text);
+  } catch (e) {
+    console.error('Error parsing races JSON:', e);
+    alert('Invalid JSON file');
+    return;
+  }
+
+  // Normalize expected shape: { races:[...] } or [...] (array)
+  const racesArray = Array.isArray(json) ? json : (Array.isArray(json?.races) ? json.races : null);
+  if (!racesArray) {
+    alert('Race file format not recognized. Expected {"races":[...]} or an array.');
+    return;
+  }
+
+  // 1) Try bulk upload first (fast path)
+  try {
+    const resp = await fetch('/races/upload', {
+      method: 'POST',
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ races: racesArray })
+    });
+
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    const bodyText = await resp.text().catch(() => '');
+
+    if (!resp.ok) {
+      throw new Error(`Bulk upload failed: HTTP ${resp.status} ${resp.statusText} ${bodyText}`);
     }
-  };
-  reader.readAsText(file);
-  input.value = ''; // Reset file input
+
+    let result = null;
+    if (ct.includes('application/json') && bodyText.trim()) {
+      result = JSON.parse(bodyText);
+    } else {
+      // If server responded OK but not JSON, still treat as success
+      result = { status: "OK" };
+    }
+
+    if (result?.status === "OK") {
+      console.log('Races imported (bulk):', result);
+      await loadRaceHistory();
+      alert('Races imported successfully!');
+      return;
+    }
+
+    throw new Error(`Bulk upload returned non-OK: ${bodyText || JSON.stringify(result)}`);
+  } catch (bulkErr) {
+    console.warn('[ImportRaces] Bulk upload failed; falling back to per-race save:', bulkErr);
+  }
+
+  // 2) Fallback: upload each race via /races/save (smaller payloads)
+  try {
+    let successCount = 0;
+
+    for (let i = 0; i < racesArray.length; i++) {
+      const r = racesArray[i];
+
+      // The firmware /races/save expects RaceSession-ish fields.
+      // We keep the structure tolerant.
+      const payload = {
+        timestamp: r.timestamp || r.time || Date.now(),
+        fastestLap: r.fastestLap || 0,
+        medianLap: r.medianLap || 0,
+        best3LapsTotal: r.best3LapsTotal || 0,
+        pilotName: r.pilotName || "",
+        pilotCallsign: r.pilotCallsign || "",
+        frequency: r.frequency || 0,
+        band: r.band || "",
+        channel: r.channel || 0,
+        trackId: r.trackId || 0,
+        trackName: r.trackName || "",
+        totalDistance: (typeof r.totalDistance === 'number') ? r.totalDistance : 0.0,
+        lapTimes: Array.isArray(r.lapTimes) ? r.lapTimes : []
+      };
+
+      const resp = await fetch('/races/save', {
+        method: 'POST',
+        headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      const txt = await resp.text().catch(() => '');
+      if (!resp.ok) {
+        throw new Error(`Race ${i + 1}/${racesArray.length} failed: HTTP ${resp.status} ${resp.statusText} ${txt}`);
+      }
+
+      // If response is JSON, check status
+      let ok = true;
+      try {
+        const ct = (resp.headers.get('content-type') || '').toLowerCase();
+        if (ct.includes('application/json') && txt.trim()) {
+          const j = JSON.parse(txt);
+          if (j?.status && j.status !== 'OK') ok = false;
+        }
+      } catch (e) {}
+
+      if (!ok) {
+        throw new Error(`Race ${i + 1}/${racesArray.length} returned non-OK: ${txt}`);
+      }
+
+      successCount++;
+    }
+
+    await loadRaceHistory();
+    alert(`Races imported successfully! (${successCount}/${racesArray.length})`);
+  } catch (e) {
+    console.error('Error importing races (fallback):', e);
+    alert(`Error importing races: ${e?.message || e}`);
+  }
 }
 
 function deleteRace(timestamp) {
@@ -4075,6 +4169,16 @@ let wizardState = {
 };
 
 function startCalibrationWizard() {
+  // Stop any previous run cleanly
+  if (wizardRecordingTimerId) {
+    clearTimeout(wizardRecordingTimerId);
+    wizardRecordingTimerId = null;
+  }
+  if (wizardAbortController) {
+    try { wizardAbortController.abort(); } catch (e) {}
+  }
+  wizardAbortController = new AbortController();
+
   // Reset wizard state
   wizardState = {
     recording: false,
@@ -4085,30 +4189,36 @@ function startCalibrationWizard() {
     calculatedEnter: 0,
     calculatedExit: 0
   };
-  
+
   // Show modal and recording screen
   document.getElementById('calibrationWizardModal').style.display = 'flex';
   document.getElementById('wizardRecording').style.display = 'block';
   document.getElementById('wizardMarking').style.display = 'none';
   document.getElementById('wizardResults').style.display = 'none';
-  
+
   // Start recording
-  fetch('/calibration/start', { method: 'POST' })
-    .then(response => response.json())
-    .then(data => {
-      console.log('Calibration wizard started:', data);
+  fetch('/calibration/start', { method: 'POST', signal: wizardAbortController.signal })
+    .then(async (response) => {
+      if (!response.ok) {
+        const t = await response.text().catch(() => '');
+        throw new Error(`POST /calibration/start failed: HTTP ${response.status} ${response.statusText} ${t}`);
+      }
+      // server returns JSON but don’t *require* parsing
+      await response.text().catch(() => '');
       wizardState.recording = true;
       wizardRecordingLoop();
     })
     .catch(error => {
+      if (error?.name === 'AbortError') return;
       console.error('Error starting calibration wizard:', error);
       alert('Error starting calibration wizard');
       closeCalibrationWizard();
     });
 }
 
-async function fetchCalibrationMeta() {
-  const resp = await fetch(`/calibration/data?limit=0`);
+
+async function fetchCalibrationMeta(signal) {
+  const resp = await fetch(`/calibration/data?limit=0`, { signal });
   if (!resp.ok) {
     const t = await resp.text().catch(() => '');
     throw new Error(`GET /calibration/data?limit=0 failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
@@ -4116,8 +4226,8 @@ async function fetchCalibrationMeta() {
   return await resp.json(); // { total: N }
 }
 
-async function fetchCalibrationPage(offset, limit) {
-  const resp = await fetch(`/calibration/data?offset=${offset}&limit=${limit}`);
+async function fetchCalibrationPage(offset, limit, signal) {
+  const resp = await fetch(`/calibration/data?offset=${offset}&limit=${limit}`, { signal });
   if (!resp.ok) {
     const t = await resp.text().catch(() => '');
     throw new Error(`GET /calibration/data page failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
@@ -4125,20 +4235,19 @@ async function fetchCalibrationPage(offset, limit) {
   return await resp.json(); // { total, offset, limit, count, data:[...] }
 }
 
-async function fetchAllCalibrationData() {
-  const meta = await fetchCalibrationMeta();
+async function fetchAllCalibrationData(signal) {
+  const meta = await fetchCalibrationMeta(signal);
   const total = meta.total || 0;
 
   const all = [];
   let offset = 0;
 
   while (offset < total) {
-    const page = await fetchCalibrationPage(offset, CALIBRATION_PAGE_SIZE);
+    const page = await fetchCalibrationPage(offset, CALIBRATION_PAGE_SIZE, signal);
     if (Array.isArray(page.data) && page.data.length) {
       all.push(...page.data);
       offset += page.data.length;
     } else {
-      // Safety break to avoid infinite loop if something weird happens
       break;
     }
   }
@@ -4150,44 +4259,45 @@ async function fetchAllCalibrationData() {
 function wizardRecordingLoop() {
   if (!wizardState.recording) return;
 
+  if (wizardRecordingTimerId) {
+    clearTimeout(wizardRecordingTimerId);
+    wizardRecordingTimerId = null;
+  }
+
   fetchCalibrationMeta()
     .then(meta => {
       document.getElementById('wizardSampleCount').textContent = `Samples: ${meta.total || 0}`;
-      if (wizardState.recording) setTimeout(wizardRecordingLoop, 200);
+      if (wizardState.recording) {
+        wizardRecordingTimerId = setTimeout(wizardRecordingLoop, 200);
+      }
     })
     .catch(error => {
       console.error('[wizardRecordingLoop] Error fetching calibration meta:', error);
-      if (wizardState.recording) setTimeout(wizardRecordingLoop, 500);
+      if (wizardState.recording) {
+        wizardRecordingTimerId = setTimeout(wizardRecordingLoop, 500);
+      }
     });
 }
 
 async function stopCalibrationWizard() {
   wizardState.recording = false;
 
+  if (wizardRecordingTimerId) {
+    clearTimeout(wizardRecordingTimerId);
+    wizardRecordingTimerId = null;
+  }
+
   try {
-    const resp = await fetch('/calibration/stop', { method: 'POST' });
+    const resp = await fetch('/calibration/stop', { method: 'POST', signal: wizardAbortController?.signal });
 
     if (!resp.ok) {
-      // Try to read text to help debugging; may be empty
       const t = await resp.text().catch(() => '');
       throw new Error(`POST /calibration/stop failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
     }
 
-    // Only parse JSON if there is actually a JSON body
-    const ct = (resp.headers.get('content-type') || '').toLowerCase();
-    if (ct.includes('application/json')) {
-      // Some servers still send application/json with empty body; guard that too
-      const txt = await resp.text();
-      if (txt && txt.trim().length) {
-        JSON.parse(txt); // we don't actually use it, just validate
-      }
-    } else {
-      // Not JSON (or empty) — that's fine.
-      // If it’s truly empty, resp.text() above would be empty anyway.
-      // We intentionally do nothing here.
-    }
+    // Consume body safely (may be empty in some builds)
+    await resp.text().catch(() => '');
 
-    // Fetch recorded data
     // Fetch recorded data (paged)
     const { total, data } = await fetchAllCalibrationData();
     console.log('Calibration data received:', total, 'samples');
@@ -4199,14 +4309,11 @@ async function stopCalibrationWizard() {
       return;
     }
 
-    // Auto-pause live scanner and show full recorded dataset scaled to the screen
     enterCalibrationOverviewModeFromWizard();
 
-    // Show marking screen
     document.getElementById('wizardRecording').style.display = 'none';
     document.getElementById('wizardMarking').style.display = 'block';
 
-    // Draw chart
     drawWizardChart();
   } catch (error) {
     console.error('Error stopping calibration wizard:', error);
@@ -4662,22 +4769,32 @@ function applyCalculatedThresholds() {
 }
 
 function cancelCalibrationWizard() {
-  if (wizardState.recording) {
-    fetch('/calibration/stop', { method: 'POST' })
-      .then(() => {
-        closeCalibrationWizard();
-      })
-      .catch(error => {
-        console.error('Error stopping calibration:', error);
-        closeCalibrationWizard();
-      });
-  } else {
-    closeCalibrationWizard();
+  // stop loop immediately
+  wizardState.recording = false;
+  if (wizardRecordingTimerId) {
+    clearTimeout(wizardRecordingTimerId);
+    wizardRecordingTimerId = null;
   }
+
+  // Tell firmware to stop (best effort), then close
+  fetch('/calibration/stop', { method: 'POST' })
+    .then(() => closeCalibrationWizard())
+    .catch(() => closeCalibrationWizard());
 }
 
 function closeCalibrationWizard() {
   wizardState.recording = false;
+
+  if (wizardRecordingTimerId) {
+    clearTimeout(wizardRecordingTimerId);
+    wizardRecordingTimerId = null;
+  }
+
+  if (wizardAbortController) {
+    try { wizardAbortController.abort(); } catch (e) {}
+    wizardAbortController = null;
+  }
+
   document.getElementById('calibrationWizardModal').style.display = 'none';
   document.getElementById('wizardRecording').style.display = 'none';
   document.getElementById('wizardMarking').style.display = 'none';

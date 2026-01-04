@@ -229,11 +229,12 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             // Show whether we've *confirmed* exit (2 samples) below
             uint16_t prevIdx = (rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY;
             const bool belowExit2 = (rssi[rssiCount] < exitT) && (rssi[prevIdx] < exitT);
-
+            /*
             DEBUG("[RACE] raw=%3u kal=%3u med=%3u ma7=%3u lp=%3u out=%3u | enter=%3u exit=%3u | peak=%3u validPeak=%d belowExit2=%d entered=%d hold=%u\n",
                   rawRssi, kalman_filtered, median_kal, ma, lp, out,
                   enter, exitT, rssiPeak,
                   (int)validPeak, (int)belowExit2, (int)enteredGate, (unsigned)enterHoldSamples);
+            */
         }
 
         prevAvgRssi = cur;
