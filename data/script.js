@@ -2109,10 +2109,10 @@ function addLap(lapStr) {
   
   // Update lap counter
   updateLapCounter();
-  
+
   // Update lap analysis
   updateAnalysisView();
-  
+
   // Auto-stop race if max laps reached (excluding hole shot, and if maxLaps > 0)
   if (maxLaps > 0 && lapNo > 0 && lapNo >= maxLaps) {
     setTimeout(function() {
@@ -2655,35 +2655,21 @@ function stopRace() {
   stopRaceButton.disabled = true;
   startRaceButton.disabled = false;
   addLapButton.disabled = true;
-  
+
   // Stop distance polling
   stopDistancePolling();
 
-  // Auto-save race if there are laps
-  if (lapTimes.length > 0) {
-    saveCurrentRace();
-    if (confirm("Download race data? (it will be lost once you lose power)")) {
-        // YES / OK clicked
-        downloadRaces()
-    } 
-  }
+  // Show Download/Transfer buttons now that race is stopped
+  updateRaceDataButtonsVisibility();
 
-  lapNo = -1;
-  lapTimes = [];
-  currentTotalDistance = 0;
-  currentDistanceRemaining = 0;
-  currentLapDistance = 0.0;
-  currentLapStartTime = 0;
-  lastCompletedLapTime = 0;
-  updateLapCounter();
-  updateDistanceDisplay();
+  // Note: Race data remains visible after stopping.
+  // Use "Transfer to Race History" button to save it, or "Clear Laps" to remove it.
+  // Race data is NOT automatically transferred to Race History anymore.
 }
 
 function clearLaps() {
-  // Auto-save race if there are laps before clearing
-  if (lapTimes.length > 0) {
-    saveCurrentRace();
-  }
+  // Note: Race data is NOT automatically saved to Race History.
+  // If you want to save before clearing, use "Transfer to Race History" button first.
 
   var tableHeaderRowCount = 1;
   var rowCount = lapTable.rows.length;
@@ -2704,6 +2690,87 @@ function clearLaps() {
   document.getElementById('statMedian').textContent = '--';
   document.getElementById('statBest3').textContent = '--';
   document.getElementById('statBest3Laps').textContent = '';
+
+  // Hide race data buttons when no data
+  updateRaceDataButtonsVisibility();
+}
+
+function updateRaceDataButtonsVisibility() {
+  const buttonsDiv = document.getElementById('raceDataButtons');
+  if (buttonsDiv) {
+    // Only show buttons if we have lap data AND the race is stopped (stop button is disabled)
+    const raceIsStopped = stopRaceButton.disabled;
+    buttonsDiv.style.display = (lapTimes.length > 0 && raceIsStopped) ? 'block' : 'none';
+  }
+}
+
+function downloadCurrentRaceData() {
+  if (lapTimes.length === 0) {
+    alert('No race data to download');
+    return;
+  }
+
+  // Create race data object from current race
+  const validLaps = lapTimes.slice(1);
+  const fastest = validLaps.length > 0 ? Math.min(...validLaps) : 0;
+  const sorted = [...validLaps].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  const median = sorted.length > 0 ? (sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]) : 0;
+
+  let best3Total = 0;
+  if (validLaps.length >= 3) {
+    const best3 = sorted.slice(0, 3);
+    best3Total = best3.reduce((sum, t) => sum + t, 0);
+  }
+
+  const pilotCallsign = document.getElementById('pcallsign')?.value || '';
+  const bandValue = bandSelect.options[bandSelect.selectedIndex].value;
+  const channelValue = parseInt(channelSelect.options[channelSelect.selectedIndex].value);
+
+  let totalRaceDistance = 0;
+  if (trackLapLength > 0 && lapTimes.length > 0) {
+    totalRaceDistance = trackLapLength * lapTimes.length;
+  }
+
+  const raceData = {
+    timestamp: Math.floor(Date.now() / 1000),
+    lapTimes: lapTimes.map(t => Math.round(t * 1000)),
+    fastestLap: Math.round(fastest * 1000),
+    medianLap: Math.round(median * 1000),
+    best3LapsTotal: Math.round(best3Total * 1000),
+    pilotName: pilotNameInput.value || '',
+    pilotCallsign: pilotCallsign,
+    frequency: frequency,
+    band: bandValue,
+    channel: channelValue,
+    trackId: currentTrackId || 0,
+    trackName: currentTrackName || '',
+    totalDistance: totalRaceDistance
+  };
+
+  // Create download
+  const dataStr = JSON.stringify({ races: [raceData] }, null, 2);
+  const dataBlob = new Blob([dataStr], { type: 'application/json' });
+  const url = URL.createObjectURL(dataBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `race-${raceData.timestamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function transferToRaceHistory() {
+  if (lapTimes.length === 0) {
+    alert('No race data to transfer');
+    return;
+  }
+
+  // Save current race to backend (which will overwrite in RAM-only mode)
+  saveCurrentRace();
+
+  alert('Race transferred to Race History. You can view it in the Race History tab.');
 }
 
 // EventSource initialization moved to setupWiFiEvents() function above
@@ -2830,12 +2897,25 @@ const barColors = [
 ];
 
 function switchAnalysisMode(mode) {
+  // Only switch if mode is different to prevent clearing when clicking same tab
+  if (currentAnalysisMode === mode) {
+    return;
+  }
+
   currentAnalysisMode = mode;
   // Update tab styling
   document.querySelectorAll('.analysis-tab').forEach(tab => {
     tab.classList.remove('active');
   });
-  event.target.classList.add('active');
+
+  // Add active class to the clicked button using mode to find it
+  const activeButton = mode === 'history'
+    ? document.querySelector('.analysis-tab[onclick*="history"]')
+    : document.querySelector('.analysis-tab[onclick*="fastestRound"]');
+  if (activeButton) {
+    activeButton.classList.add('active');
+  }
+
   // Re-render analysis
   updateAnalysisView();
 }
@@ -3091,7 +3171,6 @@ function setButtonLabel(el, label) {
 }
 
 function applyRaceHistoryModeUI() {
-  const downloadBtn = document.getElementById('downloadRacesBtn');
   const importBtn = document.getElementById('importRacesBtn');
   const clearBtn = document.getElementById('clearAllRacesBtn');
 
@@ -3104,11 +3183,6 @@ function applyRaceHistoryModeUI() {
   setButtonLabel(
     importBtn,
     raceHistoryPersistent ? 'Import Races' : 'Import Race (overrides current data)'
-  );
-
-  setButtonLabel(
-    downloadBtn,
-    raceHistoryPersistent ? 'Download Races' : 'Download Current Race'
   );
 
   if (clearBtn) {
@@ -3166,12 +3240,17 @@ async function loadRaceHistory() {
 
 function renderRaceHistory() {
   const listContainer = document.getElementById('raceHistoryList');
-  
+  const raceDetails = document.getElementById('raceDetails');
+
   if (raceHistoryData.length === 0) {
     listContainer.innerHTML = '<p class="no-data">No races saved yet</p>';
+    if (raceDetails) {
+      raceDetails.style.display = 'none';
+      currentDetailRace = null;
+    }
     return;
   }
-  
+
   let html = '';
   raceHistoryData.forEach((race, index) => {
     const date = new Date(race.timestamp * 1000);
@@ -3187,7 +3266,7 @@ function renderRaceHistory() {
     const freqDisplay = race.frequency ? `${race.band}${race.channel} (${race.frequency}MHz)` : '';
     const trackDisplay = race.trackName ? race.trackName : '';
     const distanceDisplay = race.totalDistance ? `${race.totalDistance.toFixed(1)}m` : '';
-    
+
     html += `
       <div class="race-item" data-race-index="${index}" onclick="viewRaceDetails(${index})">
         <div class="race-item-buttons">
@@ -3214,8 +3293,20 @@ function renderRaceHistory() {
       </div>
     `;
   });
-  
+
   listContainer.innerHTML = html;
+
+  // Auto-show details for the currently selected race, or first race if none selected
+  let indexToShow = 0;
+  if (currentDetailRace !== null) {
+    const currentIndex = raceHistoryData.findIndex(r => r.timestamp === currentDetailRace.timestamp);
+    if (currentIndex !== -1) {
+      indexToShow = currentIndex;
+    }
+  }
+
+  // Always show race details when there are races
+  viewRaceDetails(indexToShow);
 }
 
 function viewRaceDetails(index) {
@@ -3223,41 +3314,25 @@ function viewRaceDetails(index) {
   const race = currentDetailRace;
   const date = new Date(race.timestamp * 1000);
   const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
-  
+
   // Calculate total race time
   const totalTime = race.lapTimes.reduce((sum, t) => sum + t, 0) / 1000;
-  
+
   document.getElementById('raceDetailsTitle').textContent = `Race - ${dateStr}`;
   document.getElementById('detailFastest').textContent = (race.fastestLap / 1000).toFixed(2) + 's';
   document.getElementById('detailMedian').textContent = (race.medianLap / 1000).toFixed(2) + 's';
   document.getElementById('detailBest3').textContent = (race.best3LapsTotal / 1000).toFixed(2) + 's';
   document.getElementById('detailTotalTime').textContent = totalTime.toFixed(2) + 's';
-  
-  // Get the clicked race item element
-  const raceItem = document.querySelector(`.race-item[data-race-index="${index}"]`);
+
+  // Keep race details in its original position (below the race list) and always visible
   const detailsDiv = document.getElementById('raceDetails');
-  
-  // Remove from current position
-  if (detailsDiv.parentNode) {
-    detailsDiv.parentNode.removeChild(detailsDiv);
-  }
-  
-  // Insert after the clicked race item
-  if (raceItem && raceItem.parentNode) {
-    raceItem.parentNode.insertBefore(detailsDiv, raceItem.nextSibling);
-  }
-  
   detailsDiv.style.display = 'block';
-  
+
   // Render the race timeline
   renderRaceTimeline(race);
-  
-  // Smooth scroll to the details
-  setTimeout(() => {
-    detailsDiv.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-  }, 50);
-  
-  switchDetailMode('history');
+
+  // Force render to ensure content shows even if tab was previously active
+  switchDetailMode('history', true);
 }
 
 function renderRaceTimeline(race) {
@@ -3510,10 +3585,19 @@ function highlightTimelineEvent(index) {
   }
 }
 
-function switchDetailMode(mode) {
+function switchDetailMode(mode, forceRender = false) {
   const tabs = document.querySelectorAll('#raceDetails .analysis-tab');
+  const isAlreadyActive = mode === 'history'
+    ? tabs[0]?.classList.contains('active')
+    : tabs[1]?.classList.contains('active');
+
+  // Only prevent re-render if already active AND not forced
+  if (isAlreadyActive && !forceRender) {
+    return;
+  }
+
   tabs.forEach(tab => tab.classList.remove('active'));
-  
+
   if (mode === 'history') {
     tabs[0].classList.add('active');
     renderDetailHistory();

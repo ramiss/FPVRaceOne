@@ -29,7 +29,7 @@
       </nav>
       <div id="raceTabDownloadReminder" class="banner-warning"
           style="display:none; margin: 10px 0; padding: 6px 10px; border-radius: 8px;">
-        <span>Races are lost when unplugged. Download under Race History to save.</span>
+        <span>Races are lost when unplugged. Download to save.</span>
         <a href="#" id="raceTabDownloadReminderHide" style="margin-left:auto;">hide</a>
       </div>
       <div id="calibrationBanner" style="
@@ -58,6 +58,10 @@
       </div>
 
       <div id="race" class="tabcontent" style="display: block;">
+        <div id="raceDataButtons" style="display: none; margin-bottom: 16px; text-align: center;">
+          <button onclick="downloadCurrentRaceData()" style="padding: 8px 16px; margin-right: 8px;">Download Current Race</button>
+          <button onclick="transferToRaceHistory()" style="padding: 8px 16px;">Transfer to Race History</button>
+        </div>
         <span id="timer">00:00:00s</span>
         <div id="lapCounter" style="text-align: center; font-size: 18px; font-weight: bold; color: var(--primary-color); margin: 8px 0;">Lap 0</div>
         <div class="racebuttons">
@@ -116,7 +120,6 @@
         <h2>Race History</h2>
         <!--<div id="raceHistoryStorageLabel" class="info-label" style="margin: 8px 0; font-size: 0.95em;"></div>-->
         <div class="history-controls">
-          <button id="downloadRacesBtn" onclick="downloadRaces()">Download Races</button>
           <button id="importRacesBtn" onclick="document.getElementById('importFile').click()">Import Races</button>
           <input type="file" id="importFile" accept=".json" style="display: none;" onclick="this.value='';" onchange="importRaces(this)" />
           <button id="clearAllRacesBtn" onclick="clearAllRaces()" class="danger-button">Clear All</button>
@@ -125,7 +128,6 @@
           <p class="no-data">No races saved yet</p>
         </div>
         <div id="raceDetails" class="race-details" style="display: none;">
-          <button onclick="closeRaceDetails()" class="close-button">Close</button>
           <h3 id="raceDetailsTitle"></h3>
           
           <!-- Race Timeline -->
