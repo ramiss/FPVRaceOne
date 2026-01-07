@@ -1,11 +1,12 @@
 # partitions_c6_two_ota_max_with_coredump.csv
 # ESP32-C6: no phy_init or fact partition
+# Increased OTA partitions from 0x170000 to 0x180000 to accommodate larger firmware
 
 nvs,        data, nvs,      0x9000,   0x5000
 otadata,    data, ota,      0xE000,   0x2000
 
-ota_0,      app,  ota_0,    0x10000,  0x170000
-ota_1,      app,  ota_1,    0x180000, 0x170000
+ ota_0,      app,  ota_0,    0x10000,  0x180000
+ ota_1,      app,  ota_1,    0x190000, 0x180000
 
-coredump,   data, coredump, 0x2F0000, 0x10000
-spiffs,     data, spiffs,   0x300000, 0x100000 
+coredump,   data, coredump, 0x310000, 0x10000
+spiffs,     data, spiffs,   0x320000, 0xE0000
