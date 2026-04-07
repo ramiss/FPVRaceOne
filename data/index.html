@@ -18,12 +18,17 @@
         <div class="logo">
           <img src="logo-white.svg" alt="FPVGate" width="64" id="headerLogo" />
           <h1>FPVGate</h1>
-        </div>
-        <div id="connectionIndicator" class="connection-indicator">
-          <div class="status-dot connected"></div>
-          <div class="connection-info" id="connectionInfo">
-            <div class="connection-mode">WiFi Connected</div>
-            <div class="connection-details" id="connectionDetails">Loading...</div>
+          <div id="connectionIndicator" class="connection-indicator" title="Connection status">
+            <svg id="wifiIcon" class="wifi-icon" width="26" height="22" viewBox="0 0 26 22" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="WiFi signal">
+              <circle id="wifiDot" cx="13" cy="20" r="2"/>
+              <path id="wifiBar1" d="M9 16 Q13 12.5 17 16" stroke-width="2.2" stroke-linecap="round"/>
+              <path id="wifiBar2" d="M5.5 11.5 Q13 6 20.5 11.5" stroke-width="2.2" stroke-linecap="round"/>
+              <path id="wifiBar3" d="M2 7 Q13 -0.5 24 7" stroke-width="2.2" stroke-linecap="round"/>
+            </svg>
+            <div class="connection-info" id="connectionInfo">
+              <div class="connection-mode">WiFi Connected</div>
+              <div class="connection-details" id="connectionDetails">Loading...</div>
+            </div>
           </div>
         </div>
       </nav>
@@ -51,6 +56,23 @@
         <li><a href="#" id="nav-link-config" class="tablinks" onclick="openSettingsModal()">Configuration</a></li>
       </ul>
     </header>
+    <div id="disconnectedBanner" style="
+      display: none;
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      z-index: 9999;
+      background: #c0392b;
+      color: #fff;
+      padding: 12px 20px;
+      font-weight: bold;
+      font-size: 15px;
+      text-align: center;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    ">
+      <span id="disconnectedBannerText">WiFi disconnected — reconnecting...</span>
+      &nbsp;&nbsp;
+      <button onclick="location.reload()" style="background:#fff; color:#c0392b; border:none; padding:4px 14px; border-radius:4px; cursor:pointer; font-weight:bold; font-size:13px;">Refresh</button>
+    </div>
 
     <main>
       <div id="config" class="tabcontent" style="display: none;">

@@ -333,46 +333,46 @@ nav {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 8px;
   cursor: pointer;
-  margin-right: 3em;
+  margin-left: 8px;
 }
 
-.status-dot {
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background-color: #EF5350;
-  box-shadow: 0 0 8px rgba(239, 83, 80, 0.6);
-  animation: pulse-disconnected 2s ease-in-out infinite;
-  transition: transform 0.2s ease;
+/* WiFi icon bars and dot — dim by default, lit by JS */
+.wifi-icon circle,
+.wifi-icon path {
+  fill: none;
+  stroke: none;
+  transition: fill 0.3s ease, stroke 0.3s ease, opacity 0.3s ease;
 }
 
-.connection-indicator:hover .status-dot {
-  transform: scale(1.2);
+.wifi-icon circle {
+  fill: rgba(255, 255, 255, 0.25);
 }
 
-.status-dot.connected {
-  background-color: #66BB6A;
-  box-shadow: 0 0 8px rgba(102, 187, 106, 0.6);
-  animation: pulse-connected 2s ease-in-out infinite;
+.wifi-icon path {
+  stroke: rgba(255, 255, 255, 0.25);
 }
 
-@keyframes pulse-connected {
+/* Lit state (set via JS) */
+.wifi-icon circle.lit  { fill: #fff; }
+.wifi-icon path.lit    { stroke: #fff; }
+
+/* Disconnected: slow fade animation on the whole icon */
+.wifi-icon.disconnected {
+  animation: wifi-pulse-off 2s ease-in-out infinite;
+}
+
+@keyframes wifi-pulse-off {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
+  50%       { opacity: 0.3; }
 }
 
-@keyframes pulse-disconnected {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
-}
-
+/* Connection info popup — drops down below the icon */
 .connection-info {
   position: absolute;
-  right: 100%;
-  top: 50%;
-  transform: translateY(-50%) translateX(1rem);
+  left: 0;
+  top: calc(100% + 10px);
+  transform: translateY(-6px);
   background-color: rgba(255, 255, 255, 0.95);
   border: 2px solid var(--primary-color);
   border-radius: 8px;
@@ -390,7 +390,7 @@ nav {
 .connection-indicator:hover .connection-info {
   opacity: 1;
   visibility: visible;
-  transform: translateY(-50%) translateX(0);
+  transform: translateY(0);
   pointer-events: auto;
 }
 

@@ -113,6 +113,10 @@ const batteryVoltageDisplay = document.getElementById("bvolt");
 const rssiBuffer = [];
 var rssiValue = 0;
 var rssiSending = false;
+
+let lastKeepaliveMs = 0;
+let keepaliveWatchdogTimer = null;
+const KEEPALIVE_TIMEOUT_MS = 35000; // flag stale connection after 2+ missed keepalives (server sends every 15s)
 var rssiChart;
 var crossing = false;
 var rssiSeries = new TimeSeries();
@@ -225,68 +229,139 @@ async function connectUSB(portPath) {
   }
 }
 
+function showDisconnectedBanner(message) {
+  const banner = document.getElementById('disconnectedBanner');
+  const text = document.getElementById('disconnectedBannerText');
+  if (!banner) return;
+  if (text) text.textContent = message || 'WiFi disconnected — reconnecting...';
+  banner.style.display = 'block';
+}
+
+function hideDisconnectedBanner() {
+  const banner = document.getElementById('disconnectedBanner');
+  if (banner) banner.style.display = 'none';
+}
+
+// Watchdog: if the SSE connection appears open but no keepalive arrives in 35s,
+// the connection is stale (TCP alive but server silent). Force a reconnect.
+function startKeepaliveWatchdog() {
+  lastKeepaliveMs = Date.now();
+  if (keepaliveWatchdogTimer) clearInterval(keepaliveWatchdogTimer);
+  keepaliveWatchdogTimer = setInterval(() => {
+    if (!eventSource || eventSource.readyState !== EventSource.OPEN) return;
+    if (Date.now() - lastKeepaliveMs > KEEPALIVE_TIMEOUT_MS) {
+      console.warn('[Keepalive] No keepalive in 35s — connection is stale, forcing reconnect');
+      showDisconnectedBanner('Connection stalled — reconnecting...');
+      setupWiFiEvents();
+    }
+  }, 10000);
+}
+
+// Called every time the SSE connection (re)opens. Restores any server-side state
+// that was active before the connection dropped.
+async function onWiFiReconnect() {
+  hideDisconnectedBanner();
+
+  // If the user had the calibration tab open and RSSI streaming was active,
+  // the firmware resets sendRssi=false on each new SSE connection. Re-request it.
+  if (rssiSending) {
+    rssiSending = false;
+    try {
+      const resp = await fetch('/timer/rssiStart', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' }
+      });
+      if (resp.ok) {
+        rssiSending = true;
+        console.log('[Reconnect] RSSI streaming re-started');
+      }
+    } catch (err) {
+      console.error('[Reconnect] Failed to restart RSSI streaming:', err);
+    }
+  }
+}
+
 function setupWiFiEvents() {
   // Clear any pending reconnect timer
   if (eventSourceReconnectTimer) {
     clearTimeout(eventSourceReconnectTimer);
     eventSourceReconnectTimer = null;
   }
-  
+
   if (eventSource) {
     eventSource.close();
   }
-  
-  if (window.EventSource) {
-    eventSource = new EventSource("/events");
-    
-    eventSource.addEventListener("open", function (e) {
-      console.log("WiFi Events Connected");
-      eventSourceReconnectAttempts = 0; // Reset counter on successful connect
+
+  if (!window.EventSource) return;
+
+  lastKeepaliveMs = Date.now(); // reset watchdog baseline for this new connection attempt
+  eventSource = new EventSource("/events");
+
+  eventSource.addEventListener("open", function () {
+    console.log("WiFi Events Connected");
+    eventSourceReconnectAttempts = 0;
+    updateConnectionStatus('WiFi', true);
+    startKeepaliveWatchdog();
+    onWiFiReconnect();
+
+    if (connectionStatusUpdateInterval) clearInterval(connectionStatusUpdateInterval);
+    connectionStatusUpdateInterval = setInterval(() => {
       updateConnectionStatus('WiFi', true);
-      
-      // Update connection info every 5 seconds
-      if (connectionStatusUpdateInterval) {
-        clearInterval(connectionStatusUpdateInterval);
+    }, 5000);
+  }, false);
+
+  eventSource.addEventListener("error", function (e) {
+    if (e.target.readyState !== EventSource.OPEN) {
+      console.log("WiFi Events Disconnected - attempting reconnect...");
+      updateConnectionStatus('WiFi', false);
+
+      if (eventSourceReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+        eventSourceReconnectAttempts++;
+        const msg = `WiFi disconnected — reconnecting (${eventSourceReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})...`;
+        console.log(msg);
+        showDisconnectedBanner(msg);
+
+        eventSourceReconnectTimer = setTimeout(() => {
+          console.log('Attempting EventSource reconnect...');
+          setupWiFiEvents();
+        }, RECONNECT_DELAY_MS);
+      } else {
+        showDisconnectedBanner('Connection lost. Please refresh the page.');
+        console.error('Max reconnect attempts reached.');
       }
-      connectionStatusUpdateInterval = setInterval(() => {
-        updateConnectionStatus('WiFi', true);
-      }, 5000);
-    }, false);
-    
-    eventSource.addEventListener("error", function (e) {
-      if (e.target.readyState != EventSource.OPEN) {
-        console.log("WiFi Events Disconnected - attempting reconnect...");
-        updateConnectionStatus('WiFi', false);
-        
-        // Attempt to reconnect
-        if (eventSourceReconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-          eventSourceReconnectAttempts++;
-          console.log(`Reconnect attempt ${eventSourceReconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${RECONNECT_DELAY_MS}ms...`);
-          
-          eventSourceReconnectTimer = setTimeout(() => {
-            console.log('Attempting EventSource reconnect...');
-            setupWiFiEvents();
-          }, RECONNECT_DELAY_MS);
-        } else {
-          console.error('Max reconnect attempts reached. Please refresh the page.');
-        }
-      }
-    }, false);
-    
-    eventSource.addEventListener("rssi", function (e) {
-      rssiBuffer.push(e.data);
-      if (rssiBuffer.length > 10) {
-        rssiBuffer.shift();
-      }
-      console.log("rssi", e.data, "buffer size", rssiBuffer.length);
-    }, false);
-    
-    eventSource.addEventListener("lap", function (e) {
-      var lap = (parseFloat(e.data) / 1000).toFixed(2);
-      addLap(lap);
-      console.log("lap raw:", e.data, " formatted:", lap);
-    }, false);
-  }
+    }
+  }, false);
+
+  // Server sends a keepalive ping every 15s. Track it so the watchdog can detect
+  // a stale-but-open TCP connection before the browser notices.
+  eventSource.addEventListener("keepalive", function () {
+    lastKeepaliveMs = Date.now();
+  }, false);
+
+  eventSource.addEventListener("rssi", function (e) {
+    rssiBuffer.push(e.data);
+    if (rssiBuffer.length > 10) rssiBuffer.shift();
+  }, false);
+
+  eventSource.addEventListener("lap", function (e) {
+    var lap = (parseFloat(e.data) / 1000).toFixed(2);
+    addLap(lap);
+    console.log("lap:", lap + "s");
+  }, false);
+
+  // Sync race button state when the server starts or stops a race
+  // (e.g. maxLaps reached on server side, or raced from another client)
+  eventSource.addEventListener("raceState", function (e) {
+    if (e.data === "started") {
+      startRaceButton.disabled = true;
+      stopRaceButton.disabled = false;
+      addLapButton.disabled = false;
+    } else if (e.data === "stopped") {
+      stopRaceButton.disabled = true;
+      startRaceButton.disabled = false;
+      addLapButton.disabled = true;
+    }
+  }, false);
 }
 
 function setupUSBEvents() {
@@ -294,16 +369,13 @@ function setupUSBEvents() {
   
   transportManager.on('rssi', (data) => {
     rssiBuffer.push(data);
-    if (rssiBuffer.length > 10) {
-      rssiBuffer.shift();
-    }
-    console.log("USB rssi", data, "buffer size", rssiBuffer.length);
+    if (rssiBuffer.length > 10) rssiBuffer.shift();
   });
-  
+
   transportManager.on('lap', (data) => {
     var lap = (parseFloat(data) / 1000).toFixed(2);
     addLap(lap);
-    console.log("USB lap raw:", data, " formatted:", lap);
+    console.log("USB lap:", lap + "s");
   });
   
   transportManager.on('disconnect', () => {
