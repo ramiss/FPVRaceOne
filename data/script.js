@@ -867,6 +867,10 @@ function clearStagedConfig() {
 
 
 async function getBatteryVoltage() {
+  // Skip if the battery section is not visible (feature disabled or hardware unavailable)
+  const batterySection = document.getElementById('batteryMonitoringSection');
+  if (!batterySection || batterySection.style.display === 'none') return;
+
   try {
     let response;
     if (usbConnected && transportManager) {
@@ -876,7 +880,7 @@ async function getBatteryVoltage() {
       const resp = await fetch("/status");
       response = await resp.text();
     }
-    
+
     const batteryVoltageMatch = response.match(/Battery Voltage:\s*([\d.]+v)/);
     const batteryVoltage = batteryVoltageMatch ? batteryVoltageMatch[1] : null;
     if (batteryVoltageDisplay) {
@@ -5120,11 +5124,10 @@ function toggleSerialMonitor() {
   }
 }
 
-function startDebugListener() {
-  // Poll for new debug logs every 500ms
-  serialMonitorPollInterval = setInterval(pollDebugLogs, 500);
-  
-  // Initial poll
+function startDebugListener(rateMs = 3000) {
+  // Clear any existing interval before starting a new one
+  stopDebugListener();
+  serialMonitorPollInterval = setInterval(pollDebugLogs, rateMs);
   pollDebugLogs();
 }
 
@@ -5138,12 +5141,15 @@ function stopDebugListener() {
 function startSerialMonitor() {
   const button = document.getElementById('serialMonitorToggle');
   const monitor = document.getElementById('serialMonitor');
-  
+
   button.textContent = 'Stop Monitor';
   button.style.backgroundColor = '#ff5555';
   serialMonitorActive = true;
   lastSeenTimestampUI = 0;
-  
+
+  // Speed up polling while monitor is open
+  startDebugListener(300);
+
   // Clear monitor and show starting message
   monitor.innerHTML = '<div style="color: #4ade80;">[SYSTEM] Serial monitor started</div>';
 }
@@ -5190,11 +5196,14 @@ function pollDebugLogs() {
 function stopSerialMonitor() {
   const button = document.getElementById('serialMonitorToggle');
   const monitor = document.getElementById('serialMonitor');
-  
+
   button.textContent = 'Start Monitor';
   button.style.backgroundColor = '';
   serialMonitorActive = false;
-    
+
+  // Drop back to slow background polling (calibration banner only)
+  startDebugListener(3000);
+
   const line = document.createElement('div');
   line.style.color = '#888';
   line.textContent = '[SYSTEM] Serial monitor stopped';

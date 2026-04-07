@@ -37,6 +37,40 @@ static const char *wifi_ap_password = "fpvgate1";
 static const char *wifi_ap_address = "192.168.4.1";
 String wifi_ap_ssid;
 
+// Scan 2.4GHz channels and return the least-congested non-overlapping channel (1, 6, or 11).
+// Scoring: each nearby AP adds 1 point plus a RSSI weight (stronger = more interference).
+// Lower score = better channel. Called once per boot before starting the AP.
+static uint8_t selectBestWifiChannel() {
+    const uint8_t candidates[] = {1, 6, 11};
+    int score[14] = {};  // index 1-13; 0 unused
+
+    WiFi.mode(WIFI_STA);
+    int n = WiFi.scanNetworks(false, true, false, 120);  // 120ms per channel max
+    if (n > 0) {
+        for (int i = 0; i < n; i++) {
+            int ch = WiFi.channel(i);
+            int rssi = WiFi.RSSI(i);  // negative, e.g. -70
+            if (ch >= 1 && ch <= 13) {
+                score[ch] += 1 + (rssi + 100) / 20;  // stronger signal = higher score
+            }
+        }
+    }
+    WiFi.scanDelete();
+    WiFi.mode(WIFI_OFF);
+
+    uint8_t best = candidates[0];
+    int bestScore = INT_MAX;
+    for (uint8_t ch : candidates) {
+        if (score[ch] < bestScore) {
+            bestScore = score[ch];
+            best = ch;
+        }
+    }
+    DEBUG("WiFi channel scan: ch1=%d ch6=%d ch11=%d -> selected ch%d\n",
+          score[1], score[6], score[11], best);
+    return best;
+}
+
 void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr, WebhookManager *webhookMgr) {
 
     ipAddress.fromString(wifi_ap_address);
@@ -66,11 +100,6 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     WiFi.persistent(false);
     WiFi.disconnect();
     WiFi.mode(WIFI_OFF);
-    // Reduce TX power to prevent boot-looping in AP mode due to power consumption
-    // WIFI_POWER_11dBm provides good range while keeping power consumption manageable
-    WiFi.setTxPower(WIFI_POWER);
-    esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_LR);
-    esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_LR);
     if (conf->getSsid()[0] == 0) {
         changeMode = WIFI_AP;
     } else {
@@ -179,43 +208,48 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     }
     if (changeMode != wifiMode && changeMode != WIFI_OFF && (currentTimeMs - changeTimeMs) > WIFI_RECONNECT_TIMEOUT_MS) {
         switch (changeMode) {
-            case WIFI_AP:
-                DEBUG("Changing to WiFi AP mode\n");
+            case WIFI_AP: {
+                // Scan for the least-congested non-overlapping channel once per boot
+                static uint8_t apChannel = 0;
+                if (apChannel == 0) {
+                    apChannel = selectBestWifiChannel();
+                }
+
+                DEBUG("Changing to WiFi AP mode on ch%d\n", apChannel);
 
                 WiFi.disconnect();
                 wifiMode = WIFI_AP;
-                WiFi.setHostname(wifi_hostname);  // hostname must be set before the mode is set to STA
-                WiFi.mode(wifiMode);
+                WiFi.setHostname(wifi_hostname);  // must be set before WiFi.mode()
+                WiFi.mode(WIFI_AP);
                 changeTimeMs = currentTimeMs;
-                
-                // Power-saving settings for AP mode to prevent boot-looping
-                // Reduce TX power specifically for AP mode (already set globally but ensure it's applied)
+
                 WiFi.setTxPower(WIFI_POWER);
-                
-                //WiFi.softAPConfig(ipAddress, ipAddress, netMsk);
-                // Advertise NO default gateway. Helps Android keep cellular data for internet.
+
+                // Advertise NO default gateway — helps Android keep cellular data for internet
                 WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
 
-                DEBUG("Starting WiFi AP: %s with password: %s\n", wifi_ap_ssid.c_str(), wifi_ap_password);
-                
-                // Start AP with max 4 connections to limit power draw
-                // Channel 6 is typically less crowded, beacon interval 200ms (higher = less power)
-                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, 6, 0, 4);
-                
-                // Set lower beacon interval to reduce power consumption (in multiples of 100ms, default is 100)
-                // Note: Higher values = less frequent beacons = lower power but slightly slower connection
-                esp_wifi_set_max_tx_power(44); // 11dBm in 0.25dBm units (44 * 0.25 = 11dBm)
-                
-                DEBUG("WiFi AP started. SSID: %s, Power: 11dBm, Max clients: 4\n", WiFi.softAPSSID().c_str());
+                DEBUG("Starting WiFi AP: %s with password: %s on ch%d\n", wifi_ap_ssid.c_str(), wifi_ap_password, apChannel);
+                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, 4);
+
+                // Force HT20 (20 MHz) to reduce adjacent-channel interference
+                esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+                // Standard 802.11 b/g/n — no proprietary LR (LR only works between ESP32 devices)
+                esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+
+                DEBUG("WiFi AP started: SSID=%s ch=%d HT20\n", WiFi.softAPSSID().c_str(), apChannel);
                 startServices();
                 buz->beep(1000);
                 led->on(1000);
                 break;
+            }
             case WIFI_STA:
                 DEBUG("Connecting to WiFi network\n");
                 wifiMode = WIFI_STA;
-                WiFi.setHostname(wifi_hostname);  // hostname must be set before the mode is set to STA
-                WiFi.mode(wifiMode);
+                WiFi.setHostname(wifi_hostname);  // must be set before WiFi.mode()
+                WiFi.mode(WIFI_STA);
+                // Force HT20 and standard protocols for STA mode
+                esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+                esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
                 changeTimeMs = currentTimeMs;
                 WiFi.begin(conf->getSsid(), conf->getPassword());
                 startServices();

@@ -113,7 +113,7 @@ void setup() {
         pinMode(WIFI_ENABLE, OUTPUT); // pinMode(3, OUTPUT);
         digitalWrite(WIFI_ENABLE, LOW); // digitalWrite(3, LOW); // Activate RF switch control
 
-        delay(100);
+        delay(200);
 
         pinMode(WIFI_ANT_CONFIG, OUTPUT); // pinMode(14, OUTPUT);
         digitalWrite(WIFI_ANT_CONFIG, HIGH); // digitalWrite(14, HIGH); // Use external antenna
