@@ -295,6 +295,10 @@
   padding: 0;
 }
 
+html {
+  overflow-x: hidden; /* prevent hidden absolute-positioned elements widening the viewport */
+}
+
 body {
   font-family: Arial, sans-serif;
   line-height: 1.6;
@@ -303,6 +307,8 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  overflow-x: hidden;
+  width: 100%;
 }
 
 header {
@@ -329,6 +335,7 @@ nav {
   font-size: 32px;
 }
 
+/* WiFi signal strength indicator disabled — use OS WiFi indicator instead
 .connection-indicator {
   position: relative;
   display: flex;
@@ -337,15 +344,12 @@ nav {
   margin-left: 8px;
 }
 
-/* WiFi icon — colours are controlled via setAttribute() in JS.
-   Inline SVG attributes set the dim default; JS overrides to #fff when lit. */
 .wifi-icon {
   display: block;
   flex-shrink: 0;
   transition: opacity 0.3s ease;
 }
 
-/* Disconnected: pulse the whole icon */
 .wifi-icon.disconnected {
   animation: wifi-pulse-off 2s ease-in-out infinite;
 }
@@ -355,7 +359,6 @@ nav {
   50%       { opacity: 0.3; }
 }
 
-/* Connection info popup — drops down below the icon */
 .connection-info {
   position: absolute;
   left: 0;
@@ -395,7 +398,6 @@ nav {
   line-height: 1.5;
 }
 
-/* Dark theme support for connection info */
 [data-theme]:not([data-theme=""]):not([data-theme="lighter"]):not([data-theme="github"]) .connection-info {
   background-color: rgba(48, 48, 48, 0.95);
 }
@@ -407,6 +409,7 @@ nav {
 [data-theme]:not([data-theme=""]):not([data-theme="lighter"]):not([data-theme="github"]) .connection-details {
   color: #B0BEC5;
 }
+*/
 
 .nav-links {
   display: flex;

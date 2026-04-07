@@ -391,11 +391,8 @@ function setupUSBEvents() {
   });
 }
 
-// Update the WiFi icon bars using setAttribute — bypasses any CSS cascade issues.
-// rssi: numeric dBm (STA mode) or null (AP mode / USB / disconnected)
-// isAP: true when device is the access point (always show full bars)
-// connected: overall connection state
-function updateWifiSignalBars(rssi, isAP, connected) {
+/* WiFi signal strength indicator disabled — use OS WiFi indicator instead
+function updateWifiSignalBars(rssi, isAP, rttMs, connected) {
   const icon = document.getElementById('wifiIcon');
   const dot  = document.getElementById('wifiDot');
   const b1   = document.getElementById('wifiBar1');
@@ -406,30 +403,31 @@ function updateWifiSignalBars(rssi, isAP, connected) {
   const LIT = '#ffffff';
   const DIM = 'rgba(255,255,255,0.4)';
 
-  // Determine how many bars to light up
   let litBars = 0;
   if (!connected) {
-    litBars = 0;               // all dim, icon pulses
-  } else if (isAP) {
-    litBars = 3;               // we ARE the AP — show full signal
+    litBars = 0;
+  } else if (isAP && rttMs != null) {
+    if      (rttMs < 30)  litBars = 3;
+    else if (rttMs < 80)  litBars = 2;
+    else if (rttMs < 200) litBars = 1;
+    else                  litBars = 0;
   } else if (rssi != null) {
-    if      (rssi >= -50) litBars = 3;  // Excellent
-    else if (rssi >= -60) litBars = 2;  // Good
-    else if (rssi >= -70) litBars = 1;  // Fair
-    else                  litBars = 0;  // Weak — dot only
+    if      (rssi >= -50) litBars = 3;
+    else if (rssi >= -60) litBars = 2;
+    else if (rssi >= -70) litBars = 1;
+    else                  litBars = 0;
   } else {
-    litBars = 3;               // USB or unknown — show full
+    litBars = 3;
   }
 
-  // dot always lit when connected
-  dot.setAttribute('fill',   connected ? LIT : DIM);
-  b1.setAttribute('stroke',  litBars >= 1 ? LIT : DIM);
-  b2.setAttribute('stroke',  litBars >= 2 ? LIT : DIM);
-  b3.setAttribute('stroke',  litBars >= 3 ? LIT : DIM);
+  dot.setAttribute('fill',  connected ? LIT : DIM);
+  b1.setAttribute('stroke', litBars >= 1 ? LIT : DIM);
+  b2.setAttribute('stroke', litBars >= 2 ? LIT : DIM);
+  b3.setAttribute('stroke', litBars >= 3 ? LIT : DIM);
 
-  // Pulse the icon when disconnected
   icon.classList.toggle('disconnected', !connected);
 }
+*/
 
 async function updateConnectionStatus(mode, connected) {
   const modeEl    = document.querySelector('.connection-mode');
@@ -440,8 +438,6 @@ async function updateConnectionStatus(mode, connected) {
   }
 
   let details = '';
-  let rssi = null;
-  let isAP = false;
 
   if (mode === 'WiFi' && connected) {
     try {
@@ -449,12 +445,9 @@ async function updateConnectionStatus(mode, connected) {
       if (response.ok) {
         const wifiData = await response.json();
         if (wifiData.mode === 'AP') {
-          isAP = true;
-          details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}<br>Connected Clients: ${wifiData.clients}`;
+          details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}<br>Clients: ${wifiData.clients}`;
         } else if (wifiData.mode === 'STA') {
-          rssi = wifiData.rssi;
-          const quality = rssi >= -50 ? 'Excellent' : rssi >= -60 ? 'Good' : rssi >= -70 ? 'Fair' : 'Weak';
-          details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}<br>Signal: ${quality} (${rssi} dBm)`;
+          details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}`;
         }
       }
     } catch (err) {
@@ -462,14 +455,14 @@ async function updateConnectionStatus(mode, connected) {
       details = 'Unable to fetch WiFi details';
     }
   } else if (mode === 'USB' && connected) {
-    details = 'Direct serial connection<br>Zero latency';
+    details = 'Direct serial connection';
   } else if (!connected) {
     details = 'Connection lost';
   }
 
   if (detailsEl) detailsEl.innerHTML = details;
 
-  updateWifiSignalBars(rssi, isAP, connected);
+  // updateWifiSignalBars disabled — use OS WiFi indicator instead
 
   // Update settings panel status (USB only)
   const statusEl = document.getElementById('comPortStatus');
