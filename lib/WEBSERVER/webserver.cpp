@@ -261,7 +261,10 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         changeMode = WIFI_OFF;
     }
 
-    if (servicesStarted && captiveDnsEnabled) {
+    // Always process DNS in AP mode so connectivity probes get fast NXDOMAIN replies.
+    // Without this, Android waits 5-10 s for DNS timeouts before deciding to use
+    // cellular for internet — during which it may drop or freeze mobile data.
+    if (servicesStarted && wifiMode == WIFI_AP) {
         dnsServer.processNextRequest();
     }
 }
@@ -303,7 +306,7 @@ static bool captivePortal(AsyncWebServerRequest *request) {
 }
 
 static void handleRoot(AsyncWebServerRequest *request) {
-    if (captivePortal(request)) {  // If captive portal redirect instead of displaying the page.
+    if (captiveDnsEnabled && captivePortal(request)) {  // Only redirect in captive portal mode.
         return;
     }
 #ifdef ESP32S3
@@ -323,7 +326,7 @@ static void handleRoot(AsyncWebServerRequest *request) {
 }
 
 static void handleNotFound(AsyncWebServerRequest *request) {
-    if (captivePortal(request)) {  // If captive portal redirect instead of displaying the error page.
+    if (captiveDnsEnabled && captivePortal(request)) {  // Only redirect in captive portal mode.
         return;
     }
 
@@ -1563,11 +1566,20 @@ EEPROM:\n\
     server.begin();
 
     if (captiveDnsEnabled) {
+        // Full captive-portal mode: wildcard redirect to our UI.
+        // Not used by default — triggers Android "Sign in to network" prompt.
         dnsServer.start(DNS_PORT, "*", ipAddress);
         dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
         startMDNS();
-    } else {
-        DEBUG("[DNS] Captive DNS disabled (use http://192.168.4.1)\n");
+    } else if (WiFi.getMode() == WIFI_AP) {
+        // Always run DNS in AP mode, but only answer for our own hostname.
+        // Everything else (e.g. connectivitycheck.gstatic.com) gets NXDOMAIN
+        // immediately, so Android detects "no internet" in milliseconds and
+        // falls back to cellular — rather than waiting 5-10 s for DNS timeouts.
+        dnsServer.setErrorReplyCode(DNSReplyCode::NonExistentDomain);
+        dnsServer.start(DNS_PORT, wifi_hostname, ipAddress);
+        DEBUG("[DNS] Selective DNS started: '%s' -> %s, all others -> NXDOMAIN\n",
+              wifi_hostname, wifi_ap_address);
     }
 
     
