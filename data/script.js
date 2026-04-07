@@ -391,58 +391,86 @@ function setupUSBEvents() {
   });
 }
 
-async function updateConnectionStatus(mode, connected) {
-  // Update header indicator
-  const indicator = document.getElementById('connectionIndicator');
-  if (indicator) {
-    const dot = indicator.querySelector('.status-dot');
-    const modeEl = indicator.querySelector('.connection-mode');
-    const detailsEl = document.getElementById('connectionDetails');
-    
-    // Update connection state
-    if (connected) {
-      dot.classList.add('connected');
-    } else {
-      dot.classList.remove('connected');
-    }
-    
-    // Update mode text
-    if (modeEl) {
-      modeEl.textContent = `${mode}: ${connected ? 'Connected' : 'Disconnected'}`;
-    }
-    
-    // Build detailed info for slide-out panel
-    let details = '';
-    
-    if (mode === 'WiFi' && connected) {
-      try {
-        const response = await fetch('/api/wifi');
-        if (response.ok) {
-          const wifiData = await response.json();
-          if (wifiData.mode === 'AP') {
-            details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}<br>Connected Clients: ${wifiData.clients}`;
-          } else if (wifiData.mode === 'STA') {
-            const signalQuality = wifiData.rssi > -50 ? 'Excellent' : 
-                                 wifiData.rssi > -60 ? 'Good' : 
-                                 wifiData.rssi > -70 ? 'Fair' : 'Weak';
-            details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}<br>Signal: ${signalQuality} (${wifiData.rssi} dBm)`;
-          }
-        }
-      } catch (err) {
-        console.error('Failed to fetch WiFi info:', err);
-        details = 'Unable to fetch WiFi details';
-      }
-    } else if (mode === 'USB' && connected) {
-      details = 'Direct serial connection<br>Zero latency';
-    } else if (!connected) {
-      details = 'Connection lost';
-    }
-    
-    if (detailsEl) {
-      detailsEl.innerHTML = details;
-    }
+// Update the WiFi icon bars using setAttribute — bypasses any CSS cascade issues.
+// rssi: numeric dBm (STA mode) or null (AP mode / USB / disconnected)
+// isAP: true when device is the access point (always show full bars)
+// connected: overall connection state
+function updateWifiSignalBars(rssi, isAP, connected) {
+  const icon = document.getElementById('wifiIcon');
+  const dot  = document.getElementById('wifiDot');
+  const b1   = document.getElementById('wifiBar1');
+  const b2   = document.getElementById('wifiBar2');
+  const b3   = document.getElementById('wifiBar3');
+  if (!icon || !dot || !b1 || !b2 || !b3) return;
+
+  const LIT = '#ffffff';
+  const DIM = 'rgba(255,255,255,0.4)';
+
+  // Determine how many bars to light up
+  let litBars = 0;
+  if (!connected) {
+    litBars = 0;               // all dim, icon pulses
+  } else if (isAP) {
+    litBars = 3;               // we ARE the AP — show full signal
+  } else if (rssi != null) {
+    if      (rssi >= -50) litBars = 3;  // Excellent
+    else if (rssi >= -60) litBars = 2;  // Good
+    else if (rssi >= -70) litBars = 1;  // Fair
+    else                  litBars = 0;  // Weak — dot only
+  } else {
+    litBars = 3;               // USB or unknown — show full
   }
-  
+
+  // dot always lit when connected
+  dot.setAttribute('fill',   connected ? LIT : DIM);
+  b1.setAttribute('stroke',  litBars >= 1 ? LIT : DIM);
+  b2.setAttribute('stroke',  litBars >= 2 ? LIT : DIM);
+  b3.setAttribute('stroke',  litBars >= 3 ? LIT : DIM);
+
+  // Pulse the icon when disconnected
+  icon.classList.toggle('disconnected', !connected);
+}
+
+async function updateConnectionStatus(mode, connected) {
+  const modeEl    = document.querySelector('.connection-mode');
+  const detailsEl = document.getElementById('connectionDetails');
+
+  if (modeEl) {
+    modeEl.textContent = `${mode}: ${connected ? 'Connected' : 'Disconnected'}`;
+  }
+
+  let details = '';
+  let rssi = null;
+  let isAP = false;
+
+  if (mode === 'WiFi' && connected) {
+    try {
+      const response = await fetch('/api/wifi');
+      if (response.ok) {
+        const wifiData = await response.json();
+        if (wifiData.mode === 'AP') {
+          isAP = true;
+          details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}<br>Connected Clients: ${wifiData.clients}`;
+        } else if (wifiData.mode === 'STA') {
+          rssi = wifiData.rssi;
+          const quality = rssi >= -50 ? 'Excellent' : rssi >= -60 ? 'Good' : rssi >= -70 ? 'Fair' : 'Weak';
+          details = `SSID: ${wifiData.ssid}<br>IP: ${wifiData.ip}<br>Signal: ${quality} (${rssi} dBm)`;
+        }
+      }
+    } catch (err) {
+      console.error('Failed to fetch WiFi info:', err);
+      details = 'Unable to fetch WiFi details';
+    }
+  } else if (mode === 'USB' && connected) {
+    details = 'Direct serial connection<br>Zero latency';
+  } else if (!connected) {
+    details = 'Connection lost';
+  }
+
+  if (detailsEl) detailsEl.innerHTML = details;
+
+  updateWifiSignalBars(rssi, isAP, connected);
+
   // Update settings panel status (USB only)
   const statusEl = document.getElementById('comPortStatus');
   if (statusEl) {

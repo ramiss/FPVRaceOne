@@ -19,11 +19,11 @@
           <img src="logo-white.svg" alt="FPVGate" width="64" id="headerLogo" />
           <h1>FPVGate</h1>
           <div id="connectionIndicator" class="connection-indicator" title="Connection status">
-            <svg id="wifiIcon" class="wifi-icon" width="26" height="22" viewBox="0 0 26 22" fill="none" xmlns="http://www.w3.org/2000/svg" aria-label="WiFi signal">
-              <circle id="wifiDot" cx="13" cy="20" r="2"/>
-              <path id="wifiBar1" d="M9 16 Q13 12.5 17 16" stroke-width="2.2" stroke-linecap="round"/>
-              <path id="wifiBar2" d="M5.5 11.5 Q13 6 20.5 11.5" stroke-width="2.2" stroke-linecap="round"/>
-              <path id="wifiBar3" d="M2 7 Q13 -0.5 24 7" stroke-width="2.2" stroke-linecap="round"/>
+            <svg id="wifiIcon" class="wifi-icon" width="26" height="22" viewBox="0 0 26 22" xmlns="http://www.w3.org/2000/svg" aria-label="WiFi signal">
+              <circle id="wifiDot"  cx="13" cy="20" r="2"              fill="rgba(255,255,255,0.4)"/>
+              <path   id="wifiBar1" d="M9 16 Q13 12.5 17 16"           fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2.2" stroke-linecap="round"/>
+              <path   id="wifiBar2" d="M5.5 11.5 Q13 6 20.5 11.5"      fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2.2" stroke-linecap="round"/>
+              <path   id="wifiBar3" d="M2 7 Q13 -0.5 24 7"             fill="none" stroke="rgba(255,255,255,0.4)" stroke-width="2.2" stroke-linecap="round"/>
             </svg>
             <div class="connection-info" id="connectionInfo">
               <div class="connection-mode">WiFi Connected</div>
@@ -34,7 +34,7 @@
       </nav>
       <div id="raceTabDownloadReminder" class="banner-warning"
           style="display:none; margin: 10px 0; padding: 6px 10px; border-radius: 8px;">
-        <span>Races are lost when unplugged. Download to save.</span>
+        <span>Races are lost when unplugged. Download after racing to save.</span>
         <a href="#" id="raceTabDownloadReminderHide" style="margin-left:auto;">hide</a>
       </div>
       <div id="calibrationBanner" style="

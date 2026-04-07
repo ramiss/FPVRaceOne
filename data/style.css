@@ -337,27 +337,15 @@ nav {
   margin-left: 8px;
 }
 
-/* WiFi icon bars and dot — dim by default, lit by JS */
-.wifi-icon circle,
-.wifi-icon path {
-  fill: none;
-  stroke: none;
-  transition: fill 0.3s ease, stroke 0.3s ease, opacity 0.3s ease;
+/* WiFi icon — colours are controlled via setAttribute() in JS.
+   Inline SVG attributes set the dim default; JS overrides to #fff when lit. */
+.wifi-icon {
+  display: block;
+  flex-shrink: 0;
+  transition: opacity 0.3s ease;
 }
 
-.wifi-icon circle {
-  fill: rgba(255, 255, 255, 0.25);
-}
-
-.wifi-icon path {
-  stroke: rgba(255, 255, 255, 0.25);
-}
-
-/* Lit state (set via JS) */
-.wifi-icon circle.lit  { fill: #fff; }
-.wifi-icon path.lit    { stroke: #fff; }
-
-/* Disconnected: slow fade animation on the whole icon */
+/* Disconnected: pulse the whole icon */
 .wifi-icon.disconnected {
   animation: wifi-pulse-off 2s ease-in-out infinite;
 }
