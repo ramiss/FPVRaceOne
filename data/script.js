@@ -48,6 +48,25 @@ const minLapInput = document.getElementById("minLap");
 const alarmThreshold = document.getElementById("alarmThreshold");
 const maxLapsInput = document.getElementById("maxLaps");
 
+// --- Wake Lock: keep screen/CPU alive while the page is open ---
+let _wakeLock = null;
+
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return; // not supported
+  try {
+    _wakeLock = await navigator.wakeLock.request('screen');
+  } catch (e) {
+    // User denied or OS refused (e.g. low battery) — fail silently
+  }
+}
+
+// Re-acquire after the page becomes visible again (browser may release on hide)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') acquireWakeLock();
+});
+
+acquireWakeLock();
+
 const freqLookup = [
   [5865, 5845, 5825, 5805, 5785, 5765, 5745, 5725], // A
   [5733, 5752, 5771, 5790, 5809, 5828, 5847, 5866], // B
