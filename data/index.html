@@ -984,6 +984,15 @@
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
                 Make sure to upload both the firmware and LittleFS images on the next page by choosing the correct option in the OTA Mode dropdown for each file.
               </div>
+
+              <h3>Device</h3>
+              <div class="config-item">
+                <label>Reboot:</label>
+                <button id="rebootBtn" onclick="rebootDevice()" style="background-color: #c0392b; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 14px;">Reboot Device</button>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                Restarts the device immediately. Required for antenna and TX power changes to take effect.
+              </div>
             </div>
 
             <!-- Diagnostics Section -->

@@ -5054,6 +5054,29 @@ function applyWiFiSettings() {
   }, 500);
 }
 
+function rebootDevice() {
+  if (!confirm('Reboot the device now?')) return;
+
+  const btn = document.getElementById('rebootBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Rebooting...'; }
+
+  const doReboot = () => {
+    if (usbConnected && transportManager) {
+      transportManager.sendCommand('reboot', 'POST').catch(() => {});
+    } else {
+      fetch('/reboot', { method: 'POST' }).catch(() => {});
+    }
+  };
+
+  // Save any pending changes first, then reboot
+  if (stagedDirty) {
+    saveConfig();
+    setTimeout(doReboot, 500);
+  } else {
+    doReboot();
+  }
+}
+
 function resetWiFiSettings() {
   if (!confirm('Reset WiFi settings to current values?')) {
     return;
