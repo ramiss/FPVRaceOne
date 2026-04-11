@@ -913,6 +913,30 @@
                   High sensitivity provides better weak signal detection. Use Normal if experiencing false triggers.
                 </div>
               </div>
+              <h3>WiFi Antenna</h3>
+              <div class="config-item">
+                <label for="externalAntennaToggle">Antenna:</label>
+                <div style="flex: 1;">
+                  <label class="switch">
+                    <input type="checkbox" id="externalAntennaToggle" onchange="document.getElementById('antennaLabel').textContent=this.checked?'External':'Internal'; autoSaveConfig()">
+                    <span class="slider"></span>
+                  </label>
+                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="antennaLabel">External</span>
+                </div>
+              </div>
+              <div class="config-item">
+                <label for="wifiTxPowerInput">TX Power (dBm):</label>
+                <div style="flex: 1; display: flex; align-items: center; gap: 8px;">
+                  <input type="number" id="wifiTxPowerInput" min="2" max="21" step="1" value="21"
+                         style="width: 70px;"
+                         oninput="autoSaveConfig()">
+                  <span style="font-size: 12px; color: var(--secondary-color);">2–21 dBm</span>
+                </div>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
+                Both antenna settings take effect on next boot.
+              </div>
+
               <h3>Appearance</h3>
               <div class="config-item">
                 <label for="themeSelect">Theme:</label>

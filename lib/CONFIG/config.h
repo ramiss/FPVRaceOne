@@ -90,7 +90,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 8
+#define CONFIG_VERSION 9
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -135,6 +135,8 @@ typedef struct {
     char lapFormat[11];        // Lap announcement format (full, laptime, timeonly)
     char ssid[33];
     char password[33];
+    uint8_t wifiExtAntenna;     // 0=internal, 1=external antenna (takes effect on next boot)
+    uint8_t wifiTxPower;        // WiFi TX power in dBm (2–21, takes effect on next boot)
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -190,7 +192,9 @@ class Config {
     char* getSelectedVoice();
     uint8_t getVoiceEnabled();
     char* getLapFormat();
-    
+    uint8_t getWifiExtAntenna();
+    uint8_t getWifiTxPower();
+
     // added because we use multiple bands with the same channels and revere freq lookup no longer works
     void setBandIndex(uint8_t band);
     void setChannelIndex(uint8_t ch);

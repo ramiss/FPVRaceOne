@@ -1740,7 +1740,12 @@ function buildConfigSnapshotFromUI() {
 
     // Optional platform features
     batteryMonitor: (batteryToggle && batteryToggle.checked) ? 1 : 0,
-    extAntenna: (externalAntennaToggle && externalAntennaToggle.checked) ? 1 : 0,
+    wifiExtAntenna: (externalAntennaToggle && externalAntennaToggle.checked) ? 1 : 0,
+    wifiTxPower: (() => {
+      const el = document.getElementById('wifiTxPowerInput');
+      const v = el ? parseInt(el.value, 10) : 21;
+      return Number.isFinite(v) ? Math.min(21, Math.max(2, v)) : 21;
+    })(),
   };
 
   return cfg;
@@ -6034,6 +6039,18 @@ function openSettingsModal() {
         const rssiSensitivitySelect = document.getElementById('rssiSensitivity');
         if (rssiSensitivitySelect && config.rssiSens !== undefined) {
           rssiSensitivitySelect.value = String(config.rssiSens);
+        }
+
+        // WiFi antenna settings
+        const extAntennaToggle = document.getElementById('externalAntennaToggle');
+        const antennaLabel = document.getElementById('antennaLabel');
+        if (extAntennaToggle && config.wifiExtAntenna !== undefined) {
+          extAntennaToggle.checked = config.wifiExtAntenna === 1;
+          if (antennaLabel) antennaLabel.textContent = config.wifiExtAntenna === 1 ? 'External' : 'Internal';
+        }
+        const txPowerInput = document.getElementById('wifiTxPowerInput');
+        if (txPowerInput && config.wifiTxPower !== undefined) {
+          txPowerInput.value = config.wifiTxPower;
         }
 
 

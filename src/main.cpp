@@ -108,30 +108,27 @@ static void initParallelTask() {
 
 void setup() {
 
-    // set antenna option
-    if (USE_EXT_ANTENNA) {
-        pinMode(WIFI_ENABLE, OUTPUT); // pinMode(3, OUTPUT);
-        digitalWrite(WIFI_ENABLE, LOW); // digitalWrite(3, LOW); // Activate RF switch control
-
-        delay(200);
-
-        pinMode(WIFI_ANT_CONFIG, OUTPUT); // pinMode(14, OUTPUT);
-        digitalWrite(WIFI_ANT_CONFIG, HIGH); // digitalWrite(14, HIGH); // Use external antenna
-    }
-
-
     // ====================================================================
     // ROTORHAZARD MODE DETECTION - CURRENTLY DISABLED
     // Mode switching has been disabled - system now runs in WiFi mode only
     // To re-enable: uncomment the mode detection block below
     // ====================================================================
-    
+
     // Initialize storage first (LittleFS only at boot)
     storage.init();
-    
+
     // Initialize config and connect to storage for SD backup/restore
     config.setStorage(&storage);
     config.init();
+
+    // Set antenna option from persisted config (must run before WiFi starts)
+    if (config.getWifiExtAntenna()) {
+        pinMode(WIFI_ENABLE, OUTPUT);
+        digitalWrite(WIFI_ENABLE, LOW);   // Activate RF switch control
+        delay(200);
+        pinMode(WIFI_ANT_CONFIG, OUTPUT);
+        digitalWrite(WIFI_ANT_CONFIG, HIGH); // Use external antenna
+    }
     
     /* DISABLED: RotorHazard mode detection
     // Check physical mode switch

@@ -21,6 +21,22 @@ extern RgbLed* g_rgbLed;
 
 static bool captiveDnsEnabled = false; // default OFF to preserve Android cellular internet
 
+// Map a user-facing dBm value (2–21) to the nearest wifi_power_t enum constant.
+static wifi_power_t dBmToWifiPower(uint8_t dbm) {
+    if (dbm >= 21) return WIFI_POWER_21dBm;
+    if (dbm >= 20) return WIFI_POWER_20dBm;
+    if (dbm >= 19) return WIFI_POWER_19dBm;
+    if (dbm >= 18) return WIFI_POWER_18_5dBm;
+    if (dbm >= 17) return WIFI_POWER_17dBm;
+    if (dbm >= 15) return WIFI_POWER_15dBm;
+    if (dbm >= 13) return WIFI_POWER_13dBm;
+    if (dbm >= 11) return WIFI_POWER_11dBm;
+    if (dbm >= 8)  return WIFI_POWER_8_5dBm;
+    if (dbm >= 7)  return WIFI_POWER_7dBm;
+    if (dbm >= 5)  return WIFI_POWER_5dBm;
+    return WIFI_POWER_2dBm;
+}
+
 // Global storage pointer for static functions
 static Storage* g_storage = nullptr;
 
@@ -223,7 +239,7 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 WiFi.mode(WIFI_AP);
                 changeTimeMs = currentTimeMs;
 
-                WiFi.setTxPower(WIFI_POWER);
+                WiFi.setTxPower(dBmToWifiPower(conf->getWifiTxPower()));
 
                 // Advertise NO default gateway — helps Android keep cellular data for internet
                 WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);

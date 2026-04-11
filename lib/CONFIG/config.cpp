@@ -91,7 +91,7 @@ void Config::write(void) {
 
 void Config::toJson(AsyncResponseStream& destination) {
     // Use https://arduinojson.org/v6/assistant to estimate memory
-    DynamicJsonDocument config(550);
+    DynamicJsonDocument config(600);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -134,7 +134,9 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["lapFormat"] = conf.lapFormat;
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
-    
+    config["wifiExtAntenna"] = conf.wifiExtAntenna;
+    config["wifiTxPower"] = conf.wifiTxPower;
+
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
     #else
@@ -372,6 +374,10 @@ void Config::fromJson(JsonObject source) {
     // ===== WiFi credentials (CRITICAL: must be guarded) =====
     if (source.containsKey("ssid")) setStr("ssid", conf.ssid, sizeof(conf.ssid));
     if (source.containsKey("pwd"))  setStr("pwd",  conf.password, sizeof(conf.password));
+
+    // ===== WiFi antenna / power (next-boot settings) =====
+    if (source.containsKey("wifiExtAntenna")) setBool01("wifiExtAntenna", conf.wifiExtAntenna);
+    if (source.containsKey("wifiTxPower"))    setU8("wifiTxPower", conf.wifiTxPower, 2, 21);
 }
 
 
@@ -714,6 +720,14 @@ char* Config::getLapFormat() {
     return conf.lapFormat;
 }
 
+uint8_t Config::getWifiExtAntenna() {
+    return conf.wifiExtAntenna;
+}
+
+uint8_t Config::getWifiTxPower() {
+    return conf.wifiTxPower;
+}
+
 void Config::setBandIndex(uint8_t band) {
   if (conf.bandIndex != band) {
     conf.bandIndex = band;
@@ -948,6 +962,8 @@ void Config::setDefaults(void) {
     strlcpy(conf.lapFormat, "timeonly", sizeof(conf.lapFormat));  // Default lap format
     strlcpy(conf.ssid, "", sizeof(conf.ssid));  // Empty WiFi credentials
     strlcpy(conf.password, "", sizeof(conf.password));  // Empty WiFi credentials
+    conf.wifiExtAntenna = 1;  // External antenna by default (matches hardware)
+    conf.wifiTxPower = 21;    // Maximum TX power by default
     modified = true;
     write();
 }
