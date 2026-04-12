@@ -81,6 +81,7 @@ static void parallelTask(void *pvArgs) {
         usbTransport.update(currentTimeMs);
         config.handleEeprom(currentTimeMs);
         rx.handleFrequencyChange(currentTimeMs, config.getFrequency());
+        webhookManager.process();  // HTTP I/O belongs on Core 0, not in the RSSI loop
         // Battery monitoring removed
         // monitor.checkBatteryState(currentTimeMs, config.getAlarmThreshold());
         
@@ -306,9 +307,6 @@ void loop() {
         uint32_t lapTime = timer.getLapTime();
         transportManager.broadcastLapEvent(lapTime);
     }
-    
-    // Process queued webhooks (non-blocking)
-    webhookManager.process();
     
     // WiFi mode - original behavior (RotorHazard mode disabled)
     ElegantOTA.loop();

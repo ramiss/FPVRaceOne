@@ -12,7 +12,7 @@
 
 #define WIFI_CONNECTION_TIMEOUT_MS 30000
 #define WIFI_RECONNECT_TIMEOUT_MS 500
-#define WEB_RSSI_SEND_TIMEOUT_MS 200
+#define WEB_RSSI_SEND_TIMEOUT_MS 50
 #define WEB_SSE_KEEPALIVE_MS 15000
 
 class Webserver : public TransportInterface {

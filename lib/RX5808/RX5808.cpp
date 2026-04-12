@@ -126,7 +126,6 @@ bool RX5808::verifyFrequency() {
 
 // Set frequency on RX5808 module to given value
 void RX5808::setFrequency(uint16_t vtxFreq) {
-    vTaskDelay(50); // small delay before changing frequency
     DEBUG("RX5808 Setting frequency to %u\n", vtxFreq);
 
     currentFrequency = vtxFreq;

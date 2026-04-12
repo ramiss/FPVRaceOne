@@ -14,8 +14,8 @@ extern RgbLed* g_rgbLed;
 //     Higher Q → filter tracks fast changes more closely (less lag, more noise).
 // R = measurement noise variance: how noisy the ADC reading is.
 //     Higher R → filter trusts the sensor less (more smoothing, more lag).
-const float kalman_Q = 5.0f;   // RSSI can move ~2 units/sample (variance = 5)
-const float kalman_R = 2.0f;   // ADC noise ~1.4 units std-dev on 0–255 scale
+const float kalman_Q = 3.0f;   // RSSI can move ~2 units/sample (variance = 5)
+const float kalman_R = 16.0f;   // ADC noise rejection — raise to smooth, lower for faster response
 
 // Race debug output (Serial) — throttled so it doesn't overwhelm.
 // Set to 0 to compile out the periodic race debug print.
