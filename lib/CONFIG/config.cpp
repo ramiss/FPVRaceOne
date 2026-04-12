@@ -90,8 +90,10 @@ void Config::write(void) {
 
 
 void Config::toJson(AsyncResponseStream& destination) {
-    // Use https://arduinojson.org/v6/assistant to estimate memory
-    DynamicJsonDocument config(600);
+    // Capacity: JSON_OBJECT_SIZE(44 fields) + JSON_ARRAY_SIZE(10 webhook IPs)
+    // On ESP32 each slot is 16 bytes → 44*16 + 10*16 = 864 bytes minimum.
+    // 1024 gives a safe margin so no fields are silently dropped on overflow.
+    DynamicJsonDocument config(1024);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -153,7 +155,7 @@ void Config::toJson(AsyncResponseStream& destination) {
 }
 
 void Config::toJsonString(char* buf) {
-    DynamicJsonDocument config(512);
+    DynamicJsonDocument config(768);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -177,6 +179,8 @@ void Config::toJsonString(char* buf) {
     config["tracksEnabled"] = conf.tracksEnabled;
     config["selectedTrackId"] = conf.selectedTrackId;
     config["name"] = conf.pilotName;
+    config["pilotCallsign"] = conf.pilotCallsign;
+    config["pilotPhonetic"] = conf.pilotPhonetic;
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
 
@@ -192,7 +196,7 @@ void Config::toJsonString(char* buf) {
         config["hasLed"] = false;
     #endif
 
-    serializeJsonPretty(config, buf, 312);
+    serializeJsonPretty(config, buf, 512);
 }
 
 void Config::fromJson(JsonObject source) {

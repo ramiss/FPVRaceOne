@@ -12,11 +12,21 @@ RX5808::RX5808(uint8_t _rssiInputPin, uint8_t _rx5808DataPin, uint8_t _rx5808Sel
 }
 
 void RX5808::init() {
-    pinMode(rssiInputPin, INPUT_PULLUP);
+    // INPUT (no pull-up): the RX5808 RSSI pin is an analog voltage output (~0–1V).
+    // INPUT_PULLUP connects a ~45kΩ resistor to 3.3V which fights the signal and
+    // artificially raises the ADC reading when the module has weak/no signal.
+    pinMode(rssiInputPin, INPUT);
     pinMode(rx5808DataPin, OUTPUT);
     pinMode(rx5808SelPin, OUTPUT);
     pinMode(rx5808ClkPin, OUTPUT);
-    analogReadResolution(12); // set resultion to 12 bit
+    analogReadResolution(12); // 12-bit: 0..4095
+
+    // The RX5808 RSSI output is 0–1V. The default ESP32-C6 ADC attenuation
+    // (ADC_11db) covers 0–3.1V, meaning the RSSI signal uses only ~32% of the
+    // ADC scale, which crushes dynamic range and worsens the built-in non-linearity.
+    // ADC_6db covers 0–1.75V on the C6: the 0–1V RSSI signal now uses ~57% of
+    // the scale, giving much better peak definition with no change to filtering.
+    analogSetPinAttenuation(rssiInputPin, ADC_6db);
     
     digitalWrite(rx5808SelPin, HIGH);
     digitalWrite(rx5808ClkPin, LOW);
@@ -174,29 +184,19 @@ bool RX5808::isSettingFrequency() {
     return settingFrequency;
 }
 
-// Read the RSSI value
+// ADC is 12-bit (0..4095), ADC_6db attenuation → ~0–1750mV input range.
+// RX5808 RSSI output is ~0–1V, so 1V ≈ 4095*(1000/1750) ≈ 2340 counts.
+// 2400 adds a small headroom margin above the expected peak.
+#define RSSI_SCALE_MAX 2400UL
+
 uint8_t RX5808::readRssi() {
     if (recentSetFreqFlag) return 0; // RSSI unstable immediately after tune
 
-    uint16_t raw = analogRead(rssiInputPin); // expected 0..1023 (10-bit)
+    uint16_t raw = (uint16_t)analogRead(rssiInputPin);
 
-    static uint16_t rawMax = 0;
-    static unsigned long lastPrint = millis();
-      
-    // Scale 12-bit raw (0..4095) to 8-bit (0..255), with rounding
-    // 4095 >> 4 = 255
-    uint8_t scaled = (uint8_t)((raw * 255UL) / 1500UL);
-    
-    /* 
-    // Debugging output 
-    if (raw > rawMax) rawMax = raw;
-    if (millis() > lastPrint + 250) { 
-        Serial.printf("[RSSI] raw=%u rawMax=%u scaled=%u\n", raw, rawMax, scaled); 
-        lastPrint = millis();
-    }
-    */
-    
-    return scaled;
+    return (raw >= RSSI_SCALE_MAX)
+           ? 255
+           : (uint8_t)((raw * 255UL) / RSSI_SCALE_MAX);
 }
 
 

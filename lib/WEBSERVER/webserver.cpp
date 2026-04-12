@@ -459,7 +459,7 @@ void Webserver::startServices() {
 
     server.on("/status", [this](AsyncWebServerRequest *request) {
         char buf[1536];
-        char configBuf[256];
+        char configBuf[512];
         conf->toJsonString(configBuf);
         const char *format =
             "\

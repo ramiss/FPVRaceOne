@@ -2036,14 +2036,9 @@ if (announcerSelect) {
 if (pilotNameInput) {
   pilotNameInput.addEventListener('input', autoSaveConfig);
 }
-const callsignInput = document.getElementById('pcallsign');
-if (callsignInput) {
-  callsignInput.addEventListener('input', autoSaveConfig);
-}
-const phoneticInput = document.getElementById('pphonetic');
-if (phoneticInput) {
-  phoneticInput.addEventListener('input', autoSaveConfig);
-}
+// pcallsign and pphonetic listeners are already attached by
+// attachConfigStagingListeners() → wire(). Duplicates removed to prevent
+// autoSaveConfig firing twice per keystroke.
 const colorInput = document.getElementById('pilotColor');
 if (colorInput) {
   colorInput.addEventListener('change', autoSaveConfig);
