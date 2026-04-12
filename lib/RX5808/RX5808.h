@@ -6,7 +6,6 @@
 #define RX5808_MIN_TUNETIME 35    // after set freq need to wait this long before read RSSI
 #define RX5808_MIN_BUSTIME 30     // after set freq need to wait this long before setting again
 #define POWER_DOWN_FREQ_MHZ 1111  // signal to power down the module
-#define RSSI_READS 5              // number of analog RSSI reads per tick
 
 class RX5808 {
    public:

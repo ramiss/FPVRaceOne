@@ -9,11 +9,13 @@
 extern RgbLed* g_rgbLed;
 #endif
 
-// Kalman filtering tuning
-// Higher Q = trust measurements less (more smoothing)
-// Lower R = assume system changes slower (more smoothing)
-const uint16_t rssi_filter_q = 900;
-const uint16_t rssi_filter_r = 20;
+// Kalman filter tuning (standard convention):
+// Q = process noise variance: how much RSSI can change per sample.
+//     Higher Q → filter tracks fast changes more closely (less lag, more noise).
+// R = measurement noise variance: how noisy the ADC reading is.
+//     Higher R → filter trusts the sensor less (more smoothing, more lag).
+const float kalman_Q = 5.0f;   // RSSI can move ~2 units/sample (variance = 5)
+const float kalman_R = 2.0f;   // ADC noise ~1.4 units std-dev on 0–255 scale
 
 // Race debug output (Serial) — throttled so it doesn't overwhelm.
 // Set to 0 to compile out the periodic race debug print.
@@ -49,8 +51,8 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     led = l;
     webhooks = webhook;
 
-    filter.setMeasurementNoise(rssi_filter_q * 0.01f);
-    filter.setProcessNoise(rssi_filter_r * 0.0001f);
+    filter.setProcessNoise(kalman_Q);
+    filter.setMeasurementNoise(kalman_R);
 
     selectedTrack = nullptr;
     totalDistanceTravelled = 0.0f;
@@ -84,8 +86,8 @@ void LapTimer::start() {
 
     // Reset filter state at race start so we don't carry stale estimates.
     filter = KalmanFilter();
-    filter.setMeasurementNoise(rssi_filter_q * 0.01f);
-    filter.setProcessNoise(rssi_filter_r * 0.0001f);
+    filter.setProcessNoise(kalman_Q);
+    filter.setMeasurementNoise(kalman_R);
 
     raceStartTimeMs = millis();
     startTimeMs = raceStartTimeMs;
@@ -426,7 +428,10 @@ void LapTimer::finishLap() {
 }
 
 uint8_t LapTimer::getRssi() {
-    return rssi[rssiCount];
+    // rssiCount was incremented at the end of handleLapTimerUpdate(), so it now
+    // points to the *next* slot to write. The most recently written value is one
+    // slot behind.
+    return rssi[(rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY];
 }
 
 uint32_t LapTimer::getLapTime() {

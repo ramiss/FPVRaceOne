@@ -12,8 +12,8 @@ class KalmanFilter {
     void setProcessNoise(float noise);
 
    private:
-    float R;  // noise power desirable
-    float Q;  // noise power estimated
+    float Q;  // process noise variance  (how much the state can change per step)
+    float R;  // measurement noise variance (how noisy the sensor reading is)
     float A;
     float C;
     float B;

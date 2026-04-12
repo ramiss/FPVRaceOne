@@ -3,8 +3,8 @@
 #include <math.h>
 
 KalmanFilter::KalmanFilter() {
-    R = 1;  // noise power desirable
-    Q = 1;  // noise power estimated
+    Q = 1;  // process noise variance
+    R = 1;  // measurement noise variance
     A = 1;
     B = 0;
     C = 1;
@@ -18,19 +18,19 @@ KalmanFilter::KalmanFilter() {
 
 float KalmanFilter::filter(uint16_t z, uint16_t u = 0) {
     if (isnan(x)) {
-        x = (1 / C) * z;
-        cov = (1 / C) * Q * (1 / C);
+        x = (float)z;
+        cov = Q;  // initial uncertainty = process noise variance
     } else {
-        // compute prediction
-        const float predX = (A * x) + (B * u);
-        const float predCov = ((A * cov) * A) + R;
+        // Prediction: propagate state and grow covariance by process noise
+        const float predX   = x;          // A=1, B=0
+        const float predCov = cov + Q;    // Q = process noise
 
-        // Kalman gain
-        const float K = predCov * C * (1 / ((C * predCov * C) + Q));
+        // Kalman gain: high R (noisy sensor) → low gain → more smoothing
+        const float K = predCov / (predCov + R);  // R = measurement noise
 
-        // correction
-        x = predX + K * (z - (C * predX));
-        cov = predCov - (K * C * predCov);
+        // Correction
+        x   = predX + K * (z - predX);
+        cov = predCov * (1.0f - K);
     }
 
     return x;
@@ -41,9 +41,9 @@ float KalmanFilter::lastMeasurement() {
 }
 
 void KalmanFilter::setMeasurementNoise(float noise) {
-    Q = noise;
+    R = noise;  // higher R → trust sensor less → more smoothing
 }
 
 void KalmanFilter::setProcessNoise(float noise) {
-    R = noise;
+    Q = noise;  // higher Q → state changes faster → less smoothing
 }
