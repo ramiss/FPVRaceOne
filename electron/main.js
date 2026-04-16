@@ -21,7 +21,7 @@ function createWindow() {
       enableRemoteModule: false,
       sandbox: false
     },
-    title: 'FPVGate Lap Timer',
+    title: 'FPVRaceOne Lap Timer',
     backgroundColor: '#1a1a2e'
   });
 
@@ -108,7 +108,7 @@ function createMenu() {
       submenu: [
         {
           label: 'Documentation',
-          click: () => shell.openExternal('https://github.com/LouisHitchcock/FPVGate')
+          click: () => shell.openExternal('https://github.com/ramiss/FPVRaceOne')
         },
         { type: 'separator' },
         {
@@ -117,8 +117,8 @@ function createMenu() {
             const { dialog } = require('electron');
             dialog.showMessageBox(mainWindow, {
               type: 'info',
-              title: 'About FPVGate',
-              message: 'FPVGate Lap Timer v1.3.3',
+              title: 'About FPVRaceOne',
+              message: 'FPVRaceOne Lap Timer v1.3.3',
               detail: 'RSSI-based lap timing for FPV drones\n\nFeatures:\n• USB/WiFi connectivity\n• Modern configuration UI\n• Marshalling mode for race editing\n• Enhanced calibration wizard\n• OSD overlay for streaming\n\nMIT License - Open Source'
             });
           }
@@ -148,7 +148,7 @@ function createOSDWindow() {
       contextIsolation: true,
       preload: path.join(__dirname, 'preload.js')
     },
-    title: 'FPVGate OSD Overlay',
+    title: 'FPVRaceOne OSD Overlay',
     backgroundColor: '#00000000'
   });
   

@@ -47,9 +47,9 @@ static IPAddress ipAddress;
 static AsyncWebServer server(80);
 static AsyncEventSource events("/events");
 
-static const char *wifi_hostname = "FPVGate";
-static const char *wifi_ap_ssid_prefix = "FPVGate";
-static const char *wifi_ap_password = "fpvgate1";
+static const char *wifi_hostname = "FPVRaceOne";
+static const char *wifi_ap_ssid_prefix = "FPVRaceOne";
+static const char *wifi_ap_password = "fpvraceone";
 static const char *wifi_ap_address = "192.168.4.1";
 String wifi_ap_ssid;
 
@@ -309,11 +309,11 @@ static String toStringIp(IPAddress ip) {
 static bool captivePortal(AsyncWebServerRequest *request) {
     extern const char *wifi_hostname;
 
-    // Allow fpvgate.xyz, IP addresses, and hostname.local without redirecting
+    // Allow fpvraceone.xyz, IP addresses, and hostname.local without redirecting
     if (!isIp(request->host()) && 
         request->host() != (String(wifi_hostname) + ".local") &&
-        request->host() != "fpvgate.xyz" &&
-        request->host() != "www.fpvgate.xyz") {
+        request->host() != "fpvraceone.xyz" &&
+        request->host() != "www.fpvraceone.xyz") {
         DEBUG("Request redirected to captive portal\n");
         request->redirect(String("http://") + toStringIp(request->client()->localIP()));
         return true;

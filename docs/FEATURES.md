@@ -33,7 +33,7 @@ FPVRaceOne creates its own WiFi network — no router required.
 |----------|-------|
 | SSID | `FPVRaceOne_XXXX` (last 4 MAC digits) |
 | Security | WPA2-PSK |
-| Default password | `fpvgate1` |
+| Default password | `fpvraceone` |
 | IP address | `192.168.4.1` (static) |
 | Band | 2.4 GHz |
 | Max clients | 8 simultaneous |
@@ -69,7 +69,7 @@ Two complete RSSI processing pipelines are available, switchable at runtime via 
 - **Scale:** 1 V ≈ 2340 counts; full-scale divisor = 2400
 - **Output:** 0–255 (8-bit, clamped)
 
-### V1 — FPVGate Multi-Stage Pipeline
+### V1 — FPVRaceOne Multi-Stage Pipeline
 
 A sequential chain of five filter stages:
 

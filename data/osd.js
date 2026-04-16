@@ -1,5 +1,5 @@
-// FPVGate OSD - Real-time overlay for streaming
-// Connects to the FPVGate web server and displays live race data
+// FPVRaceOne OSD - Real-time overlay for streaming
+// Connects to the FPVRaceOne web server and displays live race data
 
 // State
 let lapNo = -1;

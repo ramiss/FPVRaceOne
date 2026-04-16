@@ -147,7 +147,7 @@ Pre-made and flashed hardware — link coming soon!
 ### Connect via WiFi
 
 1. Power on the device
-2. Connect your phone or laptop to the `FPVRaceOne_XXXX` network (password: `fpvgate1`)
+2. Connect your phone or laptop to the `FPVRaceOne_XXXX` network (password: `fpvraceone`)
 3. Open `http://192.168.4.1` in your browser
 4. Go to **Settings → Set your VTx band and channel**
 5. Go to **Calibration → Run the wizard** to set RSSI thresholds
@@ -221,7 +221,7 @@ Select **Filesystem** in the ElegantOTA UI, upload `littlefs.bin`, and the devic
 
 ## Credits
 
-FPVRaceOne is derived from [FPVGate](https://github.com/LouisHitchcock/FPVGate) by LouisHitchcock, which is itself a heavily modified fork of [PhobosLT](https://github.com/phobos-/PhobosLT) by phobos-. The original project provided the foundation for RSSI-based lap timing on ESP32.
+FPVRaceOne is derived from [FPVGate](https://github.com/LouisHitchcock/FPVGate) v1.2.0 by LouisHitchcock, which is itself a heavily modified fork of [PhobosLT](https://github.com/phobos-/PhobosLT) by phobos-. The original project provided the foundation for RSSI-based lap timing on ESP32.
 
 Signal processing concepts and Bessel IIR filter coefficients for V2 mode are derived from [RotorHazard](https://github.com/RotorHazard/RotorHazard).
 

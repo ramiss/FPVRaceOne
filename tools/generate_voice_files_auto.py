@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FPVGate Voice File Generator - Auto-run version
+FPVRaceOne Voice File Generator - Auto-run version
 This version skips the confirmation prompt for scripted runs
 """
 
@@ -11,7 +11,7 @@ def main():
     """Main entry point - auto-run without confirmation"""
     
     print("\n" + "="*60)
-    print("🎤 FPVGate Voice File Generator (Auto-run)")
+    print("🎤 FPVRaceOne Voice File Generator (Auto-run)")
     print("="*60)
     
     # Check for API key
@@ -35,7 +35,7 @@ def main():
         print("\nNext steps:")
         print("1. Review the audio files in data/sounds/")
         print("2. Upload filesystem to ESP32: platformio run -e ESP32S3 -t uploadfs")
-        print("3. Test the new voice system in FPVGate!")
+        print("3. Test the new voice system in FPVRaceOne!")
         return 0
         
     except Exception as e:

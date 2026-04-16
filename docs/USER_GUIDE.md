@@ -28,7 +28,7 @@ FPVRaceOne broadcasts its own WiFi Access Point on startup.
 
 1. Power on the device and wait 10–15 seconds
 2. Connect to **`FPVRaceOne_XXXX`** (last 4 digits of MAC address)
-3. Password: **`fpvgate1`**
+3. Password: **`fpvraceone`**
 4. Open a browser and go to **`http://192.168.4.1`**
 
 > No captive portal — your phone or laptop can stay connected to FPVRaceOne WiFi while maintaining a cellular internet connection.
@@ -127,7 +127,7 @@ Band and channel changes are **auto-saved** immediately on selection.
 
 Choose between two RSSI processing pipelines — switchable at any time without restarting.
 
-#### V1 — FPVGate Multi-Stage Pipeline (Default)
+#### V1 — FPVRaceOne Multi-Stage Pipeline (Default)
 
 Applies a chain of filters in sequence:
 

@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>FPVGate Lap Timer</title>
+    <title>FPVRaceOne Lap Timer</title>
     <link rel="icon" type="image/svg+xml" href="logo-white.svg" id="favicon" />
     <link rel="stylesheet" type="text/css" href="style.css" />
     <script src="jquery-3.7.1.min.js"></script>
@@ -16,8 +16,8 @@
     <header>
       <nav>
         <div class="logo">
-          <img src="logo-white.svg" alt="FPVGate" width="64" id="headerLogo" />
-          <h1>FPVGate</h1>
+          <img src="logo-white.svg" alt="FPVRaceOne" width="64" id="headerLogo" />
+          <h1>FPVRaceOne</h1>
           <!-- WiFi signal strength indicator disabled — use OS WiFi indicator instead
           <div id="connectionIndicator" class="connection-indicator" title="Connection status">
             <svg id="wifiIcon" class="wifi-icon" width="26" height="22" viewBox="0 0 26 22" xmlns="http://www.w3.org/2000/svg" aria-label="WiFi signal">
@@ -239,7 +239,7 @@
         <div class="firmware-update">
           <div style="display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin-bottom:12px;">
             <a
-              href="http://www.fpvgate.xyz/update"
+              href="http://www.fpvraceone.xyz/update"
               target="_blank"
               rel="noopener noreferrer"
               style="display:inline-block; padding:10px 14px; border-radius:8px; text-decoration:none; background:var(--accent-color); color:white;"
@@ -276,7 +276,7 @@
     <footer>
       <div class="footer-bar" style="display:flex; align-items:center; justify-content:center; padding: 4px 12px;">
         <span id="firmwareVersion" style="font-size: 12px; opacity: 0.85;">
-          Personal Lap Timer. Powered by FPVGate. v —
+          FPVRaceOne Personal Lap Timer v —
         </span>
       </div>
     </footer>
@@ -976,20 +976,66 @@
                 Opens overlay in new tab and copies URL for OBS Browser Source
               </div>
 
-              <h3>Firmware</h3>
-              <div class="config-item">
-                <label>Firmware Update:</label>
-                <a href="/update" target="_blank" class="update-link">Open Update Page</a>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                Make sure to upload both the firmware and LittleFS images on the next page by choosing the correct option in the OTA Mode dropdown for each file.
+              <h3>Firmware Update</h3>
+
+              <div class="update-guide-card">
+
+                <div class="update-version-row">
+                  <span class="update-version-label">Installed version</span>
+                  <span class="update-version-value" id="updateVersionDisplay">v —</span>
+                </div>
+
+                <p class="update-intro">
+                  FPVRaceOne requires <strong>two files</strong> to be uploaded when updating:
+                  <code>firmware.bin</code> (application) and <code>littlefs.bin</code> (web interface &amp; assets).
+                  Both are available on the GitHub releases page.
+                </p>
+
+                <div class="update-method-grid">
+                  <div class="update-method-card update-method-phone">
+                    <div class="update-method-title">📱 Phone / Tablet</div>
+                    <ol class="update-steps">
+                      <li>Click <strong>GitHub Releases</strong> below — your phone's cellular connection may not be active while connected to FPVRaceOne WiFi and you should disconnect first.</li>
+                      <li>Download <code>firmware.bin</code> and <code>littlefs.bin</code> to your phone</li>
+                      <li>Click <strong>Open ElegantOTA</strong> below</li>
+                      <li>Upload <code>firmware.bin</code> — select <em>Firmware</em> mode</li>
+                      <li>Upload <code>littlefs.bin</code> — select <em>Filesystem</em> mode</li>
+                    </ol>
+                  </div>
+                  <div class="update-method-card update-method-laptop">
+                    <div class="update-method-title">💻 Laptop / Desktop</div>
+                    <ol class="update-steps">
+                      <li><strong>Disconnect</strong> from FPVRaceOne WiFi</li>
+                      <li>Click <strong>GitHub Releases</strong> below and download both <code>.bin</code> files</li>
+                      <li><strong>Reconnect</strong> to FPVRaceOne WiFi</li>
+                      <li>Click <strong>Open ElegantOTA</strong> below</li>
+                      <li>Upload <code>firmware.bin</code> — select <em>Firmware</em> mode</li>
+                      <li>Upload <code>littlefs.bin</code> — select <em>Filesystem</em> mode</li>
+                    </ol>
+                  </div>
+                </div>
+
+                <div class="update-actions">
+                  <a href="https://github.com/ramiss/FPVRaceOne/releases/latest"
+                     target="_blank"
+                     rel="noopener"
+                     class="update-btn update-btn-secondary">
+                    GitHub Releases - github.com/ramiss/FPVRaceOne/releases/latest ↗
+                  </a>
+                  <a href="/update"
+                     target="_blank"
+                     class="update-btn update-btn-primary">
+                    Open ElegantOTA ↗
+                  </a>
+                </div>
+
               </div>
 
               <h3>Signal Processing</h3>
               <div class="config-item">
                 <label for="filterModeSelect">Filter Mode:</label>
                 <select id="filterModeSelect" onchange="onFilterModeChange(); autoSaveConfig()">
-                  <option value="0">V1 — FPVGate (Kalman + EMA)</option>
+                  <option value="0">V1 — FPVRaceOne (Kalman + EMA)</option>
                   <option value="1">V2 — RotorHazard (Bessel IIR)</option>
                 </select>
               </div>
@@ -1040,7 +1086,7 @@
               
               <h3 style="margin-top: 0;">Hardware Tests</h3>
               <div style="margin-bottom: 16px; padding: 12px; background-color: var(--bg-secondary); border-radius: 8px; font-size: 14px;">
-                <p style="margin: 0;">Run comprehensive hardware and software tests to verify all FPVGate components are functioning correctly.</p>
+                <p style="margin: 0;">Run comprehensive hardware and software tests to verify all FPVRaceOne components are functioning correctly.</p>
               </div>
 
               <button id="runTestsButton" onclick="runSelfTest()" style="width: 100%; padding: 12px; margin-bottom: 16px; background-color: var(--accent-color);">Run System Self-Test</button>

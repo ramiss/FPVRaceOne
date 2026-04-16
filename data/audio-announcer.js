@@ -1,5 +1,5 @@
 /**
- * FPVGate Hybrid Audio Announcer
+ * FPVRaceOne Hybrid Audio Announcer
  * 
  * Three-tier fallback system for voice announcements:
  * 1. ElevenLabs pre-recorded audio (best quality, instant)

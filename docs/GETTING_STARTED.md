@@ -24,7 +24,7 @@ Complete guide to setting up and configuring your FPVRaceOne lap timer.
 1. Power on your FPVRaceOne device and wait 10–15 seconds
 2. On your phone or laptop, connect to the WiFi network: **`FPVRaceOne_XXXX`**  
    *(XXXX = last 4 digits of the device MAC address)*
-3. Password: **`fpvgate1`**
+3. Password: **`fpvraceone`**
 4. Open a browser and go to: **`http://192.168.4.1`**
 
 > Your device can connect to FPVRaceOne WiFi and maintain cellular internet simultaneously — no captive portal is used.

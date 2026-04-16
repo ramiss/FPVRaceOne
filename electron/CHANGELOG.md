@@ -1,6 +1,6 @@
 # FPVGate Desktop App Changelog
 
-All notable changes to the FPVGate Electron desktop application will be documented in this file.
+All notable changes to the FPVRaceOne Electron desktop application will be documented in this file.
 
 ## [1.3.3] - 2024-12-10
 

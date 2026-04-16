@@ -1391,7 +1391,135 @@ footer {
   gap: 12px;
 }
 
-/* Save Configuration button — dim when nothing to save, highlighted when dirty */
+/* ── Firmware Update Guide ────────────────────────────────────── */
+
+.update-guide-card {
+  background-color: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin: 8px 0 20px 0;
+}
+
+.update-version-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.update-version-label {
+  font-size: 13px;
+  color: var(--secondary-color);
+}
+
+.update-version-value {
+  font-size: 15px;
+  font-weight: bold;
+  color: var(--primary-color);
+  font-family: monospace;
+}
+
+.update-intro {
+  font-size: 13px;
+  color: var(--secondary-color);
+  margin: 0 0 16px 0;
+  line-height: 1.5;
+}
+
+.update-intro code {
+  background-color: var(--bg-color, #1a1a2e);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  padding: 1px 5px;
+  font-size: 12px;
+  color: var(--primary-color);
+}
+
+.update-method-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+@media (max-width: 640px) {
+  .update-method-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+.update-method-card {
+  border-radius: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-color);
+}
+
+.update-method-phone {
+  border-left: 3px solid #27ae60;
+}
+
+.update-method-laptop {
+  border-left: 3px solid #2980b9;
+}
+
+.update-method-title {
+  font-size: 13px;
+  font-weight: bold;
+  margin-bottom: 10px;
+  color: var(--primary-color);
+}
+
+.update-steps {
+  margin: 0;
+  padding-left: 18px;
+  font-size: 12px;
+  color: var(--secondary-color);
+  line-height: 1.7;
+}
+
+.update-steps code {
+  background-color: var(--bg-color, #1a1a2e);
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-size: 11px;
+  color: var(--primary-color);
+}
+
+.update-actions {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.update-btn {
+  display: inline-block;
+  padding: 9px 18px;
+  border-radius: 4px;
+  font-size: 14px;
+  font-weight: bold;
+  text-decoration: none;
+  text-align: center;
+  cursor: pointer;
+  transition: opacity 0.2s;
+}
+
+.update-btn:hover {
+  opacity: 0.85;
+}
+
+.update-btn-primary {
+  background-color: var(--primary-color);
+  color: var(--bg-secondary, #1a1a2e);
+}
+
+.update-btn-secondary {
+  background-color: var(--secondary-color);
+  color: white;
+}
+
+/* ── Save Configuration button — dim when nothing to save, highlighted when dirty ── */
 #saveConfigBtn {
   background-color: var(--secondary-color);
   opacity: 0.5;

@@ -1,6 +1,6 @@
-# FPVGate Desktop App (Electron)
+# FPVRaceOne Desktop App (Electron)
 
-Desktop application for FPVGate Lap Timer with WiFi and USB connectivity.
+Desktop application for FPVRaceOne Lap Timer with WiFi and USB connectivity.
 
 **Current Version:** v1.3.3
 
@@ -8,7 +8,7 @@ Desktop application for FPVGate Lap Timer with WiFi and USB connectivity.
 
 ### Core Connectivity
 - ✅ **WiFi & USB Toggle** - Switch between connection modes in-app
-- ✅ **Auto-detect** - Automatically finds FPVGate USB device
+- ✅ **Auto-detect** - Automatically finds FPVRaceOne USB device
 - ✅ **Smart Default** - Falls back to USB if WiFi unavailable
 - ✅ **Native App** - Runs as Windows/Mac/Linux desktop application
 - ✅ **Same UI** - Uses your existing web interface files from `data/` folder
@@ -74,8 +74,8 @@ npm run build:win
 ```
 
 This creates:
-- `dist/FPVGate Setup 1.0.0.exe` - Windows installer
-- Installs to `C:\Program Files\FPVGate\`
+- `dist/FPVRaceOne Setup 1.0.0.exe` - Windows installer
+- Installs to `C:\Program Files\FPVRaceOne\`
 - Creates desktop shortcut
 - Creates start menu entry
 
@@ -83,7 +83,7 @@ This creates:
 
 ```
 electron/dist/
-  FPVGate Setup 1.0.0.exe    (~80MB installer)
+  FPVRaceOne Setup 1.0.0.exe    (~80MB installer)
   win-unpacked/              (portable version)
 ```
 
@@ -92,7 +92,7 @@ electron/dist/
 ### File Structure
 
 ```
-FPVGate/
+FPVRaceOne/
 ├── electron/
 │   ├── main.js           → Electron main process (Node.js)
 │   ├── preload.js        → Secure IPC bridge
@@ -125,10 +125,10 @@ FPVGate/
 
 ## Troubleshooting
 
-### "Cannot find FPVGate device"
+### "Cannot find FPVRaceOne device"
 
 **Solution:** 
-- Make sure FPVGate is plugged in via USB
+- Make sure FPVRaceOne is plugged in via USB
 - Check Device Manager for COM port
 - ESP32-S3 should show as "USB-SERIAL CH340" or "Espressif" device
 
@@ -142,8 +142,8 @@ FPVGate/
 ### WiFi not connecting
 
 **Solution:**
-- Make sure you're connected to FPVGate WiFi network
-- Check FPVGate IP is `192.168.4.1` (or update in code)
+- Make sure you're connected to FPVRaceOne WiFi network
+- Check FPVRaceOne IP is `192.168.4.1` (or update in code)
 - Switch to USB mode instead
 
 ### App not starting
@@ -162,7 +162,7 @@ npm start
 **Solution:**
 - Make sure you're editing files in the `data/` folder (not `electron/` folder)
 - Fully restart the app (Ctrl+C then `npm start` again)
-- Clear cache: Delete `%APPDATA%/fpvgate-desktop/` folder
+- Clear cache: Delete `%APPDATA%/fpvraceone-desktop/` folder
 
 ## USB Mode Limitations
 
@@ -198,7 +198,7 @@ All core functionality works identically in both modes. USB actually provides **
 ### For End Users
 
 1. Build the installer: `npm run build:win`
-2. Distribute `FPVGate Setup 1.3.3.exe`
+2. Distribute `FPVRaceOne Setup 1.3.3.exe`
 3. Users run installer
 4. App appears on desktop and Start menu
 
@@ -207,7 +207,7 @@ All core functionality works identically in both modes. USB actually provides **
 The `dist/win-unpacked/` folder contains a portable version:
 - No installation needed
 - Just zip it and distribute
-- Extract and run `FPVGate.exe`
+- Extract and run `FPVRaceOne.exe`
 
 ## Advanced Configuration
 
@@ -217,8 +217,8 @@ Edit `package.json`:
 ```json
 {
   "build": {
-    "productName": "FPVGate",
-    "appId": "com.fpvgate.laptimer",
+    "productName": "FPVRaceOne",
+    "appId": "com.fpvraceone.laptimer",
     "win": {
       "icon": "../data/logo-white.svg"
     }
@@ -280,4 +280,4 @@ Creates `.AppImage` or `.deb` package.
 
 ## License
 
-Same as FPVGate main project (MIT).
+Same as FPVRaceOne main project (MIT).

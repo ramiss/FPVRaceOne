@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to FPVGate will be documented in this file.
+All notable changes to FPVRaceOne will be documented in this file.
 
 ## [1.4.1] - 2024-12-14
 
@@ -52,7 +52,7 @@ All notable changes to FPVGate will be documented in this file.
 
 ### Added - mDNS Improvements
 - **Enhanced mDNS Support** - Better device discovery and connectivity
-  - Hostname: `fpvgate.local` (replaces IP addresses)
+  - Hostname: `fpvraceone.local` (replaces IP addresses)
   - Service advertisement: `_http._tcp` on port 80
   - Works in both AP and Station modes
   - Automatic service re-registration after WiFi changes

@@ -1,16 +1,16 @@
-# FPVGate Quick Start Guide
+# FPVRaceOne Quick Start Guide
 
-Get your FPVGate lap timer up and running in minutes!
+Get your FPVRaceOne lap timer up and running in minutes!
 
 ## What You Need
 
-1. Purchase a pre-flashed FPVGate Personal Lap Timer (link coming soon)
+1. Purchase a pre-flashed FPVRaceOne Personal Lap Timer (link coming soon)
 
-2. **Power on** your FPVGate device
+2. **Power on** your FPVRaceOne device
 
 3. **Connect to WiFi**:
-   - Network: `FPVGate_XXXX` (XXXX = last 4 digits of MAC address)
-   - Password: `fpvgate1`
+   - Network: `FPVRaceOne_XXXX` (XXXX = last 4 digits of MAC address)
+   - Password: `fpvraceone`
 
 4. **Open web interface**:
    - Go to: `http://192.168.4.1`
@@ -40,7 +40,7 @@ Get your FPVGate lap timer up and running in minutes!
 
 ## Default Settings
 
-- **WiFi**: `FPVGate_XXXX` / `fpvgate1`
+- **WiFi**: `FPVRaceOne_XXXX` / `fpvraceone`
 - **Web Address**: `http://192.168.4.1`
 - **Minimum Lap Time**: 5 seconds
 - **Lap Count**: Infinite (0)
@@ -58,7 +58,7 @@ Get your FPVGate lap timer up and running in minutes!
 ### Can't find WiFi network
 - Check device is powered (USB-C power)
 - Wait 10 seconds after power-on
-- Look for `FPVGate_` followed by 4 characters
+- Look for `FPVRaceOne_` followed by 4 characters
 
 ### Missing laps
 - Lower **Enter RSSI** threshold by 5 points

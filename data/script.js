@@ -204,7 +204,7 @@ async function initializeTransport() {
             fpvgatePort = ports.find(p => p.path === 'COM12');
           }
           
-          console.log('[Init] FPVGate port found:', fpvgatePort);
+          console.log('[Init] FPVRaceOne port found:', fpvgatePort);
           if (fpvgatePort) {
             await connectUSB(fpvgatePort.path);
             return;
@@ -1991,9 +1991,12 @@ async function loadFirmwareVersion() {
     const r = await fetch('/api/version');
     if (!r.ok) return;
     const data = await r.json();
-    const el = document.getElementById('firmwareVersion');
-    if (el && data && data.firmwareVersion) {
-      el.textContent = `FPVGate Personal Lap Timer. v${data.firmwareVersion}`;
+    if (data && data.firmwareVersion) {
+      const v = data.firmwareVersion;
+      const footer = document.getElementById('firmwareVersion');
+      if (footer) footer.textContent = `FPVRaceOne Personal Lap Timer v${v}`;
+      const badge = document.getElementById('updateVersionDisplay');
+      if (badge) badge.textContent = `v${v}`;
     }
   } catch (e) {
     console.warn('[UI] Failed to load firmware version:', e);

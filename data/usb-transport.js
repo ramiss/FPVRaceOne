@@ -1,7 +1,7 @@
 /**
- * USB Transport for FPVGate
+ * USB Transport for FPVRaceOne
  * 
- * Provides USB Serial CDC connectivity for direct, local-only communication with FPVGate.
+ * Provides USB Serial CDC connectivity for direct, local-only communication with FPVRaceOne.
  * Works in both browser (via Web Serial API) and Electron (via node-serialport).
  * 
  * Features:
@@ -9,7 +9,7 @@
  * - Automatic line buffering for reliable JSON parsing
  * - Event-driven architecture matching WiFi EventSource API
  * - Bidirectional communication (send commands, receive events)
- * - Compatible with all FPVGate features: timing, LED control, configuration
+ * - Compatible with all FPVRaceOne features: timing, LED control, configuration
  * 
  * Protocol:
  *   Commands: {"method":"POST","path":"timer/start","data":{}}
@@ -56,7 +56,7 @@ class USBTransport {
             if (this.isElectron) {
                 // Electron mode - use Node.js serialport
                 if (!portPath) {
-                    // Auto-detect FPVGate device
+                    // Auto-detect FPVRaceOne device
                     const ports = await window.electronAPI.listPorts();
                     const fpvgatePorts = ports.filter(p => 
                         p.manufacturer && p.manufacturer.includes('Espressif') ||
@@ -64,7 +64,7 @@ class USBTransport {
                     );
                     
                     if (fpvgatePorts.length === 0) {
-                        throw new Error('No FPVGate device found. Please plug in your device.');
+                        throw new Error('No FPVRaceOne device found. Please plug in your device.');
                     }
                     
                     if (fpvgatePorts.length === 1) {
@@ -113,7 +113,7 @@ class USBTransport {
                 this.port = await navigator.serial.requestPort();
                 await this.port.open({ baudRate: 115200 });
 
-                console.log('[USB] Connected to FPVGate');
+                console.log('[USB] Connected to FPVRaceOne');
                 this.connected = true;
 
                 // Set up reader
@@ -147,7 +147,7 @@ class USBTransport {
             ).join('\n');
             
             const selection = prompt(
-                `Multiple FPVGate devices found:\n\n${portList}\n\nEnter number (1-${ports.length}):`,
+                `Multiple FPVRaceOne devices found:\n\n${portList}\n\nEnter number (1-${ports.length}):`,
                 '1'
             );
             
