@@ -1,1410 +1,379 @@
-# FPVGate Features Guide
+# FPVRaceOne Features Reference
 
-In-depth documentation of all FPVGate capabilities and technical details.
+In-depth technical documentation of all FPVRaceOne capabilities.
 
-** Navigation:** [Home](../README.md) | [Getting Started](GETTING_STARTED.md) | [User Guide](USER_GUIDE.md) 
+**Navigation:** [Home](../README.md) | [Getting Started](GETTING_STARTED.md) | [User Guide](USER_GUIDE.md)
 
 ---
 
 ## Table of Contents
 
 1. [Connectivity](#connectivity)
-2. [Lap Timing System](#lap-timing-system)
-3. [Voice Announcements](#voice-announcements)
-4. [LED Visual Effects](#led-visual-effects)
-5. [Race Analysis](#race-analysis)
-6. [Track Management](#track-management)
-7. [Webhooks & Integration](#webhooks--integration)
-8. [Race History & Data Management](#race-history--data-management)
-9. [Multi-Client Support](#multi-client-support)
-10. [Self-Test System](#self-test-system)
-11. [Configuration Management](#configuration-management)
+2. [Signal Processing](#signal-processing)
+3. [Lap Detection](#lap-detection)
+4. [Calibration Wizard](#calibration-wizard)
+5. [Voice Announcements](#voice-announcements)
+6. [Race Analysis](#race-analysis)
+7. [Race History & Data Management](#race-history--data-management)
+8. [Webhooks & Integration](#webhooks--integration)
+9. [Configuration Management](#configuration-management)
+10. [OTA Updates](#ota-updates)
+11. [Self-Test System](#self-test-system)
 12. [Technical Architecture](#technical-architecture)
 
 ---
 
 ## Connectivity
 
-### WiFi Access Point Mode
+### WiFi Access Point
 
-**Overview:**  
-FPVGate creates its own WiFi network for wireless connectivity.
+FPVRaceOne creates its own WiFi network — no router required.
 
-**Technical Specifications:**
-- **SSID Format:** `FPVGate_XXXX` (XXXX = last 4 MAC digits)
-- **Security:** WPA2-PSK
-- **Default Password:** `fpvgate1`
-- **IP Address:** `192.168.4.1` (static)
-- **DNS:** Captive portal to `www.fpvgate.xyz`
-- **Channel:** Auto-select (1-11, 2.4GHz)
-- **Max Clients:** 8 simultaneous connections
+| Property | Value |
+|----------|-------|
+| SSID | `FPVRaceOne_XXXX` (last 4 MAC digits) |
+| Security | WPA2-PSK |
+| Default password | `fpvgate1` |
+| IP address | `192.168.4.1` (static) |
+| Band | 2.4 GHz |
+| Max clients | 8 simultaneous |
 
-**How It Works:**
-1. ESP32-S3 boots, initializes WiFi hardware
-2. Soft AP (Access Point) mode configured
-3. DNS server started for captive portal
-4. WebSocket server starts on port 81
-5. HTTP server starts on port 80
-6. mDNS responder broadcasts `fpvgate.local`
+No captive DNS — connected devices retain their cellular internet connection.
 
-**Advantages:**
-- No router required
-- Works anywhere
-- No internet needed
-- Simple setup
+### USB Serial CDC
 
-**Limitations:**
-- ~20-30ms latency (WiFi overhead)
-- Range limited (~30-50 feet)
-- Interference from other 2.4GHz devices
+Direct connection via USB-C for zero-latency operation.
 
-**Power Consumption:** ~150-200mA during active WiFi
+| Property | Value |
+|----------|-------|
+| Interface | USB Serial CDC |
+| Protocol | JSON over serial |
+| Latency | < 5 ms (vs 20–30 ms WiFi) |
 
-### USB Serial CDC Mode (ESP32-S3 Only)
-
-**Overview:**  
-Direct USB connection for zero-latency control.
-
-**Technical Specifications:**
-- **Interface:** USB Serial CDC (Communication Device Class)
-- **Baud Rate:** 115200 (for monitoring)
-- **Protocol:** JSON over serial
-- **Latency:** <5ms (vs 20-30ms WiFi)
-- **Data Rate:** ~12 Mbps (USB 2.0 Full Speed)
-
-**Architecture:**
-
-```
-+-----------0---+         USB Cable          +---------------+
-�   Computer   � ?-----------------------? �  ESP32-S3    �
-�              �                           �              �
-�  Electron    �   JSON Command Protocol   �  Transport   �
-�  Browser     �   {"method":"POST"...}    �  Manager     �
-�              �                           �              �
-� USB-Transport�                           �  Webserver   �
-�    .js       �                           �  Handlers    �
-+---------------+                            +---------------+
-```
-
-**Command Protocol:**
-
-Commands sent as JSON objects:
-
-```json
-{
-  "method": "POST",
-  "path": "timer/start",
-  "data": {}
-}
-```
-
-**Event Protocol:**
-
-Events broadcast with `EVENT:` prefix:
-
-```json
-EVENT:{"type":"lap","data":{"lapTime":12345,"lapNumber":3}}
-```
-
-**Supported Commands:**
-- `timer/start` - Start race countdown
-- `timer/stop` - Stop current race
-- `timer/lap` - Manually add lap
-- `timer/clear` - Clear lap data
-- `led/preset` - Set LED effect
-- `led/color` - Set solid color
-- `led/brightness` - Adjust brightness
-- `led/speed` - Set animation speed
-- `led/override` - Manual control toggle
-- `led/fadecolor` - Set fade target
-- `led/strobecolor` - Set strobe color
-- `config/*` - Configuration endpoints
-
-**Benefits:**
-- Zero WiFi latency
-- More reliable connection
-- Works offline completely
-- WiFi still available for other clients
-
-**Electron Desktop App:**
-- Bundles web interface with USB support
-- Auto-detects COM ports
-- Cross-platform (Windows, macOS, Linux)
-- Includes all dependencies
+Commands are sent as JSON objects; events are broadcast with an `EVENT:` prefix.
 
 ### Hybrid Mode
 
-**Unique Feature:**  
-USB and WiFi can operate simultaneously!
-
-**Use Cases:**
-1. **Race Director:** USB connection (zero latency)
-2. **Spectators:** WiFi connection (view race)
-3. **Timing Screen:** WiFi connection (OSD overlay)
-
-**How It Works:**
-- Transport abstraction layer routes events to all clients
-- USB client receives events via JSON
-- WiFi clients receive events via WebSocket
-- Commands from any source processed identically
-
-**Example Scenario:**
-```
-     Race Director (USB)
-            ? Commands
-       +---------+
-       � ESP32-S3�
-       +---------+
-         ?     ?
-    WiFi  WiFi  WiFi
-     ?     ?     ?
-  Phone Laptop  OSD
-```
+USB and WiFi operate simultaneously. A race director can control the timer via USB (low latency) while spectators view live data via WiFi.
 
 ---
 
-## Lap Timing System
+## Signal Processing
 
-### RSSI-Based Detection
+Two complete RSSI processing pipelines are available, switchable at runtime via **Settings → Signal Processing**. Both read the same raw ADC value and write to the same RSSI history buffer, so the calibration wizard and all gate detection logic work identically regardless of which mode is selected.
 
-**Principle:**  
-Drone VTx signal strength (RSSI) peaks when passing through gate.
+### ADC Input
 
-**How It Works:**
+- **Hardware:** Seeed XIAO ESP32-C6 12-bit ADC
+- **Attenuation:** 6 dB (input range 0–1.75 V)
+- **Scale:** 1 V ≈ 2340 counts; full-scale divisor = 2400
+- **Output:** 0–255 (8-bit, clamped)
 
-1. **Tuning:** RX5808 tuned to pilot's frequency via SPI
-2. **Monitoring:** RSSI sampled at ~100Hz (every 10ms)
-3. **Detection Logic:**
-   - RSSI rises above **Enter Threshold** ? Start watching
-   - RSSI peaks ? Record timestamp
-   - RSSI falls below **Exit Threshold** ? Lap confirmed
+### V1 — FPVGate Multi-Stage Pipeline
 
-**State Machine:**
+A sequential chain of five filter stages:
+
+| Stage | Filter | Parameters |
+|-------|--------|------------|
+| 1 | Kalman | Q = 5.0 (process noise), R = 8.0 (measurement noise) |
+| 2 | Median-of-3 | Rolling 3-sample window |
+| 3 | Moving average | 7-sample window |
+| 4 | EMA | α = 0.15 |
+| 5 | Step limiter | Max ±12 counts per sample |
+
+**Gate detection (V1):**
+- **Enter Hold Samples** (configurable, default 4) — consecutive samples at or above Enter RSSI before gate entry is registered
+- **Exit Confirm Samples** (configurable, default 2) — consecutive samples below Exit RSSI before gate exit is confirmed
+
+All filter state is reset at race start so stale data from a previous race cannot affect the first lap.
+
+### V2 — RotorHazard Bessel IIR
+
+A single 2nd-order Bessel infinite impulse response filter applied directly to raw RSSI. Coefficients are ported from the RotorHazard open-source project.
+
+| Cutoff | b₀ | a₁ | a₂ | Character |
+|--------|----|----|-----|-----------|
+| 100 Hz | 9.054e-2 | −0.24114 | 0.87898 | Fastest / least smoothing |
+| 50 Hz | 2.921e-2 | −0.49774 | 1.38090 | Balanced |
+| 20 Hz | 5.593e-3 | −0.75788 | 1.73551 | Smoothest / most lag |
+
+Output formula: `out = v[0] + v[2] + 2·v[1]` (DC gain = 1.0 — verified analytically).
+
+**Gate detection (V2):**
+- Single-sample entry and exit (trusts the filter rather than hold counters)
+- Lap timestamp placed at the **midpoint of the signal peak plateau**: `peakTime + peakDuration / 2`
+
+### Kalman Filter (V1)
+
+Standard Kalman predictor-corrector:
+
+- **Q (process noise)** — How fast the true signal can change. Higher Q = more responsive, more noise passes through.
+- **R (measurement noise)** — How noisy the ADC is. Higher R = more smoothing, more lag.
+- Steady-state gain ≈ 43% at Q=5, R=8 (29× more responsive than the original misconfigured defaults).
+
+---
+
+## Lap Detection
+
+### State Machine
 
 ```
-     IDLE
-      ? (RSSI > Enter)
-   CROSSING
-      ? (RSSI peaks)
-   RECORD_TIME
-      ? (RSSI < Exit)
-   LAP_CONFIRMED ? Broadcast event
-      ?
-   COOLDOWN (minimum lap time)
-      ?
-     IDLE
-```
-
-**Advantages:**
-- No additional hardware on drone
-- Works with any VTx
-- Accurate to ~10ms
-- No line-of-sight issues (unlike IR)
-
-**Calibration Requirements:**
-- **Enter RSSI:** 2-5 points below peak
-- **Exit RSSI:** 8-10 points below Enter
-- **Minimum Lap Time:** Prevents false triggers
-
-### Frequency Management
-
-**Supported Bands:**
-- **A (Boscam A):** 8 channels (5865-5725 MHz)
-- **B (Boscam B):** 8 channels (5733-5866 MHz)
-- **E (Boscam E):** 8 channels (5705-5945 MHz)
-- **F (Fatshark):** 8 channels (5740-5880 MHz)
-- **R (RaceBand):** 8 channels (5658-5917 MHz)
-- **L (LowBand):** 8 channels (5362-5621 MHz)
-
-**Total:** 48 unique frequencies (some overlap)
-
-**Tuning Process:**
-1. User selects band + channel in Configuration
-2. Frequency calculated from lookup table
-3. RX5808 programmed via SPI commands
-4. Confirmation read from module
-5. RSSI monitoring begins
-
-**SPI Communication:**
-- **Clock:** 1 MHz (GPIO15)
-- **Data:** Single wire (GPIO13)
-- **Chip Select:** GPIO14
-- **Protocol:** 25-bit register writes
-
-**Register Format:**
-```
-| R/W (1) | Address (4) | Data (20) |
+IDLE
+ │ (RSSI > Enter for N hold samples)
+ ▼
+ENTERED — tracking peak
+ │ (RSSI falls below Exit for M confirm samples)
+ ▼
+LAP CONFIRMED → record timestamp, trigger events
+ │
+COOLDOWN (minimum lap time)
+ │
+IDLE
 ```
 
 ### Timing Accuracy
 
-**Factors Affecting Accuracy:**
+| Factor | Impact | Notes |
+|--------|--------|-------|
+| RSSI sampling rate | ~10 ms | 100 Hz loop |
+| Peak detection | ±10 ms | Per-sample resolution |
+| System timer | < 1 ms | `millis()` |
+| V2 midpoint correction | Reduces systematic error | Timestamp shifted to peak centre |
 
-| Factor | Impact | Mitigation |
-|--------|--------|------------|
-| **RSSI Sampling Rate** | �5ms | 100Hz sampling |
-| **Peak Detection** | �10ms | 3-point average |
-| **System Timer** | �1ms | millis() function |
-| **WiFi Latency** | 20-30ms | Use USB mode |
+### Minimum Lap Time
 
-**Expected Accuracy:**
-- **Best Case (USB):** �10-15ms
-- **WiFi Mode:** �30-40ms
-- **For Comparison:** MultiGP standard is �50ms
+Laps triggered within the minimum lap time are silently ignored. This prevents double-counting when the drone lingers near the gate or crashes close to it.
 
-### Gate Pass Classification
+---
 
-**Gate 1 (Hole Shot):**
-- First pass after race start
-- Timer already running
-- Shows as "Gate 1" in lap table
-- Not included in fastest lap calculation
+## Calibration Wizard
 
-**Subsequent Laps:**
-- Numbered Lap 1, 2, 3...
-- Delta time calculated from previous lap
-- Included in statistics
+### Recording Phase
 
-**Why Separate Gate 1:**
-- Reflects actual racing terminology
-- First pass timing is less consistent (starting position varies)
-- Best lap comparison should exclude hole shot
+- Firmware stores up to 5000 RSSI samples with millisecond timestamps in a dedicated calibration buffer
+- Samples are captured at the same rate as the live RSSI loop
+- Multiple fly-over passes can be recorded in a single session
+
+### Analysis Phase
+
+- The full recorded dataset is streamed to the browser in pages (500 samples/page) after recording stops
+- A chart renders all samples with the calculated Enter and Exit thresholds overlaid as horizontal lines
+- Thresholds are calculated from the observed peak and valley values
+
+### Overview Mode
+
+- After recording, the calibration chart replaces the live scanner with the full recorded dataset
+- The live scanner can be restored at any time by exiting overview mode
+- The live signal can be **paused** to examine a specific moment; Enter/Exit lines move in real time as sliders are adjusted even while paused
 
 ---
 
 ## Voice Announcements
 
-### Text-to-Speech Engines
+### TTS Engines
 
-FPVGate supports two TTS engines:
+#### ElevenLabs (Pre-recorded)
 
-#### 1. ElevenLabs (Pre-recorded)
+High-quality neural TTS pre-generated as MP3 files stored in LittleFS.
 
-**Technology:**  
-High-quality neural TTS, pre-generated MP3 files.
+**Voices:** Sarah (energetic), Rachel (calm), Adam (deep male), Antoni (friendly male)
 
-**Voices Available:**
-- **Sarah** - Energetic female (default)
-- **Rachel** - Calm female
-- **Adam** - Deep male
-- **Antoni** - Friendly male
+**Fallback:** If audio files are missing or unreadable, the system automatically falls back to PiperTTS.
 
-**Characteristics:**
-- Natural, human-like speech
-- Emotional inflection
-- Consistent quality
-- Pre-recorded = instant playback
+#### PiperTTS (Real-time)
 
-**File Structure:**
-```
-/audio/elevenlabs/sarah/
-  +-- arm.mp3
-  +-- gate1.mp3
-  +-- lap1.mp3 ... lap50.mp3
-  +-- 0.mp3 ... 99.mp3 (numbers)
-  +-- fastest.mp3
-  +-- racecomplete.mp3
-```
+Fast lightweight neural synthesis — no pre-recorded files required.
 
-**Generation:**
-- Use `tools/tts_generator.py`
-- Requires ElevenLabs API key (free tier: 10k chars/month)
-- Pre-generates all needed phrases
-- Upload to SD card or LittleFS
-
-**Storage Requirements:**
-- ~150 files per voice
-- ~3-5 MB per voice
-- Supports multiple voices simultaneously
-
-#### 2. PiperTTS (Real-time)
-
-**Technology:**  
-Fast, lightweight neural TTS with real-time synthesis.
-
-**Characteristics:**
-- Synthesizes speech on-demand
-- Slightly robotic but clear
-- ~200ms faster than ElevenLabs (no file I/O)
-- No pre-generation needed
-- No storage required
-
-**Model:**
-- **en_US-lessac-medium** (default)
-- 17MB model file in LittleFS
-- Neural architecture optimized for ESP32
-
-**Use Cases:**
-- SD card not available
-- Custom pilot names (dynamic synthesis)
-- Prototyping/testing
-- Lower latency requirements
-
-**Fallback Behavior:**
-- ElevenLabs voice selected but files missing ? Auto-switches to PiperTTS
-- Seamless degradation
+- ~200 ms faster than ElevenLabs (no file I/O)
+- Slightly more synthetic character
+- Suitable when LittleFS space is limited or for custom pilot names
 
 ### Announcement Formats
 
-Three levels of verbosity:
-
-#### Format 1: Pilot + Lap + Time (Full)
-
-**Example:** "Louis Lap 5, 12.34"
-
-**Components:**
-1. Phonetic pilot name (or pilot name if not set)
-2. "Lap" literal
-3. Lap number
-4. Lap time (seconds.milliseconds)
-
-**Audio Construction:**
-```
-phonetic_name.mp3 + lap.mp3 + 5.mp3 + time_12_34.mp3
-```
-
-**Best For:** Multi-pilot events, spectators
-
-#### Format 2: Lap + Time
-
-**Example:** "Lap 5, 12.34"
-
-**Components:**
-1. "Lap" literal
-2. Lap number
-3. Lap time
-
-**Best For:** Single pilot, less distraction
-
-#### Format 3: Time Only (Minimal)
-
-**Example:** "12.34"
-
-**Components:**
-1. Lap time only
-
-**Best For:** Focus on flying, minimal audio
-
-### Phonetic Name System
-
-**Purpose:**  
-Ensure correct pronunciation of pilot names.
-
-**How It Works:**
-1. User enters "Phonetic Name" in Configuration
-2. If empty, falls back to "Pilot Name"
-3. Name sent to TTS engine
-4. ElevenLabs: Pre-generated with name
-5. PiperTTS: Synthesizes in real-time
-
-**Examples:**
-
-| Pilot Name | Phonetic Name | TTS Output |
-|------------|---------------|------------|
-| Louis | Louie | "Louie Lap 5..." |
-| Xavier | Zavier | "Zavier Lap 5..." |
-| Nguyen | Win | "Win Lap 5..." |
-| Siobhan | Shiv-awn | "Shiv-awn Lap 5..." |
-
-**Tips:**
-- Spell phonetically (how it sounds)
-- Use hyphens for syllable breaks
-- Test with "Generate Audio" button
+| Format | Example |
+|--------|---------|
+| Full (name + lap + time) | "Louis Lap 5, 12.34" |
+| Lap + Time | "Lap 5, 12.34" |
+| Time Only | "12.34" |
 
 ### Announcer Types
 
-#### None
-- Silent mode
-- Only buzzer for race start
-- Minimal distraction
+| Type | Behaviour |
+|------|-----------|
+| None | Silent — only buzzer for race start |
+| Beep | Short beep per lap, no speech |
+| Lap Time | Announces every lap (recommended) |
+| 2 Consecutive | Announces every 2 laps as a pair |
+| 3 Consecutive | Announces every 3 laps (RaceGOW format) |
 
-#### Beep Only
-- Short beep on each lap
-- No voice
-- Audio cue without speech
+### Phonetic Name
 
-#### Lap Time (Standard)
-- Announces every lap
-- Full details per format setting
-- **Most popular mode**
-
-#### 2 Consecutive Laps
-- Announces every 2 laps combined
-- Example: "Laps 3 and 4, 25.67 seconds"
-- Good for longer races (10+ laps)
-
-#### 3 Consecutive Laps
-- Announces every 3 laps combined
-- Example: "Laps 3, 4, and 5, 38.91 seconds"
-- Consistency-focused racing
-
-### Playback Speed Control
-
-**Range:** 0.1 - 2.0  
-**Default:** 1.0 (normal)  
-**Recommended:** 1.2 - 1.4
-
-**Effect:**
-- Speeds up or slows down pre-recorded audio
-- Does not affect pitch (time-stretching)
-- Faster = less audio overlap on quick laps
-
-**Implementation:**
-- I2S audio playback with adjustable sample rate
-- 1.0 = 44100 Hz
-- 1.5 = 66150 Hz (1.5� faster)
-
----
-
-## LED Visual Effects
-
-### WS2812B Control
-
-**Technology:**  
-Individually addressable RGB LEDs using single-wire protocol.
-
-**Technical Details:**
-- **Protocol:** WS2812B (NeoPixel)
-- **Data Rate:** 800 kHz
-- **Color Depth:** 24-bit (8 bits per channel � RGB)
-- **Update Rate:** ~60 FPS
-- **Max LEDs:** 256 (practical limit ~100 for smooth animation)
-
-**Data Format:**
-Each LED receives 24 bits: `GRB` (Green-Red-Blue order)
-
-**Library:** FastLED (optimized for ESP32)
-
-### Preset Effects
-
-#### Off
-- All LEDs disabled
-- Saves power
-- **Current:** ~0mA
-
-#### Solid Colour
-- All LEDs same static color
-- User-selectable via color picker
-- **Use:** Team colors, venue requirements
-- **Current:** ~60mA per LED (full brightness)
-
-#### Rainbow Wave
-- Smooth HSV rainbow animation
-- Travels along strip
-- **Speed:** 1-20 (controls hue rotation rate)
-- **Formula:** `hue = (base_hue + (i * 255 / NUM_LEDS) + offset) % 256`
-
-#### Color Fade
-- Fades from current color to target color
-- User-selectable target via color picker
-- **Speed:** 1-20 (fade rate)
-- **Implementation:** Linear interpolation (lerp) in RGB space
-
-#### Fire
-- Flickering fire effect (red/orange/yellow)
-- Random brightness variation
-- Heat simulation algorithm
-- **Speed:** 1-20 (flame intensity)
-
-#### Ocean
-- Blue wave pattern
-- Sine wave brightness modulation
-- Calming effect
-- **Speed:** 1-20 (wave frequency)
-
-#### Police
-- Red/blue alternating
-- Split strip in half
-- Flashing pattern
-- **Speed:** 1-20 (flash rate)
-
-#### Strobe
-- Fast flashing all LEDs
-- User-selectable color
-- **Warning:** Can be intense, slowed for safety
-- **Speed:** 1-20 (flash rate, capped for visibility)
-
-#### Comet
-- Chasing light with tail
-- Single bright LED with fading trail
-- **Speed:** 1-20 (comet velocity)
-- **Implementation:** Fade-to-black + advancing bright pixel
-
-#### Pilot Colour
-- Static color matching pilot's configured color
-- Auto-updates when pilot color changed
-- **Use:** Identify pilot from distance
-
-### Race Event LED Feedback
-
-**When Manual LED Control is OFF:**
-
-| Event | LED Behavior |
-|-------|--------------|
-| **Race Start** | Flash green (3�, 200ms each) |
-| **Lap Detected** | Flash white (1�, 150ms) |
-| **Race Stop** | Flash red (3�, 200ms each) |
-| **Between Events** | Resume selected preset |
-
-**Implementation:**
-- Events trigger `overrideLED()` function
-- Preset paused temporarily
-- Event pattern played
-- Preset resumes with state preserved
-
-### Brightness Control
-
-**Range:** 0 - 255  
-**Default:** 80  
-**Power Impact:**
-
-| Brightness | Power (30 LEDs) | Visibility |
-|------------|-----------------|------------|
-| 50 | ~1.0A | Dim indoor |
-| 80 | ~1.6A | Normal indoor |
-| 120 | ~2.4A | Bright indoor |
-| 200 | ~4.0A | Outdoor daylight |
-| 255 | ~5.0A | Maximum |
-
-**Implementation:**
-```cpp
-FastLED.setBrightness(brightness);
-FastLED.show();
-```
-
-**Note:** Brightness scales all RGB values proportionally
+If the Phonetic Name field is populated, it is used in place of the Pilot Name for TTS. This allows correct pronunciation of non-phonetic names without affecting the display name.
 
 ---
 
 ## Race Analysis
 
-### Real-Time Statistics
+### Statistics
 
-FPVGate calculates four key metrics during racing:
+| Metric | Calculation |
+|--------|-------------|
+| Fastest Lap | Minimum lap time, excluding Gate 1 |
+| Median Lap | Middle value of sorted lap times |
+| Best 3 Laps | Sum of 3 lowest individual lap times |
+| Fastest 3 Consecutive | Minimum sum of any 3 back-to-back laps |
 
-#### 1. Fastest Lap
+### Charts
 
-**Calculation:**
-```cpp
-for each lap (excluding Gate 1):
-  if lap_time < fastest_lap:
-    fastest_lap = lap_time
-    fastest_lap_number = lap_number
-```
+- **Lap History** — Horizontal bars for last 10 laps; bar width proportional to time; each lap a distinct colour
+- **Fastest Round** — Vertical bars for the 3-consecutive laps with the best combined time
 
-**Display:** "12.34s (Lap 5)"
-
-**Visual:** Gold background on fastest lap row
-
-#### 2. Median Lap
-
-**Calculation:**
-```cpp
-sorted_laps = sort(all_laps)
-if odd number of laps:
-  median = sorted_laps[middle_index]
-else:
-  median = average(sorted_laps[middle_index], sorted_laps[middle_index + 1])
-```
-
-**Purpose:** Consistency indicator (less affected by outliers than average)
-
-**Display:** "14.56s"
-
-#### 3. Best 3 Laps (Individual Sum)
-
-**Calculation:**
-```cpp
-sorted_laps = sort(all_laps)
-best_3_sum = sorted_laps[0] + sorted_laps[1] + sorted_laps[2]
-```
-
-**Purpose:** MultiGP-style scoring, rewards consistent fast laps
-
-**Display:** "39.87s (L2, L4, L7)"
-
-#### 4. Fastest 3 Consecutive Laps
-
-**Calculation:**
-```cpp
-best_consecutive_sum = infinity
-for i in range(0, num_laps - 2):
-  sum = laps[i] + laps[i+1] + laps[i+2]
-  if sum < best_consecutive_sum:
-    best_consecutive_sum = sum
-    best_consecutive_start = i
-```
-
-**Purpose:** RaceGOW format, tests sustained pace
-
-**Display:** "41.23s (L3-L5)"
-
-### Visual Charts
-
-#### Lap History Chart
-
-**Type:** Horizontal bar chart  
-**Data:** Last 10 laps  
-**Colors:** Unique color per lap (hue rotation)
-
-**Implementation:**
-- Each bar width proportional to lap time
-- Fastest lap highlighted differently
-- Tooltip shows exact time
-- Auto-scales X-axis to fit data
-
-**Purpose:** Identify trends (tire wear, battery sag, improving pace)
-
-#### Fastest Round Chart
-
-**Type:** Vertical bar chart  
-**Data:** 3 consecutive laps with best sum  
-**Colors:** Distinct per lap
-
-**Implementation:**
-- Shows individual lap times
-- Total time displayed above
-- Lap numbers labeled below
-
-**Purpose:** Visualize consistency within best round
-
-### Lap Table Features
-
-**Columns:**
-1. **Lap #** - "Gate 1", "Lap 1", "Lap 2"...
-2. **Lap Time** - MM:SS.ss format
-3. **Delta** - Difference from previous lap (�)
-
-**Fastest Lap Highlight:**
-- Gold background (#FFD700)
-- Bold text
-- Excludes "Gate 1"
-
-**Auto-Scroll:**
-- Table auto-scrolls to latest lap
-- Keeps newest entries visible
-
-**Export:**
-- Table data included in race JSON export
-- Compatible with external analysis tools
-
----
-
-## Track Management
-
-### Overview
-
-![Track Management](../screenshots/12-12-2025/Config%20Screen%20-%20Track%20Info%2012-12-2025.png)
-
-FPVGate includes a comprehensive track management system for organizing and tracking your racing locations.
-
-**Features:**
-- Create and manage up to 50 tracks
-- Track metadata (name, location, notes)
-- Distance configuration for lap distance calculations
-- Track selection (persists to EEPROM)
-- Track association with race history
-
-### Creating Tracks
-
-**Access:** Configuration ? Track Data ? "Create New Track"
-
-**Required Fields:**
-- **Name:** Track identifier (e.g., "Backyard Track", "MultiGP Chapter")
-- **Distance:** Track length in meters (used for distance calculations)
-
-**Optional Fields:**
-- **Location:** Physical location or address
-- **Notes:** Track layout description, difficulty rating, etc.
-- **Image:** Track map or photo (base64 encoded)
-
-### Track Selection
-
-**How It Works:**
-1. Enable "Track Feature" toggle in Configuration
-2. Select active track from dropdown
-3. Selection persists to EEPROM (survives reboots)
-4. Distance calculations automatic during racing
-
-**Distance Display:**
-- **Total Distance:** Cumulative distance traveled
-- **Distance Remaining:** Calculated if Max Laps set
-- **Real-time Updates:** Distance shown on main race screen
-
-### Track Management UI
-
-**Features:**
-1. **Track List** - View all created tracks
-2. **Edit** - Modify track information
-3. **Delete** - Remove track (confirmation required)
-4. **Select** - Set as active racing track
-
-**Storage:**
-- Stored on SD card (`/tracks.json`) or LittleFS fallback
-- Includes all metadata and settings
-- Race history includes track association
-
----
-
-## Webhooks & Integration
-
-### Overview
-
-![Webhooks Configuration](../screenshots/12-12-2025/Config%20Screen%20-%20Webhooks%2012-12-2025.png)
-
-FPVGate can send HTTP POST webhooks to external devices on your network, perfect for integrating with external LED controllers, displays, or automation systems.
-
-**Use Cases:**
-- Trigger gate LED flashes during race events
-- Sync external lighting with race timing
-- Integrate with home automation systems
-- Control multiple LED setups simultaneously
-
-### Webhook Configuration
-
-**Access:** Configuration ? Webhooks
-
-**Setup Steps:**
-1. **Enable Webhooks:** Toggle webhook system on/off
-2. **Add IP Addresses:** Configure up to 10 webhook targets
-3. **Test:** Send test webhook to verify connectivity
-
-**IP Format:** Standard IPv4 (e.g., `192.168.0.75`)
-
-### Webhook Endpoints
-
-FPVGate sends HTTP POST requests to the following endpoints:
-
-| Endpoint | Trigger | Description |
-|----------|---------|-------------|
-| `/RaceStart` | Race starts | 2� Green flashes |
-| `/RaceStop` | Race stops | 2� Red flashes |
-| `/Lap` | Lap detected | White flash (0.5s) |
-| `/GhostLap` | Future feature | White flash (0.5s) |
-| `/off` | Manual | Turn off LEDs |
-| `/flash` | Manual test | White flash |
-
-**Request Format:**
-```http
-POST http://<IP>/<Endpoint>
-Content-Length: 0
-```
-
-**Example:**
-```
-POST http://192.168.0.75/RaceStart
-```
-
-### Gate LED Controls
-
-**Access:** Configuration ? LED Setup ? Gate LEDs (Webhooks)
-
-**Master Control:**
-- **Enable Gate LEDs:** Master on/off switch for webhook system
-- Must be enabled for any webhooks to fire
-
-**Granular Controls:**
-1. **Race Start Flash:** Enable/disable `/RaceStart` webhook
-2. **Race Stop Flash:** Enable/disable `/RaceStop` webhook  
-3. **Lap Flash:** Enable/disable `/Lap` webhook
-
-**Behavior:**
-- Webhooks only fire if both master switch AND individual toggle enabled
-- Settings persist to EEPROM
-- Manual lap additions also trigger `/Lap` webhook when enabled
-
-**Configuration Flow:**
-```
-Enable Gate LEDs (Master) ? ON
-   ?
-Race Start Flash ? ON
-Race Stop Flash ? ON  
-Lap Flash ? ON
-   ?
-Webhooks fire during race events
-```
-
-### Webhook Manager API
-
-**GET /webhooks**  
-List configured webhooks and enabled status
-
-**Response:**
-```json
-{
-  "enabled": true,
-  "webhooks": ["192.168.0.75", "192.168.0.80"]
-}
-```
-
-**POST /webhooks/add**  
-Add webhook IP address
-
-**Body:**
-```json
-{"ip": "192.168.0.75"}
-```
-
-**POST /webhooks/remove**  
-Remove webhook IP address
-
-**Body:**
-```json
-{"ip": "192.168.0.75"}
-```
-
-**POST /webhooks/clear**  
-Clear all configured webhooks
-
-**POST /webhooks/enable**  
-Enable/disable webhook system
-
-**Body:**
-```json
-{"enabled": "1"}
-```
-
-**POST /webhooks/trigger/flash**  
-Manually trigger test flash to all webhooks
-
-### Implementation Details
-
-**Technical Specifications:**
-- **Protocol:** HTTP/1.1 POST requests
-- **Timeout:** 500ms per webhook
-- **Max Webhooks:** 10 simultaneous targets
-- **Retry Logic:** None (fire-and-forget)
-- **Thread Safety:** Non-blocking execution
-
-**Network Requirements:**
-- All devices must be on same network as FPVGate
-- Standard ports (80 for HTTP)
-- No authentication required
-
-**Example LED Controller Setup:**
-
-ESP8266/ESP32 LED controller:
-```cpp
-server.on("/RaceStart", HTTP_POST, []() {
-  flashGreen(2);  // 2� green flashes
-  server.send(200, "text/plain", "OK");
-});
-
-server.on("/Lap", HTTP_POST, []() {
-  flashWhite(500);  // 0.5s white flash
-  server.send(200, "text/plain", "OK");
-});
-```
+The fastest lap row is highlighted gold in the lap table.
 
 ---
 
 ## Race History & Data Management
 
-### Automatic Race Saving
+### Automatic Saving
 
-**Triggers:**
-1. "Stop Race" button clicked
-2. "Clear Laps" button clicked (if laps exist)
-3. Max lap count reached (auto-stop)
+Races are saved automatically when:
+- "Stop Race" is clicked
+- "Clear Laps" is clicked (if laps exist)
+- Max lap count is reached (auto-stop)
 
-**Data Saved:**
-- Timestamp (ISO 8601 format)
-- Pilot info (name, callsign, color)
-- Frequency (band + channel)
-- All lap times (array)
-- Statistics (fastest, median, best 3, etc.)
-- Race settings (max laps, min lap time)
+### Storage
 
-**Storage:**
-- LittleFS file system (`/races.json`)
-- Persistent across reboots
-- Max ~500 races (depends on available flash)
+Races are stored in LittleFS (`/races.json`) and persist across reboots and firmware updates (as long as the filesystem is not erased).
 
-**JSON Format:**
+### JSON Format
+
 ```json
 {
   "id": "race_1703001234567",
   "timestamp": "2024-12-04T14:30:45Z",
-  "pilot": {
-    "name": "Louis Hitchcock",
-    "callsign": "Louis",
-    "color": "#FF6B35"
-  },
-  "frequency": {
-    "band": "R",
-    "channel": 1,
-    "mhz": 5658
-  },
+  "pilot": { "name": "Pilot Name", "callsign": "Callsign", "color": "#0080FF" },
+  "frequency": { "band": "R", "channel": 1, "mhz": 5658 },
   "laps": [
-    {"number": 0, "time": 8450, "name": "Gate 1"},
-    {"number": 1, "time": 12340, "name": "Lap 1"},
-    {"number": 2, "time": 11980, "name": "Lap 2"}
+    { "number": 0, "time": 8450, "name": "Gate 1" },
+    { "number": 1, "time": 12340, "name": "Lap 1" }
   ],
   "stats": {
-    "fastest_lap": 11980,
-    "fastest_lap_number": 2,
-    "median": 12160,
-    "best_3_sum": 37900,
-    "best_consecutive_3": 38120
-  },
-  "settings": {
-    "max_laps": 5,
-    "min_lap_time": 10
+    "fastest_lap": 12340,
+    "fastest_lap_number": 1,
+    "median": 12340,
+    "best_3_sum": 0,
+    "best_consecutive_3": 0
   }
 }
 ```
 
-### Race History UI
+### Marshalling Mode
 
-**Features:**
-1. **List View** - All races with summary info
-2. **Detail View** - Click to expand full analysis
-3. **Edit** - Modify race name and tag
-4. **Delete** - Remove individual race
-5. **Download** - Export single race JSON
-6. **Download All** - Export complete history
-7. **Import** - Merge races from JSON file
-8. **Clear All** - Delete entire history (with confirmation)
+Laps can be added or removed from any saved race after the fact. All statistics and charts recalculate immediately. Changes are saved automatically.
 
-**Search/Filter (Future):**
-- By date range
-- By pilot
-- By frequency
-- By tag
+### Export / Import
 
-### Export Formats
-
-#### Individual Race Export
-
-**Filename:** `race_<timestamp>.json`  
-**Content:** Single race object (as shown above)
-
-**Use Cases:**
-- Share specific race with others
-- Backup important races
-- Import into analysis tools
-
-#### Complete History Export
-
-**Filename:** `fpvgate_races_<date>.json`  
-**Content:** Array of all race objects
-
-**Use Cases:**
-- Full backup before firmware update
-- Transfer between devices
-- Long-term archival
-
-#### Import Behavior
-
-**Duplicate Handling:**
-- Races matched by ID
-- If ID exists, skip (no overwrite)
-- New races added to history
-
-**Validation:**
-- JSON schema validation
-- Corrupted files rejected
-- Partial imports allowed (valid races only)
+- Export individual races or full history as JSON
+- Import merges races by ID — existing races are not overwritten
 
 ---
 
-## Multi-Client Support
-
-### WebSocket Architecture
-
-**Server:**
-- WebSocket server on port 81
-- Up to 8 simultaneous clients
-- Broadcast events to all clients
-- Clients can send commands
-
-**Connection Flow:**
-```
-Client ? ws://192.168.4.1:81 ? ESP32 WebSocket Server
-ESP32 ? Broadcast event ? All connected clients
-```
-
-**Event Types:**
-- `lap` - Lap detected
-- `raceStart` - Race starting
-- `raceStop` - Race stopped
-- `configUpdate` - Config changed
-- `rssiUpdate` - RSSI value (calibration)
-
-**Message Format:**
-```json
-{
-  "type": "lap",
-  "data": {
-    "lapTime": 12340,
-    "lapNumber": 3,
-    "totalLaps": 3,
-    "timestamp": 45678
-  }
-}
-```
-
-### Use Cases
-
-#### 1. Race Director + Spectators
-
-**Setup:**
-- Race director uses USB (Electron app)
-- Spectators connect via WiFi (phones, tablets)
-
-**Behavior:**
-- Director controls race (low latency)
-- Spectators view live updates
-- All see same data synchronously
-
-#### 2. Pilot + Timing Display
-
-**Setup:**
-- Pilot views on phone (WiFi)
-- External monitor shows OSD overlay (WiFi)
-
-**Behavior:**
-- Pilot starts/stops race
-- Timing display shows lap times
-- Clean separation of concerns
-
-#### 3. Multiple Timing Screens
-
-**Setup:**
-- Multiple monitors around track
-- All connected via WiFi
-
-**Behavior:**
-- Synchronized race display
-- Different views possible (table, charts, OSD)
-
-### Transport Abstraction
-
-**Design:**
-- `TransportManager` class handles all clients
-- Broadcasts to WiFi + USB simultaneously
-- Commands from any transport processed equally
-
-**Code Structure:**
-```cpp
-class TransportManager {
-  std::vector<Transport*> transports;
-  
-  void broadcast(String event) {
-    for (auto transport : transports) {
-      transport->send(event);
-    }
-  }
-  
-  void handleCommand(String command) {
-    // Process command (same for all transports)
-  }
-};
-```
-
-**Benefits:**
-- Add new transport types easily (Bluetooth future?)
-- Unified command handling
-- Consistent behavior across connections
-
----
-
-## Self-Test System
-
-### Overview
-
-![System Diagnostics](../screenshots/12-12-2025/Config%20Screen%20Diagnostics%2012-12-2025.png)
-
-Comprehensive diagnostic system validates all hardware components and software features.
-
-**Access:** Configuration ? System Settings ? Diagnostics ? "Run All Tests"
-
-**Duration:** ~10-15 seconds  
-**Total Tests:** 19 comprehensive checks
-
-### Test Categories
-
-#### Hardware Tests
-1. **RX5808 Module** - SPI communication, RSSI readings
-2. **RGB LED** - All color channels (R,G,B flash test)
-3. **Battery Monitor** - Voltage reading functionality
-4. **Audio/Buzzer** - Beep test and audio file verification
-
-#### Storage Tests  
-5. **EEPROM** - Read/write test with verification
-6. **LittleFS** - File system mount and capacity
-7. **SD Card** - Detection, R/W test, voice files, free space
-8. **Storage Manager** - Unified storage abstraction
-
-#### Connectivity Tests
-9. **WiFi** - AP mode, MAC address, connection status
-10. **USB Serial CDC** - USB connection and transport
-11. **Transport Layer** - USB/WiFi availability and transport JS
-
-#### Software Tests
-12. **Configuration** - Valid settings, RSSI threshold validation
-13. **Lap Timer** - Timer functionality and RSSI communication
-14. **Race History** - Storage capacity and race count
-15. **Track Manager** - Track file existence and functionality
-16. **Webhooks** - HTTP client availability
-17. **Web Server** - Required files (index.html, script.js, style.css)
-18. **OTA Updates** - Partition space and update capability
-
-### Detailed Test Descriptions
-
-#### RX5808 Module Test
-
-**Checks:**
-- SPI communication working
-- Module responds to commands
-- Frequency tuning functional
-- RSSI pin readable
-
-**Procedure:**
-1. Send SPI read command
-2. Verify expected response
-3. Tune to test frequency (R1 - 5658 MHz)
-4. Read back frequency register
-5. Read RSSI value
-
-**Pass Criteria:** All SPI operations successful, RSSI > 0
-
-**Failure Modes:**
-- SPI mod not done (R16 not bridged)
-- Loose connections
-- Module damaged
-- Wrong pin assignments
-
-#### RGB LED Test (ESP32-S3)
-
-**Checks:**
-- FastLED library initialized
-- All color channels functional
-- Animation system working
-
-**Procedure:**
-1. Flash red (200ms)
-2. Flash green (200ms)
-3. Flash blue (200ms)
-4. Return to rainbow wave
-
-**Pass Criteria:** All three color channels visible
-
-**Details Shown:** "All channels tested (R,G,B)"
-
-**Failure Modes:**
-- Data pin not connected
-- Power supply insufficient
-- Individual color channel failure
-
-#### SD Card Test (ESP32-S3)
-
-**Checks:**
-- Card detection and initialization
-- Read/write operations
-- Voice directory presence
-- Audio file availability
-- Free space
-
-**Procedure:**
-1. Check SD card availability
-2. Test file creation and write
-3. Read back and verify data
-4. Delete test file
-5. Scan for voice directories (sounds_*)
-6. Check sample audio files
-
-**Pass Criteria:** R/W successful
-
-**Details Shown:**
-- Card size (MB)
-- Free space (MB)
-- Voice directories found (0-4)
-- Audio files found (0-2)
-- R/W status
-
-**Failure Modes:**
-- Card not inserted
-- Wrong format (not FAT32)
-- Write-protected
-- Corrupted file system
-
-#### Configuration Test
-
-**Checks:**
-- Config loading successful
-- Valid frequency range (5600-5950 MHz)
-- RSSI threshold validation (Enter > Exit)
-
-**Pass Criteria:**
-- Frequency in valid range
-- Enter RSSI > Exit RSSI
-
-**Details Shown:**
-- Current frequency
-- Enter RSSI value
-- Exit RSSI value
-
-**Failure Modes:**
-- Invalid frequency
-- Enter RSSI = Exit RSSI
-- Corrupt configuration
-
-#### Track Manager Test
-
-**Checks:**
-- Storage availability
-- Track file existence
-
-**Pass Criteria:** Storage accessible
-
-**Details Shown:**
-- "Tracks file found" or "No tracks configured yet"
-
-#### Webhooks Test
-
-**Checks:**
-- HTTP client availability
-- Network stack functional
-
-**Pass Criteria:** HTTP client ready
-
-**Details Shown:** "HTTP client ready"
-
-#### Transport Layer Test
-
-**Checks:**
-- WiFi status
-- USB CDC availability
-- Transport JavaScript loaded
-
-**Pass Criteria:** At least one transport active (WiFi or USB)
-
-**Details Shown:**
-- WiFi active/off
-- USB connected/disconnected
-- Transport JS loaded/missing
-
-#### Buzzer Test
-
-**Checks:**
-- GPIO pin functional
-- Buzzer responsive
-
-**Procedure:**
-1. Play 440 Hz tone (A note)
-2. Duration 500ms
-3. User should hear beep
-
-**Pass Criteria:** Audible tone
-
-**Failure Modes:**
-- Wrong buzzer type (active vs passive)
-- Polarity reversed
-- Damaged buzzer
-
-### Test Results Display
-
-**Format:**
-
-```
-System Diagnostics
-==================
-
- WiFi: PASS - AP mode active (192.168.4.1)
- RX5808: PASS - SPI communication OK, RSSI = 127
- LED: PASS - Animation test successful
- SD Card: FAIL - Card not detected
- Buzzer: PASS - Tone played
- USB: PASS - Serial CDC active
-
-Overall: 5/6 tests passed
-```
-
-**Action Buttons:**
-- Re-run test
-- Download diagnostic log
-- View detailed error messages
+## Webhooks & Integration
+
+HTTP POST webhooks are sent to configured IP addresses on race events.
+
+| Endpoint | Trigger |
+|----------|---------|
+| `/RaceStart` | Race starts |
+| `/RaceStop` | Race stops |
+| `/Lap` | Lap detected (or manually added) |
+
+- Up to 10 target IP addresses
+- Each event type can be independently enabled or disabled
+- A master **Gate LEDs Enabled** toggle controls whether any webhooks fire
+- Webhook HTTP calls run on Core 0 (WiFi/network core) and do not block the RSSI sampling loop on Core 1
 
 ---
 
 ## Configuration Management
 
-### Backend Configuration (ESP32)
+### Storage
 
-**Stored in:** LittleFS `/config.json`
+All device configuration is stored in EEPROM with a version stamp. When the version doesn't match (e.g. after a firmware update that adds new fields), the device loads defaults.
 
-**Parameters:**
-- Frequency (band, channel, MHz)
-- RSSI thresholds (enter, exit)
-- Race settings (max laps, min lap time)
-- Pilot info (name, callsign, color, phonetic)
-- LED settings (preset, color, brightness, speed)
-- TTS settings (voice, rate, format, enabled)
+A backup is also written to LittleFS which can be restored if EEPROM is invalidated.
 
-**Persistence:**
-- Survives reboots
-- Survives firmware updates (if flash not erased)
+### Versioning
 
-### Frontend Configuration (Browser)
+`CONFIG_VERSION` is incremented whenever the config struct changes. The current version is **11**.
 
-**Stored in:** Browser LocalStorage
+### Settings Save Behaviour
 
-**Parameters:**
-- Theme selection
-- Tab state
-- UI preferences
-- Chart settings
+| Setting | How it saves |
+|---------|-------------|
+| Band / Channel | Auto-saved on selection |
+| RSSI thresholds (sliders) | Staged; saved by "Save RSSI Thresholds" button |
+| All Settings tab fields | Staged; saved by "Save Configuration" button |
+| Calibration thresholds | Saved immediately by wizard "Apply" button |
+| WiFi credentials | Saved by "Apply WiFi & Reboot" button |
 
-**Persistence:**
-- Per-browser (not shared across devices)
-- Cleared if user clears browser data
+The **Save Configuration** button highlights orange with a pulse animation when there are unsaved staged changes. It returns to its inactive (greyed-out) state after a successful save.
 
-### Configuration Backup
+### Config Fields
 
-**Download Config:**
-- Fetches backend + frontend settings
-- Saves as JSON file
-- Filename: `fpvgate_config_<date>.json`
+Key config fields stored per device:
 
-**Import Config:**
-- Select JSON file
-- Validates schema
-- Applies backend settings (API calls)
-- Applies frontend settings (LocalStorage)
-- Page reloads automatically
+- Band, channel, frequency
+- Enter RSSI, Exit RSSI
+- Min lap time, max laps, alarm threshold
+- Announcer type, rate, voice, lap format, phonetic name
+- Pilot name, callsign, color
+- LED preset, brightness, speed, colours, manual override
+- Webhooks enabled, IPs, per-event toggles, gate LEDs enabled
+- WiFi SSID, password, external antenna, TX power
+- RSSI sensitivity
+- Filter mode (V1/V2), Bessel Hz cutoff
+- Enter Hold Samples, Exit Confirm Samples
+- Theme, voice enabled, lap format
 
-**Use Cases:**
-- Backup before firmware update
-- Transfer settings to new device
-- Share optimal config with others
-- Revert to known-good configuration
+---
 
-### API Endpoints
+## OTA Updates
 
-**GET /api/config**  
-Returns current configuration
+Firmware and filesystem are updated independently via ElegantOTA at `http://192.168.4.1/update`.
 
-**POST /api/config**  
-Updates configuration
+### Firmware
 
-**POST /api/config/frequency**  
-Set frequency only
+Build target: `pio run --environment seeed_xiao_esp32c6`  
+Output: `.pio/build/seeed_xiao_esp32c6/firmware.bin`
 
-**POST /api/config/rssi**  
-Set RSSI thresholds
+Select **Firmware** in ElegantOTA and upload.
 
-**POST /api/config/race**  
-Update race settings
+### Filesystem
 
-**POST /api/config/pilot**  
-Update pilot information
+Build target: `pio run --target buildfs --environment seeed_xiao_esp32c6`  
+Output: `.pio/build/seeed_xiao_esp32c6/littlefs.bin`
 
-**POST /api/config/led**  
-Change LED settings
+Select **Filesystem** in ElegantOTA and upload.
 
-**POST /api/config/tts**  
-Modify TTS options
+> Both should be updated after any release that changes either firmware logic or web UI files. They are completely independent uploads.
+
+---
+
+## Self-Test System
+
+Access via **Settings → System Diagnostics → Run All Tests**.
+
+19 tests covering hardware, storage, connectivity, and software:
+
+| Category | Tests |
+|----------|-------|
+| Hardware | RX5808 RSSI module, buzzer |
+| Storage | EEPROM, LittleFS |
+| Connectivity | WiFi AP, USB CDC, transport layer |
+| Software | Configuration validity, lap timer, race history, webhooks, web server files, OTA partitions |
+
+Results show pass/fail per test with detail text. A diagnostic log can be downloaded for support.
 
 ---
 
@@ -1414,89 +383,53 @@ Modify TTS options
 
 ```
 src/
-+-- main.cpp              # Entry point, setup/loop
-+-- lib/
-�   +-- CALIBRATION/      # RSSI calibration logic
-�   +-- CONFIG/           # Configuration management
-�   +-- FASTLED/          # LED control
-�   +-- FREQUENCY/        # Band/channel/frequency
-�   +-- RACEHISTORY/      # Race data storage
-�   +-- RACELOGIC/        # Timing state machine
-�   +-- RX5808/           # RX5808 SPI driver
-�   +-- SELFTEST/         # Diagnostic system
-�   +-- TRANSPORT/        # Transport abstraction
-�   +-- TTS/              # Text-to-speech
-�   +-- USB/              # USB Serial CDC transport
-�   +-- WEBSERVER/        # HTTP + WebSocket server
-�   +-- WIFIMAN/          # WiFi management
+└── main.cpp              — Entry point; Core 1 = RSSI loop, Core 0 = WiFi/webhooks
+
+lib/
+├── CALIBRATION/          — Wizard recording and buffer management
+├── CONFIG/               — Configuration struct, EEPROM, serialisation
+├── DEBUG/                — Debug logger (no vTaskDelay in hot path)
+├── KALMAN/               — Kalman filter (standard Q/R convention)
+├── LAPTIMER/             — V1/V2 pipeline, gate state machine, lap events
+├── RX5808/               — RX5808 SPI driver and ADC read
+├── WEBSERVER/            — ESPAsyncWebServer HTTP + SSE at 20 Hz
+├── WEBHOOKMANAGER/       — HTTP POST webhooks (Core 0)
+└── ...
 ```
 
-### Web Interface Structure
+### Web Interface
 
 ```
 data/
-+-- index.html            # Single-page app structure
-+-- style.css             # Responsive styles, themes
-+-- script.js             # Main UI logic, race control
-+-- usb-transport.js      # USB Serial CDC communication
-+-- themes.css            # 23 color themes
+├── index.html            — Single-page application
+├── style.css             — Responsive styles, 23 themes, save-button dirty state
+├── script.js             — UI logic, staged config, race control, calibration
+└── usb-transport.js      — USB Serial CDC communication layer
 ```
 
-### Memory Layout
+### Two-Core Architecture
 
-**ESP32-S3 (8MB Flash):**
+| Core | Responsibilities |
+|------|-----------------|
+| Core 1 (main loop) | RSSI sampling at 100 Hz, Kalman/Bessel filtering, gate detection, lap events |
+| Core 0 (parallel task) | WiFi stack, HTTP server, SSE streaming, webhook HTTP POST calls |
+
+Webhook calls (up to 300 ms synchronous HTTP) were moved to Core 0 specifically to prevent them from stalling RSSI reads during lap events.
+
+### SSE Streaming
+
+Live RSSI data is pushed to the browser via Server-Sent Events at **20 Hz** (50 ms interval). SSE is one-way (server → client) and avoids WebSocket overhead for the high-frequency RSSI feed.
+
+### Memory Layout (XIAO ESP32-C6)
 
 | Partition | Size | Contents |
 |-----------|------|----------|
 | Bootloader | 32 KB | ESP32 bootloader |
-| Partition Table | 4 KB | Partition layout |
-| App0 | 2 MB | Firmware binary |
-| App1 | 2 MB | OTA update space |
-| LittleFS | 1.5 MB | Web files, config, races |
-| NVS | 20 KB | System settings |
-| Coredump | 64 KB | Crash dumps |
-
-**RAM Usage (512 KB SRAM):**
-- Firmware: ~150 KB
-- WiFi stack: ~80 KB
-- Heap (dynamic): ~250 KB
-- Stack: ~32 KB
-
-### Performance Metrics
-
-**Boot Time:**
-- Cold boot: ~3-4 seconds
-- WiFi AP ready: ~10-15 seconds
-
-**RSSI Sampling:**
-- Rate: 100 Hz (every 10ms)
-- Resolution: 8-bit (0-255)
-- Latency: <10ms
-
-**WebSocket Latency:**
-- WiFi: 20-30ms (client to ESP32)
-- USB: <5ms
-
-**LED Update Rate:**
-- 30 LEDs: 60 FPS (smooth)
-- 60 LEDs: 60 FPS
-- 100 LEDs: 45-50 FPS
-
-**File System Operations:**
-- Config read: <10ms
-- Config write: ~50ms
-- Race save: ~100ms
-- SD card read (audio): ~200ms
+| Partition table | 4 KB | Partition layout |
+| OTA_0 (App0) | 2 MB | Primary firmware |
+| OTA_1 (App1) | 2 MB | OTA update staging |
+| LittleFS | ~1.5 MB | Web files, race history, audio |
 
 ---
 
-## Next Steps
-
- **Features explored**   
- **[Development Guide](DEVELOPMENT.md)** - Build and contribute  
- **[User Guide](USER_GUIDE.md)** - Master all features  
- **[Hardware Guide](HARDWARE_GUIDE.md)** - Technical specs
-
----
-
-**Questions? [GitHub Discussions](https://github.com/LouisHitchcock/FPVGate/discussions) | [Report Issues](https://github.com/LouisHitchcock/FPVGate/issues)**
+**Questions or issues? [Open a GitHub issue](https://github.com/LouisHitchcock/FPVGate/issues)**
