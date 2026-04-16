@@ -1391,6 +1391,26 @@ footer {
   gap: 12px;
 }
 
+/* Save Configuration button — dim when nothing to save, highlighted when dirty */
+#saveConfigBtn {
+  background-color: var(--secondary-color);
+  opacity: 0.5;
+  transition: background-color 0.25s, opacity 0.25s, box-shadow 0.25s;
+}
+#saveConfigBtn:disabled {
+  cursor: default;
+}
+#saveConfigBtn.dirty {
+  background-color: #e67e22;
+  opacity: 1;
+  box-shadow: 0 0 8px rgba(230, 126, 34, 0.55);
+  animation: pulse-save 1.8s ease-in-out infinite;
+}
+@keyframes pulse-save {
+  0%, 100% { box-shadow: 0 0 6px rgba(230, 126, 34, 0.45); }
+  50%       { box-shadow: 0 0 16px rgba(230, 126, 34, 0.85); }
+}
+
 /* Calibration Wizard Styles */
 .wizard-modal {
   max-width: 800px;

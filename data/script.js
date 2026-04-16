@@ -964,17 +964,25 @@ function stageConfig(key, value) {
   }
 
   stagedDirty = Object.keys(stagedConfig).length > 0;
-
-  const d = document.getElementById('configDirtyIndicator');
-  if (d) d.style.display = stagedDirty ? 'inline' : 'none';
+  updateSaveButton();
 }
 
+function updateSaveButton() {
+  const btn = document.getElementById('saveConfigBtn');
+  if (!btn) return;
+  if (stagedDirty) {
+    btn.disabled = false;
+    btn.classList.add('dirty');
+  } else {
+    btn.disabled = true;
+    btn.classList.remove('dirty');
+  }
+}
 
 function clearStagedConfig() {
   stagedConfig = {};
   stagedDirty = false;
-  const d = document.getElementById('configDirtyIndicator');
-  if (d) d.style.display = 'none';
+  updateSaveButton();
 }
 
 
@@ -1746,6 +1754,26 @@ function buildConfigSnapshotFromUI() {
       const v = el ? parseInt(el.value, 10) : 21;
       return Number.isFinite(v) ? Math.min(21, Math.max(2, v)) : 21;
     })(),
+
+    // Signal processing
+    filterMode: (() => {
+      const el = document.getElementById('filterModeSelect');
+      return el ? parseInt(el.value, 10) : 0;
+    })(),
+    besselHz: (() => {
+      const el = document.getElementById('besselHzSelect');
+      return el ? parseInt(el.value, 10) : 0;
+    })(),
+    enterHoldSamples: (() => {
+      const el = document.getElementById('enterHoldInput');
+      const v = el ? parseInt(el.value, 10) : 4;
+      return Number.isFinite(v) ? Math.min(20, Math.max(1, v)) : 4;
+    })(),
+    exitConfirmSamples: (() => {
+      const el = document.getElementById('exitConfirmInput');
+      const v = el ? parseInt(el.value, 10) : 2;
+      return Number.isFinite(v) ? Math.min(10, Math.max(1, v)) : 2;
+    })(),
   };
 
   return cfg;
@@ -1792,8 +1820,7 @@ async function saveConfig() {
     // Clear staged/dirty state ONLY after successful commit
     stagedConfig = {};
     stagedDirty = false;
-    const d = document.getElementById('configDirtyIndicator');
-    if (d) d.style.display = 'none';
+    updateSaveButton();
   } catch (err) {
     console.error('[Config] Save failed:', err);
     // Keep stagedDirty=true so user can try saving again
@@ -5049,6 +5076,14 @@ function applyWiFiSettings() {
   }, 500);
 }
 
+function onFilterModeChange() {
+  const sel = document.getElementById('filterModeSelect');
+  const row = document.getElementById('besselHzRow');
+  if (!sel || !row) return;
+  // Show Bessel cutoff selector only when V2 is active
+  row.style.display = parseInt(sel.value, 10) === 1 ? '' : 'none';
+}
+
 function rebootDevice() {
   if (!confirm('Reboot the device now?')) return;
 
@@ -5109,9 +5144,7 @@ function closeSettingsModal(force = false) {
   // Safe to close → clear staged state
   stagedDirty = false;
   stagedConfig = {};
-
-  const d = document.getElementById('configDirtyIndicator');
-  if (d) d.style.display = 'none';
+  updateSaveButton();
 
   const modal = document.getElementById('settingsModal');
   if (modal) modal.classList.remove('active');
@@ -6071,6 +6104,26 @@ function openSettingsModal() {
           txPowerInput.value = config.wifiTxPower;
         }
 
+        // Signal processing mode
+        const filterModeSelect = document.getElementById('filterModeSelect');
+        if (filterModeSelect && config.filterMode !== undefined) {
+          filterModeSelect.value = config.filterMode;
+        }
+        const besselHzSelect = document.getElementById('besselHzSelect');
+        if (besselHzSelect && config.besselHz !== undefined) {
+          besselHzSelect.value = config.besselHz;
+        }
+        onFilterModeChange();
+
+        // Detection parameters
+        const enterHoldInput = document.getElementById('enterHoldInput');
+        if (enterHoldInput && config.enterHoldSamples !== undefined) {
+          enterHoldInput.value = config.enterHoldSamples;
+        }
+        const exitConfirmInput = document.getElementById('exitConfirmInput');
+        if (exitConfirmInput && config.exitConfirmSamples !== undefined) {
+          exitConfirmInput.value = config.exitConfirmSamples;
+        }
 
       })
       .catch(error => {

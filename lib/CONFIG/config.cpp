@@ -93,7 +93,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     // Capacity: JSON_OBJECT_SIZE(44 fields) + JSON_ARRAY_SIZE(10 webhook IPs)
     // On ESP32 each slot is 16 bytes → 44*16 + 10*16 = 864 bytes minimum.
     // 1024 gives a safe margin so no fields are silently dropped on overflow.
-    DynamicJsonDocument config(1024);
+    DynamicJsonDocument config(1216);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -138,6 +138,10 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["pwd"] = conf.password;
     config["wifiExtAntenna"] = conf.wifiExtAntenna;
     config["wifiTxPower"] = conf.wifiTxPower;
+    config["filterMode"] = conf.filterMode;
+    config["besselHz"] = conf.besselHz;
+    config["enterHoldSamples"] = conf.enterHoldSamples;
+    config["exitConfirmSamples"] = conf.exitConfirmSamples;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -155,7 +159,7 @@ void Config::toJson(AsyncResponseStream& destination) {
 }
 
 void Config::toJsonString(char* buf) {
-    DynamicJsonDocument config(768);
+    DynamicJsonDocument config(896);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -183,6 +187,10 @@ void Config::toJsonString(char* buf) {
     config["pilotPhonetic"] = conf.pilotPhonetic;
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
+    config["filterMode"] = conf.filterMode;
+    config["besselHz"] = conf.besselHz;
+    config["enterHoldSamples"] = conf.enterHoldSamples;
+    config["exitConfirmSamples"] = conf.exitConfirmSamples;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -382,6 +390,12 @@ void Config::fromJson(JsonObject source) {
     // ===== WiFi antenna / power (next-boot settings) =====
     if (source.containsKey("wifiExtAntenna")) setBool01("wifiExtAntenna", conf.wifiExtAntenna);
     if (source.containsKey("wifiTxPower"))    setU8("wifiTxPower", conf.wifiTxPower, 2, 21);
+
+    // ===== Signal processing mode =====
+    if (source.containsKey("filterMode"))       setU8("filterMode",       conf.filterMode,       0, 1);
+    if (source.containsKey("besselHz"))         setU8("besselHz",         conf.besselHz,         0, 2);
+    if (source.containsKey("enterHoldSamples")) setU8("enterHoldSamples", conf.enterHoldSamples, 1, 20);
+    if (source.containsKey("exitConfirmSamples")) setU8("exitConfirmSamples", conf.exitConfirmSamples, 1, 10);
 }
 
 
@@ -732,6 +746,22 @@ uint8_t Config::getWifiTxPower() {
     return conf.wifiTxPower;
 }
 
+uint8_t Config::getFilterMode() {
+    return conf.filterMode;
+}
+
+uint8_t Config::getBesselHz() {
+    return conf.besselHz;
+}
+
+uint8_t Config::getEnterHoldSamples() {
+    return conf.enterHoldSamples;
+}
+
+uint8_t Config::getExitConfirmSamples() {
+    return conf.exitConfirmSamples;
+}
+
 void Config::setBandIndex(uint8_t band) {
   if (conf.bandIndex != band) {
     conf.bandIndex = band;
@@ -968,6 +998,10 @@ void Config::setDefaults(void) {
     strlcpy(conf.password, "", sizeof(conf.password));  // Empty WiFi credentials
     conf.wifiExtAntenna = 1;  // External antenna by default (matches hardware)
     conf.wifiTxPower = 21;    // Maximum TX power by default
+    conf.filterMode = 0;          // V1 (FPVGate multi-stage) by default
+    conf.besselHz = 0;            // 100 Hz Bessel (fastest, least lag) when V2 selected
+    conf.enterHoldSamples = 4;    // 4 consecutive samples before gate entry (V1)
+    conf.exitConfirmSamples = 2;  // 2 consecutive samples to confirm exit (V1)
     modified = true;
     write();
 }

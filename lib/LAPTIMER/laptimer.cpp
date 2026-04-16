@@ -26,7 +26,7 @@ const float kalman_R = 16.0f;   // ADC noise rejection — raise to smooth, lowe
 static const uint32_t kRaceDebugPeriodMs = 100;  // 10 Hz
 
 // Debounce: require consecutive samples at/above enter before peak tracking
-static const uint8_t kEnterHoldSamplesMin = 4;
+// kEnterHoldSamplesMin: now read from config (conf->getEnterHoldSamples())
 
 // Moving average window (must match rssi_window[] size in laptimer.h)
 static const uint8_t kMaWindow = 7;
@@ -41,8 +41,7 @@ static const float kEmaAlpha = 0.15f;
 // Lower = stricter (less likely to false-trigger), Higher = more responsive.
 static const int kMaxStepPerSample = 12;
 
-// NEW: require N consecutive samples below exit to confirm "exit"
-static const uint8_t kExitConfirmSamples = 2;
+// kExitConfirmSamples: now read from config (conf->getExitConfirmSamples())
 
 void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook) {
     conf = config;
@@ -62,6 +61,17 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     memset(rssi, 0, sizeof(rssi));
     memset(rssi_window, 0, sizeof(rssi_window));
     rssi_window_index = 0;
+
+    // V1 filter state
+    memset(v1KHist, 0, sizeof(v1KHist));
+    v1KHistIdx  = 0;
+    v1Ema       = NAN;
+    v1OutInit   = false;
+    v1OutPrev   = 0;
+
+    // V2 filter state
+    v2Bv[0] = v2Bv[1] = v2Bv[2] = 0.0f;
+    v2PeakDurationMs = 0;
 
     // Debug/state init
     lastRawRssi = 0;
@@ -84,10 +94,19 @@ void LapTimer::start() {
     DEBUG("\nCurrent RSSI: %u\n", rssi[rssiCount]);
     DEBUG("====================\n\n");
 
-    // Reset filter state at race start so we don't carry stale estimates.
+    // Reset all filter state so a new race starts from a clean slate.
     filter = KalmanFilter();
     filter.setProcessNoise(kalman_Q);
     filter.setMeasurementNoise(kalman_R);
+
+    memset(v1KHist, 0, sizeof(v1KHist));
+    v1KHistIdx = 0;
+    v1Ema      = NAN;
+    v1OutInit  = false;
+    v1OutPrev  = 0;
+
+    v2Bv[0] = v2Bv[1] = v2Bv[2] = 0.0f;
+    v2PeakDurationMs = 0;
 
     raceStartTimeMs = millis();
     startTimeMs = raceStartTimeMs;
@@ -150,62 +169,104 @@ void LapTimer::stop() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Bessel IIR low-pass filter helpers (ported from RotorHazard).
+// Coefficients are for a 2nd-order Bessel filter at the given cutoff.
+// DC gain = 1 (verified analytically).  Output is clamped to [0, 255].
+// State is held in the caller's v2Bv[3] array.
+// ---------------------------------------------------------------------------
+static inline uint8_t besselStep(float bv[3], float b0, float a1, float a2, uint8_t x)
+{
+    bv[0] = bv[1];
+    bv[1] = bv[2];
+    bv[2] = b0 * (float)x + a1 * bv[0] + a2 * bv[1];
+    float out = bv[0] + bv[2] + 2.0f * bv[1];
+    if (out < 0.0f)   return 0;
+    if (out > 255.0f) return 255;
+    return (uint8_t)lroundf(out);
+}
+
 void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // --- Stage 1: raw RSSI ---
     uint8_t rawRssi = rx->readRssi();
 
-    // --- Stage 2: Kalman filter ---
-    uint8_t kalman_filtered = (uint8_t)round(filter.filter(rawRssi, 0));
+    uint8_t out;
+    uint8_t kalman_filtered = 0;
+    uint8_t ma = 0;
 
-    // --- Stage 2.5: Median-of-3 on Kalman (kills single-sample glitches) ---
-    static uint8_t kHist[3] = {0, 0, 0};
-    static uint8_t kHistIdx = 0;
-    kHist[kHistIdx] = kalman_filtered;
-    kHistIdx = (kHistIdx + 1) % 3;
+    if (conf->getFilterMode() == 1) {
+        // ===== V2: RotorHazard Bessel IIR =====
+        switch (conf->getBesselHz()) {
+            case 2: // 20 Hz — smoothest
+                out = besselStep(v2Bv,
+                    5.593440209108096160e-3f,
+                    -0.75788377219702429688f,
+                     1.73551001136059190877f, rawRssi);
+                break;
+            case 1: // 50 Hz — balanced
+                out = besselStep(v2Bv,
+                    2.921062558939069298e-2f,
+                    -0.49774398476624526211f,
+                     1.38090148240868249019f, rawRssi);
+                break;
+            default: // 0 = 100 Hz — fastest
+                out = besselStep(v2Bv,
+                    9.053999669813994622e-2f,
+                    -0.24114073878907091308f,
+                     0.87898075199651115597f, rawRssi);
+                break;
+        }
+        lastRawRssi    = rawRssi;
+        lastKalmanRssi = out;
+        lastAvgRssi    = out;
 
-    uint8_t a = kHist[0], b = kHist[1], c = kHist[2];
-    uint8_t median_kal =
-        (a > b) ? ((b > c) ? b : ((a > c) ? c : a))
-                : ((a > c) ? a : ((b > c) ? c : b));
-
-    // --- Stage 3: Moving average (kills short spikes) ---
-    rssi_window[rssi_window_index] = median_kal;
-    rssi_window_index = (rssi_window_index + 1) % kMaWindow;
-
-    uint16_t sum = 0;
-    for (int i = 0; i < kMaWindow; i++) sum += rssi_window[i];
-    uint8_t ma = (uint8_t)(sum / kMaWindow);
-
-    // --- Stage 4: EMA low-pass ---
-    static float ema = NAN;
-    if (isnan(ema)) {
-        ema = (float)ma;
     } else {
-        ema = (kEmaAlpha * (float)ma) + ((1.0f - kEmaAlpha) * ema);
-    }
-    uint8_t lp = (uint8_t)lroundf(ema);
+        // ===== V1: FPVGate multi-stage pipeline =====
 
-    // --- Stage 5: Step limiter (prevents one-sample cliff drops that cause false exits) ---
-    static bool outInit = false;
-    static uint8_t outPrev = 0;
-    uint8_t out = lp;
+        // Stage 2: Kalman
+        kalman_filtered = (uint8_t)round(filter.filter(rawRssi, 0));
 
-    if (outInit) {
-        int delta = (int)lp - (int)outPrev;
-        if (delta > kMaxStepPerSample) out = (uint8_t)(outPrev + kMaxStepPerSample);
-        else if (delta < -kMaxStepPerSample) out = (uint8_t)(outPrev - kMaxStepPerSample);
-    } else {
-        outInit = true;
+        // Stage 2.5: Median-of-3
+        v1KHist[v1KHistIdx] = kalman_filtered;
+        v1KHistIdx = (v1KHistIdx + 1) % 3;
+        uint8_t a = v1KHist[0], b = v1KHist[1], c = v1KHist[2];
+        uint8_t median_kal =
+            (a > b) ? ((b > c) ? b : ((a > c) ? c : a))
+                    : ((a > c) ? a : ((b > c) ? c : b));
+
+        // Stage 3: Moving average
+        rssi_window[rssi_window_index] = median_kal;
+        rssi_window_index = (rssi_window_index + 1) % kMaWindow;
+        uint16_t sum = 0;
+        for (int i = 0; i < kMaWindow; i++) sum += rssi_window[i];
+        ma = (uint8_t)(sum / kMaWindow);
+
+        // Stage 4: EMA
+        if (isnan(v1Ema)) {
+            v1Ema = (float)ma;
+        } else {
+            v1Ema = (kEmaAlpha * (float)ma) + ((1.0f - kEmaAlpha) * v1Ema);
+        }
+        uint8_t lp = (uint8_t)lroundf(v1Ema);
+
+        // Stage 5: Step limiter
+        out = lp;
+        if (v1OutInit) {
+            int delta = (int)lp - (int)v1OutPrev;
+            if      (delta >  kMaxStepPerSample) out = (uint8_t)(v1OutPrev + kMaxStepPerSample);
+            else if (delta < -kMaxStepPerSample) out = (uint8_t)(v1OutPrev - kMaxStepPerSample);
+        } else {
+            v1OutInit = true;
+        }
+        v1OutPrev = out;
+
+        lastRawRssi    = rawRssi;
+        lastKalmanRssi = kalman_filtered;
+        lastAvgRssi    = ma;
     }
-    outPrev = out;
 
     // Store final value used by lap logic
     rssi[rssiCount] = out;
-
-    // Debug/state tracking (raw/kalman/ma)
-    lastRawRssi = rawRssi;
-    lastKalmanRssi = kalman_filtered;
-    lastAvgRssi = ma;
 
 #if LAPTIMER_RACE_DEBUG
     if (state == RUNNING) {
@@ -214,8 +275,8 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         const uint8_t exitT = conf->getExitRssi();
 
         if (prevAvgRssi < enter && cur >= enter) {
-            DEBUG("[RACE] ENTER crossed: cur=%u raw=%u kal=%u med=%u ma=%u lp=%u out=%u t=%lu(ms since lap start)\n",
-                  cur, rawRssi, kalman_filtered, median_kal, ma, lp, out,
+            DEBUG("[RACE] ENTER crossed: cur=%u raw=%u kal=%u ma=%u out=%u t=%lu(ms since lap start)\n",
+                  cur, rawRssi, lastKalmanRssi, lastAvgRssi, out,
                   (unsigned long)(millis() - startTimeMs));
         }
         if (prevAvgRssi >= exitT && cur < exitT) {
@@ -232,8 +293,8 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             uint16_t prevIdx = (rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY;
             const bool belowExit2 = (rssi[rssiCount] < exitT) && (rssi[prevIdx] < exitT);
             /*
-            DEBUG("[RACE] raw=%3u kal=%3u med=%3u ma7=%3u lp=%3u out=%3u | enter=%3u exit=%3u | peak=%3u validPeak=%d belowExit2=%d entered=%d hold=%u\n",
-                  rawRssi, kalman_filtered, median_kal, ma, lp, out,
+            DEBUG("[RACE] raw=%3u kal=%3u ma=%3u out=%3u | enter=%3u exit=%3u | peak=%3u validPeak=%d belowExit2=%d entered=%d hold=%u\n",
+                  rawRssi, lastKalmanRssi, lastAvgRssi, out,
                   enter, exitT, rssiPeak,
                   (int)validPeak, (int)belowExit2, (int)enteredGate, (unsigned)enterHoldSamples);
             */
@@ -293,8 +354,8 @@ void LapTimer::lapPeakCapture() {
     const uint8_t enter = conf->getEnterRssi();
     const uint8_t exitT = conf->getExitRssi();
     const uint32_t now = millis();
+    const bool v2 = (conf->getFilterMode() == 1);
 
-    // Debounce: require consecutive samples at/above enter before peak tracking
     if (cur >= enter) {
         if (!enteredGate) {
             enteredGate = true;
@@ -305,22 +366,31 @@ void LapTimer::lapPeakCapture() {
             if (enterHoldSamples < 255) enterHoldSamples++;
         }
 
-        if (enterHoldSamples >= kEnterHoldSamplesMin) {
+        // V1 requires kEnterHoldSamplesMin consecutive samples before tracking peak.
+        // V2 trusts the Bessel filter and starts tracking immediately (hold = 1).
+        const uint8_t holdMin = v2 ? 1 : conf->getEnterHoldSamples();
+
+        if (enterHoldSamples >= holdMin) {
             if (cur > rssiPeak) {
                 rssiPeak = cur;
                 rssiPeakTimeMs = now;
-                DEBUG("*** PEAK CAPTURED: %u (raw=%u kal=%u ma=%u) at %lu ms (since lap start: %lu ms) ***\n",
+                v2PeakDurationMs = 0;
+                DEBUG("*** PEAK CAPTURED: %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
                       rssiPeak, lastRawRssi, lastKalmanRssi, lastAvgRssi,
-                      (unsigned long)rssiPeakTimeMs, (unsigned long)(rssiPeakTimeMs - startTimeMs));
+                      (unsigned long)(rssiPeakTimeMs - startTimeMs));
+            } else if (v2 && cur == rssiPeak) {
+                // V2: extend peak duration so we can use the midpoint as the lap timestamp.
+                v2PeakDurationMs = now - rssiPeakTimeMs;
             }
         }
     } else {
         if (enteredGate && cur < exitT && rssiPeak == 0) {
-            // noise blip: dipped below exit without any peak
+            // Noise blip: dipped below exit without any valid peak — reset.
             enteredGate = false;
             gateExited = true;
             enterHoldSamples = 0;
             enterHoldStartMs = 0;
+            v2PeakDurationMs = 0;
         } else {
             enterHoldSamples = 0;
         }
@@ -330,14 +400,16 @@ void LapTimer::lapPeakCapture() {
 bool LapTimer::lapPeakCaptured() {
     const uint8_t enter = conf->getEnterRssi();
     const uint8_t exitT = conf->getExitRssi();
+    const bool v2 = (conf->getFilterMode() == 1);
 
     bool validPeak = (rssiPeak > 0) &&
                      (rssiPeak >= enter) &&
                      (rssiPeak > (exitT + 5));
 
-    // NEW: confirm "below exit" for 2 consecutive samples (rejects one-sample cliff drops)
+    // V1: require 2 consecutive samples below exit (rejects single-sample cliff drops).
+    // V2: trust the Bessel filter — a single sample below exit is sufficient.
     bool droppedBelowExit = false;
-    if (kExitConfirmSamples <= 1) {
+    if (v2 || conf->getExitConfirmSamples() <= 1) {
         droppedBelowExit = (rssi[rssiCount] < exitT);
     } else {
         uint16_t prevIdx = (rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY;
@@ -347,23 +419,25 @@ bool LapTimer::lapPeakCaptured() {
     bool captured = enteredGate && validPeak && droppedBelowExit;
 
     if (captured) {
-        DEBUG("\n*** LAP DETECTED! ***\n");
-        DEBUG("  Current RSSI: %u\n", rssi[rssiCount]);
-        DEBUG("  Peak was: %u\n", rssiPeak);
-        DEBUG("  Enter threshold: %u\n", enter);
-        DEBUG("  Exit threshold: %u\n", exitT);
-        DEBUG("  Peak margin above exit: %d\n", rssiPeak - exitT);
-        DEBUG("******************\n\n");
+        if (v2 && v2PeakDurationMs > 0) {
+            // V2: shift lap timestamp to the midpoint of the peak plateau.
+            rssiPeakTimeMs += v2PeakDurationMs / 2;
+            DEBUG("\n*** V2 LAP DETECTED! Peak=%u duration=%ums midpoint+%ums ***\n",
+                  rssiPeak, v2PeakDurationMs, v2PeakDurationMs / 2);
+        } else {
+            DEBUG("\n*** LAP DETECTED! Peak=%u enter=%u exit=%u margin=%d ***\n",
+                  rssiPeak, enter, exitT, rssiPeak - exitT);
+        }
     }
 
     if (!captured && enteredGate && droppedBelowExit && !validPeak) {
-        // enteredGate without a real peak, then fell below exit → reset
         enteredGate = false;
         gateExited = true;
         enterHoldSamples = 0;
         enterHoldStartMs = 0;
         rssiPeak = 0;
         rssiPeakTimeMs = 0;
+        v2PeakDurationMs = 0;
     }
 
     return captured;
@@ -374,6 +448,7 @@ void LapTimer::startLap() {
     startTimeMs = rssiPeakTimeMs;
     rssiPeak = 0;
     rssiPeakTimeMs = 0;
+    v2PeakDurationMs = 0;
 
     enteredGate = false;
     gateExited = true;

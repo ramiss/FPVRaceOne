@@ -90,7 +90,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 9
+#define CONFIG_VERSION 11
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -137,6 +137,10 @@ typedef struct {
     char password[33];
     uint8_t wifiExtAntenna;     // 0=internal, 1=external antenna (takes effect on next boot)
     uint8_t wifiTxPower;        // WiFi TX power in dBm (2–21, takes effect on next boot)
+    uint8_t filterMode;         // 0=V1 FPVGate multi-stage, 1=V2 RotorHazard Bessel IIR
+    uint8_t besselHz;           // V2 Bessel cutoff: 0=100Hz, 1=50Hz, 2=20Hz
+    uint8_t enterHoldSamples;   // V1: consecutive samples at/above enter threshold before gate entry (1-20)
+    uint8_t exitConfirmSamples; // V1: consecutive samples below exit threshold to confirm exit (1-10)
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -194,6 +198,10 @@ class Config {
     char* getLapFormat();
     uint8_t getWifiExtAntenna();
     uint8_t getWifiTxPower();
+    uint8_t getFilterMode();
+    uint8_t getBesselHz();
+    uint8_t getEnterHoldSamples();
+    uint8_t getExitConfirmSamples();
 
     // added because we use multiple bands with the same channels and revere freq lookup no longer works
     void setBandIndex(uint8_t band);

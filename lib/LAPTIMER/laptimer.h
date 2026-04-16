@@ -60,9 +60,19 @@ class LapTimer {
     uint8_t rssiCount;
     uint32_t lapTimes[LAPTIMER_LAP_HISTORY];
     uint8_t rssi[LAPTIMER_RSSI_HISTORY];
-    uint8_t rssi_window[7];  // Medium window for moving average (5 is lower latency)
+    uint8_t rssi_window[7];
     uint8_t rssi_window_index;
-    uint8_t lastLpRssi;
+
+    // V1 filter state (converted from static locals so start() can reset them)
+    uint8_t v1KHist[3];     // Median-of-3 history buffer
+    uint8_t v1KHistIdx;
+    float   v1Ema;          // EMA accumulator (NAN = uninitialised)
+    bool    v1OutInit;      // Step-limiter has a valid previous sample
+    uint8_t v1OutPrev;      // Step-limiter previous output
+
+    // V2 filter state (RotorHazard Bessel IIR)
+    float   v2Bv[3];        // IIR state variables
+    uint32_t v2PeakDurationMs;  // How long filtered RSSI has sat at peak value
 
     uint8_t rssiPeak;
     uint32_t rssiPeakTimeMs;
