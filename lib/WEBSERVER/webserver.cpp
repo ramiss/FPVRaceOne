@@ -87,7 +87,7 @@ static uint8_t selectBestWifiChannel() {
     return best;
 }
 
-void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr, WebhookManager *webhookMgr) {
+void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr, WebhookManager *webhookMgr, MultiNodeManager *multiNodeMgr) {
 
     ipAddress.fromString(wifi_ap_address);
 
@@ -103,20 +103,25 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     rx = rx5808;
     trackManager = trackMgr;
     webhooks = webhookMgr;
+    multiNode = multiNodeMgr;
     transportMgr = nullptr;
 
-    uint64_t mac = ESP.getEfuseMac();  // unique, always valid
+    uint64_t mac = ESP.getEfuseMac();  // bytes 0-2 = OUI (same on all units), bytes 3-5 = unique
     char macStr[7];
-    snprintf(macStr, sizeof(macStr), "%06llX", mac & 0xFFFFFF);
+    snprintf(macStr, sizeof(macStr), "%06llX", (mac >> 24) & 0xFFFFFF);
     wifi_ap_ssid = String(wifi_ap_ssid_prefix) + "_" + macStr;
-
-    wifi_ap_ssid.replace(":", "");
     DEBUG("WiFi AP SSID configured: %s\n", wifi_ap_ssid.c_str());
 
     WiFi.persistent(false);
     WiFi.disconnect();
     WiFi.mode(WIFI_OFF);
-    if (conf->getSsid()[0] == 0) {
+
+    // Determine initial WiFi mode based on node mode and config
+    uint8_t nodeMode = conf->getNodeMode();
+    if (nodeMode == 2 && conf->getMasterSSID()[0] != 0) {
+        // Client mode: AP+STA (own AP for pilot + STA to master)
+        changeMode = WIFI_AP_STA;
+    } else if (conf->getSsid()[0] == 0) {
         changeMode = WIFI_AP;
     } else {
         changeMode = WIFI_STA;
@@ -176,25 +181,29 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
 
     wl_status_t status = WiFi.status();
 
-    if (status != lastStatus && wifiMode == WIFI_STA) {
-        DEBUG("WiFi status = %u\n", status);
+    if (status != lastStatus && (wifiMode == WIFI_STA || wifiMode == WIFI_AP_STA)) {
+        DEBUG("WiFi STA status = %u\n", status);
         switch (status) {
             case WL_NO_SSID_AVAIL:
             case WL_CONNECT_FAILED:
             case WL_CONNECTION_LOST:
-                changeTimeMs = currentTimeMs;
-                changeMode = WIFI_AP;
+                if (wifiMode == WIFI_AP_STA) {
+                    // Client node: keep AP up, just mark master as unreachable
+                    DEBUG("[MULTINODE] STA lost — will retry registration\n");
+                } else {
+                    changeTimeMs = currentTimeMs;
+                    changeMode = WIFI_AP;
+                }
                 break;
             case WL_DISCONNECTED:  // try reconnection
                 changeTimeMs = currentTimeMs;
                 break;
             case WL_CONNECTED:
                 buz->beep(200);
-                led->off();
+                if (wifiMode != WIFI_AP_STA) led->off();
                 wifiConnected = true;
-                DEBUG("WiFi connected successfully!\n");
-                DEBUG("IP address: %s\n", WiFi.localIP().toString().c_str());
-                DEBUG("SSID: %s\n", WiFi.SSID().c_str());
+                DEBUG("WiFi STA connected! IP: %s SSID: %s\n",
+                      WiFi.localIP().toString().c_str(), WiFi.SSID().c_str());
 #ifdef ESP32S3
                 if (g_rgbLed) g_rgbLed->setStatus(STATUS_USER_CONNECTED);
 #endif
@@ -241,11 +250,17 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
 
                 WiFi.setTxPower(dBmToWifiPower(conf->getWifiTxPower()));
 
+                // Master node uses 192.168.5.1 so client nodes can keep the standard 192.168.4.1
+                if (conf->getNodeMode() == 1) {
+                    ipAddress.fromString("192.168.5.1");
+                }
                 // Advertise NO default gateway — helps Android keep cellular data for internet
                 WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
 
                 DEBUG("Starting WiFi AP: %s with password: %s on ch%d\n", wifi_ap_ssid.c_str(), wifi_ap_password, apChannel);
-                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, 4);
+                // Master mode supports up to 8 clients; single mode supports 4
+                uint8_t maxConn = (conf->getNodeMode() == 1) ? 8 : 4;
+                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
 
                 // Force HT20 (20 MHz) to reduce adjacent-channel interference
                 esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
@@ -256,6 +271,32 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 startServices();
                 buz->beep(1000);
                 led->on(1000);
+                break;
+            }
+            case WIFI_AP_STA: {
+                // Client node: own AP for pilot phone + STA connected to master
+                DEBUG("[MULTINODE] Starting AP+STA mode (client node)\n");
+
+                wifiMode = WIFI_AP_STA;
+                WiFi.setHostname(wifi_hostname);
+                WiFi.mode(WIFI_AP_STA);
+
+                // Client AP stays on 192.168.4.1 (pilots use the same IP as always).
+                // Master uses 192.168.5.1, so there is no subnet conflict.
+                WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
+                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, 0, 0, 4);
+
+                esp_wifi_set_bandwidth(WIFI_IF_AP,  WIFI_BW_HT20);
+                esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
+                esp_wifi_set_protocol(WIFI_IF_AP,  WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+                esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+
+                changeTimeMs = currentTimeMs;
+                WiFi.begin(conf->getMasterSSID(), conf->getMasterPassword());
+                startServices();
+                buz->beep(500);
+                led->blink(100);
+                DEBUG("[MULTINODE] Client AP: 192.168.4.1  Connecting to master: %s\n", conf->getMasterSSID());
                 break;
             }
             case WIFI_STA:
@@ -280,7 +321,7 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     // Always process DNS in AP mode so connectivity probes get fast NXDOMAIN replies.
     // Without this, Android waits 5-10 s for DNS timeouts before deciding to use
     // cellular for internet — during which it may drop or freeze mobile data.
-    if (servicesStarted && wifiMode == WIFI_AP) {
+    if (servicesStarted && (wifiMode == WIFI_AP || wifiMode == WIFI_AP_STA)) {
         dnsServer.processNextRequest();
     }
 }
@@ -501,16 +542,49 @@ EEPROM:\n\
 
     server.on("/timer/start", HTTP_POST, [this](AsyncWebServerRequest *request) {
         timer->start();
-        if (transportMgr) {
-            transportMgr->broadcastRaceStateEvent("started");
-        }
+        if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
+        if (multiNode && multiNode->isClientMode()) multiNode->setTimerRunning(true);
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
     server.on("/timer/stop", HTTP_POST, [this](AsyncWebServerRequest *request) {
         timer->stop();
-        if (transportMgr) {
-            transportMgr->broadcastRaceStateEvent("stopped");
+        if (transportMgr) transportMgr->broadcastRaceStateEvent("stopped");
+        if (multiNode && multiNode->isClientMode()) {
+            if (multiNode->isMasterRaceActive()) {
+                multiNode->setQuitPending();   // notify master the pilot quit early
+            }
+            multiNode->setTimerRunning(false);
+        }
+        request->send(200, "application/json", "{\"status\": \"OK\"}");
+    });
+
+    // /timer/masterStart — called by master broadcast; respects client skip toggle
+    server.on("/timer/masterStart", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (multiNode && multiNode->isClientMode() &&
+            conf->getMnSkipMasterStart() && timer->isRunning()) {
+            // Client opted to skip master start when already running
+            request->send(200, "application/json", "{\"status\": \"SKIPPED\"}");
+            return;
+        }
+        timer->start();
+        if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
+        if (multiNode && multiNode->isClientMode()) {
+            multiNode->setTimerRunning(true);
+            multiNode->setMasterRaceActive(true);
+            events.send("started", "masterRaceState");
+        }
+        request->send(200, "application/json", "{\"status\": \"OK\"}");
+    });
+
+    // /timer/masterStop — called by master broadcast; clears masterRaceActive (no quit)
+    server.on("/timer/masterStop", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        timer->stop();
+        if (transportMgr) transportMgr->broadcastRaceStateEvent("stopped");
+        if (multiNode && multiNode->isClientMode()) {
+            multiNode->setTimerRunning(false);
+            multiNode->setMasterRaceActive(false);
+            events.send("stopped", "masterRaceState");
         }
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
@@ -714,7 +788,7 @@ EEPROM:\n\
     });
     
     // Serve other static files from LittleFS only
-    server.serveStatic("/", LittleFS, "/").setCacheControl("max-age=600");
+    server.serveStatic("/", LittleFS, "/").setCacheControl("no-cache, no-store, must-revalidate");
 
     events.onConnect([this](AsyncEventSourceClient *client) {
         if (client->lastId()) {
@@ -1576,6 +1650,173 @@ EEPROM:\n\
         webhooks->triggerFlash();
     });
 
+    // ── Multi-Node API ──────────────────────────────────────────────────
+    // /api/mode — returns current node mode and status
+    server.on("/api/mode", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(256);
+        uint8_t nodeMode = conf->getNodeMode();
+        doc["nodeMode"] = nodeMode;
+        doc["modeName"] = (nodeMode == 1) ? "master" : (nodeMode == 2) ? "client" : "single";
+        doc["ssid"] = wifi_ap_ssid;
+        if (multiNode) {
+            doc["masterConnected"]  = multiNode->isMasterConnected();
+            doc["myNodeId"]         = multiNode->getMyNodeId();
+            doc["masterRaceActive"] = multiNode->isMasterRaceActive();
+        }
+        String output;
+        serializeJson(doc, output);
+        request->send(200, "application/json", output);
+    });
+
+    // /api/multinode/nodes — master returns all registered client nodes
+    server.on("/api/multinode/nodes", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!multiNode) {
+            request->send(200, "application/json", "{\"nodes\":[]}");
+            return;
+        }
+        request->send(200, "application/json", multiNode->getNodesToJson());
+    });
+
+    // /api/multinode/scan — scan for nearby FPVRaceOne_ SSIDs
+    server.on("/api/multinode/scan", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!multiNode) {
+            request->send(200, "application/json", "{\"networks\":[]}");
+            return;
+        }
+        String json = multiNode->scanForNodesJson();
+        request->send(200, "application/json", json);
+    });
+
+    // /api/multinode/register — client registers with master (POST JSON)
+    AsyncCallbackJsonWebHandler *mnRegisterHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/register",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj          = json.as<JsonObject>();
+            String pilotName        = obj["pilotName"]     | "";
+            String pilotCallsign    = obj["pilotCallsign"] | "";
+            uint32_t pilotColor     = obj["pilotColor"]    | 0x0080FFu;
+            String clientIP         = obj["clientIP"]      | "";
+            String staIP            = request->client()->remoteIP().toString();
+
+            uint8_t assignedId = 0;
+            bool ok = multiNode->handleRegister(pilotName, pilotCallsign,
+                                                 pilotColor, staIP, clientIP,
+                                                 assignedId);
+
+            DynamicJsonDocument resp(64);
+            if (ok) {
+                resp["status"] = "OK";
+                resp["nodeId"] = assignedId;
+            } else {
+                resp["status"] = "ERROR";
+                resp["nodeId"] = 0;
+            }
+            String out;
+            serializeJson(resp, out);
+            request->send(ok ? 200 : 409, "application/json", out);
+        });
+    server.addHandler(mnRegisterHandler);
+
+    // /api/multinode/lap — client reports a lap to master
+    AsyncCallbackJsonWebHandler *mnLapHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/lap",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj      = json.as<JsonObject>();
+            uint8_t  nodeId     = obj["nodeId"]    | 0;
+            uint32_t lapTimeMs  = obj["lapTimeMs"] | 0u;
+            uint8_t  lapNumber  = obj["lapNumber"] | 0;
+
+            bool ok = multiNode->handleLap(nodeId, lapTimeMs, lapNumber);
+
+            // Also push to SSE so master's browser updates in real time
+            if (ok && servicesStarted) {
+                char buf[64];
+                snprintf(buf, sizeof(buf), "{\"node\":%u,\"lap\":%u,\"ms\":%u}",
+                         nodeId, lapNumber, lapTimeMs);
+                events.send(buf, "multiNodeLap");
+            }
+            request->send(ok ? 200 : 404, "application/json",
+                          ok ? "{\"status\":\"OK\"}" : "{\"status\":\"ERROR\"}");
+        });
+    server.addHandler(mnLapHandler);
+
+    // /api/multinode/heartbeat — client sends periodic heartbeat to master
+    AsyncCallbackJsonWebHandler *mnHeartbeatHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/heartbeat",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj    = json.as<JsonObject>();
+            uint8_t nodeId    = obj["nodeId"] | 0;
+            bool running      = obj["running"] | false;
+            bool stateChanged = false;
+            bool ok = multiNode->handleHeartbeat(nodeId, running, stateChanged);
+            if (ok && stateChanged) {
+                // Push updated node list to master browser
+                String nodesJson = multiNode->getNodesToJson();
+                events.send(nodesJson.c_str(), "multiNodeState");
+            }
+            request->send(ok ? 200 : 404, "application/json",
+                          ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
+        });
+    server.addHandler(mnHeartbeatHandler);
+
+    // /api/multinode/quit — client notifies master that pilot quit the race early
+    AsyncCallbackJsonWebHandler *mnQuitHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/quit",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj = json.as<JsonObject>();
+            uint8_t nodeId = obj["nodeId"] | 0;
+            bool ok = multiNode->handleQuit(nodeId);
+            if (ok) {
+                String nodesJson = multiNode->getNodesToJson();
+                events.send(nodesJson.c_str(), "multiNodeState");
+            }
+            request->send(ok ? 200 : 404, "application/json",
+                          ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
+        });
+    server.addHandler(mnQuitHandler);
+
+    // /api/multinode/race/start — start master timer immediately, queue client POSTs
+    // to parallelTask so async_tcp is never blocked by outbound HTTP calls
+    server.on("/api/multinode/race/start", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!multiNode) {
+            request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+            return;
+        }
+        if (timer) timer->start();
+        if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
+        multiNode->queueRaceStart();
+        request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
+
+    // /api/multinode/race/stop
+    server.on("/api/multinode/race/stop", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!multiNode) {
+            request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+            return;
+        }
+        if (timer) timer->stop();
+        if (transportMgr) transportMgr->broadcastRaceStateEvent("stopped");
+        multiNode->queueRaceStop();
+        request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
+    // ────────────────────────────────────────────────────────────────────
+
     ElegantOTA.setAutoReboot(true);
     ElegantOTA.begin(&server);
 
@@ -1587,15 +1828,15 @@ EEPROM:\n\
         dnsServer.start(DNS_PORT, "*", ipAddress);
         dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
         startMDNS();
-    } else if (WiFi.getMode() == WIFI_AP) {
-        // Always run DNS in AP mode, but only answer for our own hostname.
+    } else if (WiFi.getMode() == WIFI_AP || WiFi.getMode() == WIFI_AP_STA) {
+        // Always run DNS in AP or AP+STA mode, but only answer for our own hostname.
         // Everything else (e.g. connectivitycheck.gstatic.com) gets NXDOMAIN
         // immediately, so Android detects "no internet" in milliseconds and
         // falls back to cellular — rather than waiting 5-10 s for DNS timeouts.
         dnsServer.setErrorReplyCode(DNSReplyCode::NonExistentDomain);
         dnsServer.start(DNS_PORT, wifi_hostname, ipAddress);
         DEBUG("[DNS] Selective DNS started: '%s' -> %s, all others -> NXDOMAIN\n",
-              wifi_hostname, wifi_ap_address);
+              wifi_hostname, ipAddress.toString().c_str());
     }
 
     

@@ -90,7 +90,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 11
+#define CONFIG_VERSION 13
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -141,6 +141,10 @@ typedef struct {
     uint8_t besselHz;           // V2 Bessel cutoff: 0=100Hz, 1=50Hz, 2=20Hz
     uint8_t enterHoldSamples;   // V1: consecutive samples at/above enter threshold before gate entry (1-20)
     uint8_t exitConfirmSamples; // V1: consecutive samples below exit threshold to confirm exit (1-10)
+    uint8_t nodeMode;           // 0=single (default), 1=master, 2=client
+    char masterSSID[33];        // SSID of master to connect to (client mode only)
+    char masterPassword[33];    // Password for master AP (default "fpvraceone")
+    uint8_t mnSkipMasterStart;  // 1=skip master Start All if race already running on this node
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -202,6 +206,13 @@ class Config {
     uint8_t getBesselHz();
     uint8_t getEnterHoldSamples();
     uint8_t getExitConfirmSamples();
+    char*   getPilotName();
+    uint8_t getNodeMode();
+    char*   getMasterSSID();
+    char*   getMasterPassword();
+    void    setNodeMode(uint8_t mode);
+    bool    getMnSkipMasterStart();
+    void    setMnSkipMasterStart(bool skip);
 
     // added because we use multiple bands with the same channels and revere freq lookup no longer works
     void setBandIndex(uint8_t band);

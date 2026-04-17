@@ -27,6 +27,7 @@ class LapTimer {
     void init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook = nullptr);
     void start();
     void stop();
+    bool isRunning() const;
     void handleLapTimerUpdate(uint32_t currentTimeMs);
     uint8_t getRssi();
     uint32_t getLapTime();

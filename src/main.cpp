@@ -1,5 +1,6 @@
 #include "debug.h"
 #include "led.h"
+#include "multinode.h"
 #include "webserver.h"
 #include "racehistory.h"
 #include "storage.h"
@@ -56,6 +57,7 @@ static Led led;
 static RaceHistory raceHistory;
 static TrackManager trackManager;
 static WebhookManager webhookManager;
+static MultiNodeManager multiNodeManager;
 #ifdef ESP32S3
 static RgbLed rgbLed;
 RgbLed* g_rgbLed = &rgbLed;
@@ -81,7 +83,8 @@ static void parallelTask(void *pvArgs) {
         usbTransport.update(currentTimeMs);
         config.handleEeprom(currentTimeMs);
         rx.handleFrequencyChange(currentTimeMs, config.getFrequency());
-        webhookManager.process();  // HTTP I/O belongs on Core 0, not in the RSSI loop
+        webhookManager.process();      // HTTP I/O belongs on Core 0, not in the RSSI loop
+        multiNodeManager.process(currentTimeMs);  // Client: heartbeats/registration; Master: timeout checks
         // Battery monitoring removed
         // monitor.checkBatteryState(currentTimeMs, config.getAlarmThreshold());
         
@@ -241,7 +244,10 @@ void setup() {
         }
     }
     
-    ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &trackManager, &webhookManager);
+    // Initialize multi-node manager
+    multiNodeManager.init(&config);
+
+    ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &trackManager, &webhookManager, &multiNodeManager);
     
     // Initialize USB transport
     usbTransport.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &trackManager);
@@ -306,6 +312,8 @@ void loop() {
     if (timer.isLapAvailable()) {
         uint32_t lapTime = timer.getLapTime();
         transportManager.broadcastLapEvent(lapTime);
+        // In client mode, also queue the lap to be forwarded to the master node
+        multiNodeManager.queueLap(lapTime);
     }
     
     // WiFi mode - original behavior (RotorHazard mode disabled)

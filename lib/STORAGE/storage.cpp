@@ -1,6 +1,5 @@
 #include "storage.h"
 #include "debug.h"
-#include "config.h"
 #include <FS.h>
 
 Storage::Storage() : sdAvailable(false) {

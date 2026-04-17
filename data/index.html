@@ -55,6 +55,7 @@
         <li><a href="#" id="nav-link-race" class="tablinks active" onclick="openTab(event, 'race')">Race</a></li>
         <li><a href="#" id="nav-link-history" class="tablinks" onclick="openTab(event, 'history')">Race History</a></li>
         <li><a href="#" id="nav-link-calib" class="tablinks" onclick="openTab(event, 'calib')">Calibration</a></li>
+        <li><a href="#" id="nav-link-multinode" class="tablinks" onclick="openTab(event, 'multinode')">Multi-Node</a></li>
         <li><a href="#" id="nav-link-config" class="tablinks" onclick="openSettingsModal()">Configuration</a></li>
       </ul>
     </header>
@@ -82,62 +83,72 @@
       </div>
 
       <div id="race" class="tabcontent" style="display: block;">
-        <div id="raceDataButtons" style="display: none; margin-bottom: 16px; text-align: center;">
-          <button onclick="downloadCurrentRaceData()" style="padding: 8px 16px; margin-right: 8px;">Download Current Race</button>
-          <button onclick="transferToRaceHistory()" style="padding: 8px 16px;">Transfer to Race History</button>
-        </div>
-        <span id="timer">00:00:00s</span>
-        <div id="lapCounter" style="text-align: center; font-size: 18px; font-weight: bold; color: var(--primary-color); margin: 8px 0;">Lap 0</div>
-        <div class="racebuttons">
-          <button id="startRaceButton" onclick="startRace()">Start Race</button>
-          <button id="stopRaceButton" onclick="stopRace()" disabled>Stop Race</button>
-          <button id="addLapButton" onclick="addManualLap()" disabled>Add Lap</button>
-          <button id="clearLapsButton" onclick="clearLaps()">Clear Laps</button>
-        </div>
-        <table id="lapTable">
-          <tr>
-            <th>Lap No</th>
-            <th>Lap Time</th>
-            <th>Gap</th>
-            <th>Total Time</th>
-          </tr>
-        </table>
-        
-        <div id="lapAnalysis" class="lap-analysis">
-          <h3>Lap Analysis</h3>
-          
-          <!-- Stats Boxes -->
-          <div class="stats-boxes">
-            <div class="stat-box">
-              <div class="stat-label">Fastest Lap</div>
-              <div class="stat-value" id="statFastest">--</div>
-              <div class="stat-sublabel" id="statFastestLapNo"></div>
+
+        <!-- ── Single-pilot view (standalone / client mode) ── -->
+        <div id="single-race-view">
+          <div id="raceDataButtons" style="display: none; margin-bottom: 16px; text-align: center;">
+            <button onclick="downloadCurrentRaceData()" style="padding: 8px 16px; margin-right: 8px;">Download Current Race</button>
+            <button onclick="transferToRaceHistory()" style="padding: 8px 16px;">Transfer to Race History</button>
+          </div>
+          <span id="timer">00:00:00s</span>
+          <div id="lapCounter" style="text-align: center; font-size: 18px; font-weight: bold; color: var(--primary-color); margin: 8px 0;">Lap 0</div>
+          <div class="racebuttons">
+            <button id="startRaceButton" onclick="startRace()">Start Race</button>
+            <button id="stopRaceButton" onclick="stopRace()" disabled>Stop Race</button>
+            <button id="addLapButton" onclick="addManualLap()" disabled>Add Lap</button>
+            <button id="clearLapsButton" onclick="clearLaps()">Clear Laps</button>
+          </div>
+          <table id="lapTable">
+            <tr>
+              <th>Lap No</th>
+              <th>Lap Time</th>
+              <th>Gap</th>
+              <th>Total Time</th>
+            </tr>
+          </table>
+          <div id="lapAnalysis" class="lap-analysis">
+            <h3>Lap Analysis</h3>
+            <div class="stats-boxes">
+              <div class="stat-box">
+                <div class="stat-label">Fastest Lap</div>
+                <div class="stat-value" id="statFastest">--</div>
+                <div class="stat-sublabel" id="statFastestLapNo"></div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Fastest 3 Consecutive</div>
+                <div class="stat-value" id="statFastest3Consec">--</div>
+                <div class="stat-sublabel" id="statFastest3ConsecLaps"></div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Best 3 Laps</div>
+                <div class="stat-value" id="statBest3">--</div>
+                <div class="stat-sublabel" id="statBest3Laps"></div>
+              </div>
+              <div class="stat-box">
+                <div class="stat-label">Median Lap</div>
+                <div class="stat-value" id="statMedian">--</div>
+              </div>
             </div>
-            <div class="stat-box">
-              <div class="stat-label">Fastest 3 Consecutive</div>
-              <div class="stat-value" id="statFastest3Consec">--</div>
-              <div class="stat-sublabel" id="statFastest3ConsecLaps"></div>
+            <div class="analysis-tabs">
+              <button class="analysis-tab active" onclick="switchAnalysisMode('history')">Lap History</button>
+              <button class="analysis-tab" onclick="switchAnalysisMode('fastestRound')">Fastest Round (3 Laps)</button>
             </div>
-            <div class="stat-box">
-              <div class="stat-label">Best 3 Laps</div>
-              <div class="stat-value" id="statBest3">--</div>
-              <div class="stat-sublabel" id="statBest3Laps"></div>
-            </div>
-            <div class="stat-box">
-              <div class="stat-label">Median Lap</div>
-              <div class="stat-value" id="statMedian">--</div>
+            <div id="analysisContent" class="analysis-content">
+              <p class="no-data">Complete at least 1 lap to see analysis</p>
             </div>
           </div>
-          
-          <!-- Chart Tabs -->
-          <div class="analysis-tabs">
-            <button class="analysis-tab active" onclick="switchAnalysisMode('history')">Lap History</button>
-            <button class="analysis-tab" onclick="switchAnalysisMode('fastestRound')">Fastest Round (3 Laps)</button>
-          </div>
-          <div id="analysisContent" class="analysis-content">
-            <p class="no-data">Complete at least 1 lap to see analysis</p>
-          </div>
         </div>
+
+        <!-- ── Master multi-node race view ── -->
+        <div id="master-race-view" style="display:none;">
+          <div id="mn-race-timer" class="mn-race-timer-display">0:00.0</div>
+          <div class="racebuttons">
+            <button id="mnStartRaceBtnMain" onclick="mnStartRace()">Start All</button>
+            <button id="mnStopRaceBtnMain"  onclick="mnStopRace()" disabled>Stop All</button>
+          </div>
+          <div id="mn-race-container" style="margin: 16px 0;"></div>
+        </div>
+
       </div>
 
       <div id="history" class="tabcontent" style="display: none;">
@@ -271,12 +282,57 @@
         </div>
       </div>
 
+      <!-- Multi-Node Tab -->
+      <div id="multinode" class="tabcontent" style="display: none;">
+        <div id="mn-single-banner" class="mn-banner mn-banner-info" style="display:none;">
+          <strong>Single Node Mode</strong> — This device operates standalone. Enable Multi-Node in Configuration → Multi-Node to use networked timing.
+        </div>
+        <div id="mn-master-view" style="display:none;">
+          <div class="mn-header-row">
+            <div>
+              <h2 style="margin:0;">Multi-Node Race</h2>
+              <div class="mn-mode-badge mn-badge-master">Master</div>
+            </div>
+          </div>
+          <div style="margin: 12px 0; font-size: 13px; color: var(--secondary-color);">
+            Clients connect to <strong id="mnMasterSSID">FPVRaceOne_??????</strong> (password: <code>fpvraceone</code>).
+            Race director connects here at <strong>192.168.5.1</strong>.
+          </div>
+          <div id="mn-nodes-container">
+            <p style="text-align:center; color: var(--secondary-color); padding: 32px 0;">
+              No client nodes registered yet. Set client devices to Client mode and connect them to this AP.
+            </p>
+          </div>
+        </div>
+        <div id="mn-client-view" style="display:none;">
+          <div class="mn-header-row">
+            <div>
+              <h2 style="margin:0;">Client Node</h2>
+              <div class="mn-mode-badge mn-badge-client">Client</div>
+            </div>
+            <div id="mn-client-status-badge" class="mn-status-badge mn-status-disconnected">Disconnected</div>
+          </div>
+          <div class="mn-client-info-card">
+            <div class="mn-info-row"><span>My Node ID</span><strong id="mn-my-node-id">—</strong></div>
+            <div class="mn-info-row"><span>Master IP</span><strong>192.168.5.1</strong></div>
+            <div class="mn-info-row"><span>My AP (pilots)</span><strong>192.168.4.1</strong></div>
+            <div class="mn-info-row"><span>Master SSID</span><strong id="mn-master-ssid-display">—</strong></div>
+          </div>
+          <div style="margin-top: 16px; font-size: 13px; color: var(--secondary-color);">
+            Your laps are automatically forwarded to the master when connected.
+            Pilots connect to your AP at <strong>192.168.4.1</strong> for local lap display.
+            <br><br>
+            <a href="http://192.168.5.1" target="_blank" style="color: var(--primary-color);">Open Master View ↗</a>
+          </div>
+        </div>
+      </div>
+
     </main>
 
     <footer>
       <div class="footer-bar" style="display:flex; align-items:center; justify-content:center; padding: 4px 12px;">
-        <span id="firmwareVersion" style="font-size: 12px; opacity: 0.85;">
-          FPVRaceOne Personal Lap Timer v —
+        <span id="firmwareVersion" style="font-size: 12px; color: rgba(255,255,255,0.9);">
+          FPVRaceOne Personal Lap Timer va —
         </span>
       </div>
     </footer>
@@ -403,6 +459,9 @@
             </div>
             <div class="settings-nav-item" onclick="switchSettingsSection('wifi')">
               <span>WiFi & Connection</span>
+            </div>
+            <div class="settings-nav-item" onclick="switchSettingsSection('multinode')">
+              <span>Multi-Node</span>
             </div>
             <div class="settings-nav-item" onclick="switchSettingsSection('webhooks')">
               <span>Webhooks</span>
@@ -804,6 +863,57 @@
               </div>
             </div>
 
+            <!-- Multi-Node Section -->
+            <div id="settings-multinode" class="settings-section">
+              <h2>Multi-Node Timing</h2>
+              <div style="margin-bottom: 16px; padding: 12px; background-color: var(--bg-secondary); border-radius: 8px; font-size: 14px;">
+                <p style="margin: 0 0 8px 0;"><strong>Network up to 8 FPVRaceOne devices without a router.</strong></p>
+                <p style="margin: 0; color: var(--secondary-color);">One device acts as Master (race director view). Up to 7 Client devices connect to the master and forward laps automatically. Changes require a reboot.</p>
+              </div>
+
+              <div class="config-item">
+                <label for="nodeModeSelect">Node Mode:</label>
+                <select id="nodeModeSelect" onchange="onNodeModeChange(); autoSaveConfig()">
+                  <option value="0">Single (standalone)</option>
+                  <option value="1">Master</option>
+                  <option value="2">Client</option>
+                </select>
+              </div>
+
+              <div id="mn-master-info" style="display:none; font-size: 13px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 8px;">
+                This device becomes the central race director. Other devices connect to its WiFi AP.
+                Max 8 connections (7 clients + 1 race director browser).
+              </div>
+
+              <div id="mn-client-fields" style="display:none;">
+                <div class="config-item">
+                  <label for="masterSSIDInput">Master SSID:</label>
+                  <input type="text" id="masterSSIDInput" maxlength="32"
+                         placeholder="e.g. FPVRaceOne_AB12CD"
+                         oninput="autoSaveConfig()" />
+                </div>
+                <div class="config-item">
+                  <label for="mnSkipMasterStartToggle">Ignore Race Director Start if already racing: </label>
+                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="autoSaveConfig()" />
+                </div>
+                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                  SSID of the Master device (if known). Leave blank to query available FPVRaceOne devices.
+                </div>
+                <div class="config-item" style="margin-top: 12px;">
+                  <label>Scan for Masters:</label>
+                  <button onclick="mnScanNetworks()" style="padding: 6px 14px; background-color: var(--secondary-color);">Scan</button>
+                </div>
+                <div id="mnScanResults" style="margin-left: 170px; margin-top: 4px; font-size: 13px;"></div>
+              </div>
+
+              <div style="margin-top: 20px;">
+                <button onclick="applyMultiNodeSettings()" style="background-color: var(--primary-color); color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Apply Multi-Node &amp; Reboot</button>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-top: 8px;">
+                Device will restart after applying. Current races are saved automatically before reboot.
+              </div>
+            </div>
+
             <!-- Webhooks Section -->
             <div id="settings-webhooks" class="settings-section">
               <h2>Webhooks</h2>
@@ -913,6 +1023,21 @@
                   High sensitivity provides better weak signal detection. Use Normal if experiencing false triggers.
                 </div>
               </div>
+              <h3>Developer</h3>
+              <div class="config-item">
+                <label for="devModeToggle">Dev Mode (Simulate Laps):</label>
+                <div style="flex: 1;">
+                  <label class="switch">
+                    <input type="checkbox" id="devModeToggle" onchange="mnDevMode=this.checked; document.getElementById('devModeLabel').textContent=this.checked?'On':'Off'; mnRenderRaceTab(mnCurrentNodes);">
+                    <span class="slider"></span>
+                  </label>
+                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="devModeLabel">Off</span>
+                </div>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
+                When on, tap a pilot's name on the Race tab to inject a simulated random lap. For testing without quads.
+              </div>
+
               <h3>WiFi Antenna</h3>
               <div class="config-item">
                 <label for="externalAntennaToggle">Antenna:</label>
@@ -1020,7 +1145,7 @@
                      target="_blank"
                      rel="noopener"
                      class="update-btn update-btn-secondary">
-                    GitHub Releases - github.com/ramiss/FPVRaceOne/releases/latest ↗
+                    GitHub Releases ↗
                   </a>
                   <a href="/update"
                      target="_blank"

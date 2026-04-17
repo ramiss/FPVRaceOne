@@ -93,7 +93,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     // Capacity: JSON_OBJECT_SIZE(44 fields) + JSON_ARRAY_SIZE(10 webhook IPs)
     // On ESP32 each slot is 16 bytes → 44*16 + 10*16 = 864 bytes minimum.
     // 1024 gives a safe margin so no fields are silently dropped on overflow.
-    DynamicJsonDocument config(1216);
+    DynamicJsonDocument config(1344);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -142,6 +142,10 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["besselHz"] = conf.besselHz;
     config["enterHoldSamples"] = conf.enterHoldSamples;
     config["exitConfirmSamples"] = conf.exitConfirmSamples;
+    config["nodeMode"] = conf.nodeMode;
+    config["masterSSID"] = conf.masterSSID;
+    config["masterPassword"] = conf.masterPassword;
+    config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -159,7 +163,7 @@ void Config::toJson(AsyncResponseStream& destination) {
 }
 
 void Config::toJsonString(char* buf) {
-    DynamicJsonDocument config(896);
+    DynamicJsonDocument config(1024);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -191,6 +195,10 @@ void Config::toJsonString(char* buf) {
     config["besselHz"] = conf.besselHz;
     config["enterHoldSamples"] = conf.enterHoldSamples;
     config["exitConfirmSamples"] = conf.exitConfirmSamples;
+    config["nodeMode"] = conf.nodeMode;
+    config["masterSSID"] = conf.masterSSID;
+    config["masterPassword"] = conf.masterPassword;
+    config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -396,6 +404,12 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("besselHz"))         setU8("besselHz",         conf.besselHz,         0, 2);
     if (source.containsKey("enterHoldSamples")) setU8("enterHoldSamples", conf.enterHoldSamples, 1, 20);
     if (source.containsKey("exitConfirmSamples")) setU8("exitConfirmSamples", conf.exitConfirmSamples, 1, 10);
+
+    // ===== Multi-node =====
+    if (source.containsKey("nodeMode"))           setU8("nodeMode", conf.nodeMode, 0, 2);
+    if (source.containsKey("masterSSID"))         setStr("masterSSID",     conf.masterSSID,     sizeof(conf.masterSSID));
+    if (source.containsKey("masterPassword"))     setStr("masterPassword", conf.masterPassword, sizeof(conf.masterPassword));
+    if (source.containsKey("mnSkipMasterStart"))  setU8("mnSkipMasterStart", conf.mnSkipMasterStart, 0, 1);
 }
 
 
@@ -762,6 +776,42 @@ uint8_t Config::getExitConfirmSamples() {
     return conf.exitConfirmSamples;
 }
 
+char* Config::getPilotName() {
+    return conf.pilotName;
+}
+
+uint8_t Config::getNodeMode() {
+    return conf.nodeMode;
+}
+
+char* Config::getMasterSSID() {
+    return conf.masterSSID;
+}
+
+char* Config::getMasterPassword() {
+    return conf.masterPassword;
+}
+
+void Config::setNodeMode(uint8_t mode) {
+    if (mode > 2) mode = 0;
+    if (conf.nodeMode != mode) {
+        conf.nodeMode = mode;
+        modified = true;
+    }
+}
+
+bool Config::getMnSkipMasterStart() {
+    return conf.mnSkipMasterStart != 0;
+}
+
+void Config::setMnSkipMasterStart(bool skip) {
+    uint8_t val = skip ? 1 : 0;
+    if (conf.mnSkipMasterStart != val) {
+        conf.mnSkipMasterStart = val;
+        modified = true;
+    }
+}
+
 void Config::setBandIndex(uint8_t band) {
   if (conf.bandIndex != band) {
     conf.bandIndex = band;
@@ -1002,6 +1052,10 @@ void Config::setDefaults(void) {
     conf.besselHz = 0;            // 100 Hz Bessel (fastest, least lag) when V2 selected
     conf.enterHoldSamples = 4;    // 4 consecutive samples before gate entry (V1)
     conf.exitConfirmSamples = 2;  // 2 consecutive samples to confirm exit (V1)
+    conf.nodeMode = 0;            // Single node (standalone) by default
+    memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
+    strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));
+    conf.mnSkipMasterStart = 0;  // Honor master Start All by default
     modified = true;
     write();
 }

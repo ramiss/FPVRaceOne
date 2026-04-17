@@ -137,6 +137,10 @@ void LapTimer::start() {
     }
 }
 
+bool LapTimer::isRunning() const {
+    return state == RUNNING || state == WAITING;
+}
+
 void LapTimer::stop() {
     DEBUG("LapTimer stopped\n");
     state = STOPPED;
