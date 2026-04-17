@@ -270,7 +270,7 @@ function startKeepaliveWatchdog() {
     if (!eventSource || eventSource.readyState !== EventSource.OPEN) return;
     if (Date.now() - lastKeepaliveMs > KEEPALIVE_TIMEOUT_MS) {
       console.warn('[Keepalive] No keepalive in 35s — connection is stale, forcing reconnect');
-      showDisconnectedBanner('Connection stalled — reconnecting...');
+      showDisconnectedBanner(mnNodeMode === 2 ? 'Connection to master node stalled — reconnecting...' : 'Connection stalled — reconnecting...');
       setupWiFiEvents();
     }
   }, 10000);
@@ -641,6 +641,15 @@ onload = async function (e) {
       console.error('[Script] Debug Listener failed:', err);
   }
 
+  // Dev mode: click pilot name display on single/client Race view to inject a simulated lap
+  const pilotNameDisplay = document.getElementById('pilotNameDisplay');
+  if (pilotNameDisplay) {
+    pilotNameDisplay.addEventListener('click', () => {
+      if (!mnDevMode) return;
+      addManualLap();
+    });
+  }
+
   // Wire the "hide" link on the Race tab banner
   const hideLink = document.getElementById("raceTabDownloadReminderHide");
   if (hideLink) {
@@ -669,6 +678,8 @@ onload = async function (e) {
     configData = {};
   }
 
+  // Block autoSaveConfig() from staging stale defaults while we populate the UI
+  settingsLoading = true;
   {
     // old reverse freq lookup no longer works due to multiple bands having same channels
     //if (configData.freq !== undefined) setBandChannelIndex(configData.freq);
@@ -716,9 +727,9 @@ onload = async function (e) {
       updateExitRssi(exitRssiInput, exitRssiInput.value);
     }
 
-    if (configData.name !== undefined) pilotNameInput.value = configData.name;
-    if (configData.ssid !== undefined) ssidInput.value = configData.ssid;
-    if (configData.pwd !== undefined) pwdInput.value = configData.pwd;
+    if (configData.name !== undefined && pilotNameInput) pilotNameInput.value = configData.name;
+    if (configData.ssid !== undefined && ssidInput) ssidInput.value = configData.ssid;
+    if (configData.pwd !== undefined && pwdInput) pwdInput.value = configData.pwd;
 
     maxLapsInput.value = (configData.maxLaps !== undefined) ? configData.maxLaps : 0;
     updateMaxLaps(maxLapsInput, maxLapsInput.value);
@@ -730,6 +741,8 @@ onload = async function (e) {
 
     if (callsignInput && configData.pilotCallsign !== undefined) {
       callsignInput.value = configData.pilotCallsign;
+      const pilotNameDisplay = document.getElementById('pilotNameDisplay');
+      if (pilotNameDisplay) pilotNameDisplay.textContent = configData.pilotCallsign || '';
     }
     if (phoneticInput && configData.pilotPhonetic !== undefined) {
       phoneticInput.value = configData.pilotPhonetic;
@@ -751,10 +764,10 @@ onload = async function (e) {
     timer.innerHTML = "00:00:00s";
     clearLaps();
 
-    createRssiChart();
-
     // Apply voice enabled state from device config (DO NOT auto-save here)
     audioEnabled = !!Number(configData.voiceEnabled);
+    console.log('[DEBUG-STARTUP] voiceEnabled from /config:', configData.voiceEnabled, '→ audioEnabled:', audioEnabled);
+    console.log('[DEBUG-STARTUP] wifiExtAntenna from /config:', configData.wifiExtAntenna);
 
     if (audioAnnouncer) {
       if (audioEnabled) {
@@ -764,8 +777,6 @@ onload = async function (e) {
       }
     }
     updateVoiceButtons();
-
-    console.log('[Script] Applied voiceEnabled from config:', configData.voiceEnabled);
 
 
     // Setup pilot color preview
@@ -874,7 +885,34 @@ onload = async function (e) {
     if (rssiSensitivitySelect && configData.rssiSens !== undefined) {
       rssiSensitivitySelect.value = configData.rssiSens;
     }
+
+    // Populate nodeModeSelect at startup so autoSaveConfig() never stages the wrong nodeMode.
+    // The settings modal also sets this, but the startup config fetch fires first.
+    const nodeModeSelectEarly = document.getElementById('nodeModeSelect');
+    if (nodeModeSelectEarly && configData.nodeMode !== undefined) {
+      nodeModeSelectEarly.value = String(configData.nodeMode);
+    }
+    const masterSSIDEarly = document.getElementById('masterSSIDInput');
+    if (masterSSIDEarly && configData.masterSSID !== undefined) {
+      masterSSIDEarly.value = configData.masterSSID;
+    }
+
+    // Populate antenna and TX power so buildConfigSnapshotFromUI() gets correct values
+    const extAntennaEarly = document.getElementById('externalAntennaToggle');
+    const antennaLabelEarly = document.getElementById('antennaLabel');
+    if (extAntennaEarly && configData.wifiExtAntenna !== undefined) {
+      extAntennaEarly.checked = configData.wifiExtAntenna === 1;
+      if (antennaLabelEarly) antennaLabelEarly.textContent = configData.wifiExtAntenna === 1 ? 'External' : 'Internal';
+    }
+    const txPowerEarly = document.getElementById('wifiTxPowerInput');
+    if (txPowerEarly && configData.wifiTxPower !== undefined) {
+      txPowerEarly.value = configData.wifiTxPower;
+    }
   }
+
+  // Set baseline so stageConfig() can detect actual changes vs device state
+  baselineConfig = (configData && Object.keys(configData).length) ? { ...configData } : {};
+  settingsLoading = false;
 
   checkTuningStatusOnStartup();
 
@@ -1518,14 +1556,17 @@ function openTab(evt, tabName) {
   // Switch between single-pilot and master race view
   if (tabName === "race") onRaceTabOpen();
 
-  // Hook pause button when entering Calibration tab
+  // Hook pause button when entering Calibration tab; create chart on first open
   if (tabName === "calib") {
     const btn = document.getElementById('pauseCalibBtn');
     if (btn && !btn.dataset.bound) {
       btn.dataset.bound = "1";
       btn.addEventListener('click', toggleRssiPaused);
-      // Ensure label is correct on entry
       btn.textContent = rssiPaused ? 'Resume' : 'Pause';
+    }
+    // Create the chart now that the canvas is visible and has real dimensions
+    if (!rssiChart) {
+      createRssiChart();
     }
   }
 
@@ -1656,7 +1697,8 @@ function buildConfigSnapshotFromUI() {
 
   let pilotColorInt = 0x0080FF;
   if (colorInput && colorInput.value) {
-    pilotColorInt = parseInt(colorInput.value.replace('#', ''), 16);
+    const _parsed = parseInt(colorInput.value.replace('#', ''), 16);
+    if (!isNaN(_parsed)) pilotColorInt = _parsed;
   }
 
   // RSSI sensitivity (0/1)
@@ -1672,7 +1714,7 @@ function buildConfigSnapshotFromUI() {
   const minLapInput = document.getElementById('minLap');
   const alarmThreshold = document.getElementById('alarmThreshold');
   const announcerSelect = document.getElementById('announcerSelect');
-  const announcerRateInput = document.getElementById('announcerRate');
+  const announcerRateInput = document.getElementById('rate');
   const enterRssiInput = document.getElementById('enter');
   const exitRssiInput = document.getElementById('exit');
   const maxLapsInput = document.getElementById('maxLaps');
@@ -1741,7 +1783,7 @@ function buildConfigSnapshotFromUI() {
     minLap: parseInt(parseFloat(minLapInput?.value || 0) * 10),
     alarm: parseInt(parseFloat(alarmThreshold?.value || 0) * 10),
     anType: announcerSelect ? announcerSelect.selectedIndex : 0,
-    anRate: parseInt(parseFloat(announcerRateInput?.value || 0)),
+    anRate: parseInt(parseFloat(announcerRateInput?.value || 0) * 10),
     enterRssi: parseInt(enterRssiInput?.value || 0),
     exitRssi: parseInt(exitRssiInput?.value || 0),
     maxLaps: parseInt(maxLapsInput?.value || 0),
@@ -1823,6 +1865,8 @@ function buildConfigSnapshotFromUI() {
     })(),
     masterSSID: (document.getElementById('masterSSIDInput')?.value || ''),
     mnSkipMasterStart: document.getElementById('mnSkipMasterStartToggle')?.checked ? 1 : 0,
+    devMode: document.getElementById('devModeToggle')?.checked ? 1 : 0,
+
   };
 
   return cfg;
@@ -1837,6 +1881,11 @@ function autoSaveConfig() {
 
 function saveRSSIThresholds() {
   if (calibOverviewMode) exitCalibrationOverviewModeByUserAction();
+  // Explicitly stage current RSSI values before saving (enter/exit may have changed via the calibration wizard)
+  const enterEl = document.getElementById('enter');
+  const exitEl  = document.getElementById('exit');
+  if (enterEl) stageConfig('enterRssi', parseInt(enterEl.value || 0));
+  if (exitEl)  stageConfig('exitRssi',  parseInt(exitEl.value  || 0));
   saveConfig();
 }
 
@@ -1847,6 +1896,8 @@ async function saveConfig() {
     return;
   }
 
+  // Send only staged (delta) fields — avoids accidentally overwriting fields like voiceEnabled
+  // that have their own save path. Falls back to full snapshot only if staged is somehow empty.
   const payload = stagedConfig && Object.keys(stagedConfig).length ? stagedConfig : buildConfigSnapshotFromUI();
 
   try {
@@ -1870,6 +1921,8 @@ async function saveConfig() {
     stagedConfig = {};
     stagedDirty = false;
     updateSaveButton();
+    // Advance baseline so future stageConfig() calls compare against what was just saved
+    if (typeof baselineConfig === 'object' && baselineConfig) Object.assign(baselineConfig, payload);
   } catch (err) {
     console.error('[Config] Save failed:', err);
     // Keep stagedDirty=true so user can try saving again
@@ -1910,9 +1963,10 @@ function attachConfigStagingListeners() {
   wire('webhookRaceStop', 'change');
   wire('webhookLap', 'change');
 
-  // Battery + External antenna (if present in this build)
+  // Battery monitor toggle
   wire('batteryMonitorToggle', 'change');
-  wire('externalAntennaToggle', 'change');
+  // externalAntennaToggle uses direct stagedConfig assignment in its onchange (always stages user's explicit choice)
+  wire('wifiTxPowerInput', 'change');
 
   // Pilot settings
   wire('pcallsign', 'input');
@@ -1974,8 +2028,8 @@ async function saveConfig() {
     theme: themeSelect ? themeSelect.value : 'oceanic',
     selectedVoice: voiceSelect ? voiceSelect.value : 'default',
     lapFormat: lapFormatSelect ? lapFormatSelect.value : 'full',
-    ssid: ssidInput.value,
-    pwd: pwdInput.value,
+    ssid: ssidInput ? ssidInput.value : '',
+    pwd: pwdInput ? pwdInput.value : '',
   };
   
   if (usbConnected && transportManager) {
@@ -6049,10 +6103,12 @@ function testWebhook() {
 // Load tracks when settings modal opens
 function openSettingsModal() {
   settingsLoading = true;
+  // Trigger serial config dump for debugging (fire-and-forget)
+  fetch('/api/debugconfig').catch(() => {});
   const modal = document.getElementById('settingsModal');
   if (modal) {
     modal.classList.add('active');
-    
+
     // Load full config to populate all settings
     fetch('/config')
       .then(response => response.json())
@@ -6100,9 +6156,9 @@ function openSettingsModal() {
           exitRssiInput.value = config.exitRssi;
           updateExitRssi(exitRssiInput, exitRssiInput.value);
         }
-        if (config.name !== undefined) pilotNameInput.value = config.name;
-        if (config.ssid !== undefined) ssidInput.value = config.ssid;
-        if (config.pwd !== undefined) pwdInput.value = config.pwd;
+        if (config.name !== undefined && pilotNameInput) pilotNameInput.value = config.name;
+        if (config.ssid !== undefined && ssidInput) ssidInput.value = config.ssid;
+        if (config.pwd !== undefined && pwdInput) pwdInput.value = config.pwd;
         if (config.maxLaps !== undefined) {
           maxLapsInput.value = config.maxLaps;
           updateMaxLaps(maxLapsInput, maxLapsInput.value);
@@ -6112,7 +6168,7 @@ function openSettingsModal() {
         const ledBrightnessInput = document.getElementById('ledBrightness');
         if (config.ledBrightness !== undefined && ledBrightnessInput) {
           ledBrightnessInput.value = config.ledBrightness;
-          updateLedBrightness(ledBrightnessInput, config.ledBrightness);
+          $(ledBrightnessInput).parent().find('span').text(config.ledBrightness);
         }
         
         // Pilot settings
@@ -6141,6 +6197,11 @@ function openSettingsModal() {
         if (lapFormatSelect && config.lapFormat) {
           lapFormatSelect.value = config.lapFormat;
           lapFormat = config.lapFormat;
+        }
+        // Sync voice enabled state from device so it's never out of date
+        if (config.voiceEnabled !== undefined) {
+          audioEnabled = !!config.voiceEnabled;
+          updateVoiceButtons();
         }
         
         // Theme setting
@@ -6198,9 +6259,6 @@ function openSettingsModal() {
           webhooksCheckbox.checked = webhooksEnabled;
           toggleWebhooks(webhooksEnabled, { save: false });
         }
-        clearStagedConfig();     // resets stagedConfig + stagedDirty + indicator
-        settingsLoading = false; // now user actions can mark dirty
-
         // RSSI sensitivity
         const rssiSensitivitySelect = document.getElementById('rssiSensitivity');
         if (rssiSensitivitySelect && config.rssiSens !== undefined) {
@@ -6210,6 +6268,8 @@ function openSettingsModal() {
         // WiFi antenna settings
         const extAntennaToggle = document.getElementById('externalAntennaToggle');
         const antennaLabel = document.getElementById('antennaLabel');
+        console.log('[DEBUG-MODAL] wifiExtAntenna from /config:', config.wifiExtAntenna, 'type:', typeof config.wifiExtAntenna);
+        console.log('[DEBUG-MODAL] voiceEnabled from /config:', config.voiceEnabled, 'type:', typeof config.voiceEnabled);
         if (extAntennaToggle && config.wifiExtAntenna !== undefined) {
           extAntennaToggle.checked = config.wifiExtAntenna === 1;
           if (antennaLabel) antennaLabel.textContent = config.wifiExtAntenna === 1 ? 'External' : 'Internal';
@@ -6253,16 +6313,32 @@ function openSettingsModal() {
         const masterSSIDInput = document.getElementById('masterSSIDInput');
         if (masterSSIDInput && config.masterSSID !== undefined) {
           masterSSIDInput.value = config.masterSSID;
+          if (mnNodeMode === 2) { mnStatusSSID = config.masterSSID; mnUpdateRaceStatusBar(); }
         }
         const mnSkipToggle = document.getElementById('mnSkipMasterStartToggle');
         if (mnSkipToggle && config.mnSkipMasterStart !== undefined) {
           mnSkipToggle.checked = !!config.mnSkipMasterStart;
         }
 
+        const devModeToggle = document.getElementById('devModeToggle');
+        const devModeLabel  = document.getElementById('devModeLabel');
+        if (devModeToggle && config.devMode !== undefined) {
+          devModeToggle.checked = !!config.devMode;
+          mnDevMode = !!config.devMode;
+          if (devModeLabel) devModeLabel.textContent = config.devMode ? 'On' : 'Off';
+          const _pnd = document.getElementById('pilotNameDisplay');
+          if (_pnd) _pnd.style.cursor = config.devMode ? 'pointer' : 'default';
+        }
+
+        // All UI fields populated — now unlock staging so user changes can be tracked
+        clearStagedConfig();
+        settingsLoading = false;
+
       })
       .catch(error => {
         console.error('Error loading config:', error);
-        settingsLoading = false;   // ← THIS IS THE MISSING PIECE
+        clearStagedConfig();   // discard any stale staged values from startup
+        settingsLoading = false;
       });
     
     // Switch to general section by default
@@ -6282,7 +6358,10 @@ let mnNodeMode           = 0;      // 0=standalone, 1=master, 2=client (cached f
 let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE / polling
 let mnRaceTimerIntervalId = null;
 let mnRaceStartMs         = 0;
+let mnMasterConnected     = false; // client: true when registered with master
+let mnClientPollInterval  = null;  // client: timer for periodic /api/mode polls
 let mnDevMode             = false; // dev mode: click pilot name to simulate a lap
+let mnStatusSSID          = '';    // SSID string for the race status bar
 
 /** Show/hide client-specific fields in the Multi-Node settings section */
 function onNodeModeChange() {
@@ -6291,8 +6370,21 @@ function onNodeModeChange() {
   const mode = parseInt(sel.value, 10);
   const clientFields  = document.getElementById('mn-client-fields');
   const masterInfo    = document.getElementById('mn-master-info');
+  const warningText   = document.getElementById('mn-ip-warning-text');
+
   if (clientFields) clientFields.style.display = (mode === 2) ? '' : 'none';
-  if (masterInfo)   masterInfo.style.display   = (mode === 1) ? '' : 'none';
+
+  // Show IP-change warning when selected mode has a different IP than the live firmware mode
+  const deviceIsMaster   = (mnNodeMode === 1);
+  const selectingMaster  = (mode === 1);
+  const ipWillChange     = (selectingMaster !== deviceIsMaster);
+
+  if (masterInfo) masterInfo.style.display = ipWillChange ? '' : 'none';
+  if (warningText) {
+    warningText.textContent = selectingMaster
+      ? 'IP address will change to 192.168.5.1'
+      : 'IP address will change to 192.168.4.1';
+  }
 }
 
 /** Apply multi-node settings and reboot */
@@ -6307,8 +6399,37 @@ async function applyMultiNodeSettings() {
     return;
   }
 
+  const becomingMaster  = (nodeMode === 1);
+  const leavingMaster   = (mnNodeMode === 1 && !becomingMaster);
+  const ipChanging      = becomingMaster || leavingMaster;
+  const newIP           = becomingMaster ? '192.168.5.1' : '192.168.4.1';
+
+  // Confirmation dialog
+  const confirmed = await new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#fff);border-radius:10px;padding:28px 32px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);font-family:inherit;';
+    box.innerHTML = `
+      <h3 style="margin:0 0 12px;font-size:17px;">Apply Multi-Node &amp; Reboot?</h3>
+      ${ipChanging ? `<div style="background:#fff3cd;border:1px solid #f0ad4e;border-radius:6px;padding:10px 14px;color:#7a4f00;font-size:13px;margin-bottom:16px;">
+        ⚠️ <strong>IP address will change to ${newIP}</strong> after reboot.<br>
+        Your browser will be redirected automatically.
+      </div>` : ''}
+      <p style="margin:0 0 20px;font-size:14px;color:var(--secondary-color,#666);">The device will save settings and reboot. This takes about 10 seconds.</p>
+      <div style="display:flex;gap:12px;justify-content:flex-end;">
+        <button id="_mnCancel" style="padding:8px 20px;border-radius:6px;border:1px solid var(--border-color,#ccc);background:transparent;cursor:pointer;font-size:14px;">Cancel</button>
+        <button id="_mnContinue" style="padding:8px 20px;border-radius:6px;border:none;background:var(--primary-color,#2196F3);color:#fff;cursor:pointer;font-size:14px;font-weight:600;">Continue</button>
+      </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    document.getElementById('_mnCancel').onclick  = () => { overlay.remove(); resolve(false); };
+    document.getElementById('_mnContinue').onclick = () => { overlay.remove(); resolve(true); };
+  });
+
+  if (!confirmed) return;
+
   try {
-    // Save config first (includes nodeMode and masterSSID)
     await saveConfig();
     await new Promise(r => setTimeout(r, 500));
   } catch (e) {
@@ -6316,9 +6437,20 @@ async function applyMultiNodeSettings() {
     alert('Failed to apply multi-node settings. Check connection and try again.');
     return;
   }
-  // Reboot is fire-and-forget — the device reboots before it can send a response,
-  // so a network error here is expected and not a failure.
+
+  // Fire reboot (response may never arrive — that's expected)
   fetch('/reboot', { method: 'POST' }).catch(() => {});
+
+  // Redirect browser to new IP while device is rebooting
+  const targetURL = `http://${newIP}/`;
+  const msg = document.createElement('div');
+  msg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:inherit;';
+  msg.innerHTML = `<div style="font-size:22px;font-weight:700;margin-bottom:12px;">Rebooting…</div>
+    <div style="font-size:15px;opacity:0.85;">Redirecting to <strong>${targetURL}</strong></div>`;
+  document.body.appendChild(msg);
+
+  // Wait ~8 s for the device to come back up, then redirect
+  setTimeout(() => { window.location.href = targetURL; }, 8000);
 }
 
 /** Scan for nearby FPVRaceOne_ networks and show results in the settings panel */
@@ -6368,6 +6500,25 @@ function mnStopPolling() {
   if (mnPollingInterval) { clearInterval(mnPollingInterval); mnPollingInterval = null; }
 }
 
+function mnStartClientPoll() {
+  if (mnClientPollInterval) return;
+  mnClientPollInterval = setInterval(async () => {
+    try {
+      const r = await fetch('/api/mode');
+      if (!r.ok) return;
+      const d = await r.json();
+      const prevConnected = mnMasterConnected;
+      mnMasterConnected  = d.masterConnected || false;
+      mnMyNodeId         = d.myNodeId        || 0;
+      if (prevConnected !== mnMasterConnected) mnUpdateRaceStatusBar();
+    } catch (_) {}
+  }, 5000);
+}
+
+function mnStopClientPoll() {
+  if (mnClientPollInterval) { clearInterval(mnClientPollInterval); mnClientPollInterval = null; }
+}
+
 async function mnRefreshNodes() {
   try {
     const r = await fetch('/api/multinode/nodes');
@@ -6390,6 +6541,28 @@ function formatMsRace(ms) {
   return m > 0 ? `${m}:${ss}.${cc}` : `${ss}.${cc}`;
 }
 
+// Update the status bar above the race clock based on current multi-node mode.
+function mnUpdateRaceStatusBar() {
+  const bar  = document.getElementById('mn-race-status-bar');
+  const text = document.getElementById('mn-race-status-text');
+  if (!bar || !text) return;
+  if (mnNodeMode === 1) {
+    bar.style.display = '';
+    text.textContent  = `Multi-Node: Master — ${mnStatusSSID || 'FPVRaceOne'}`;
+  } else if (mnNodeMode === 2) {
+    bar.style.display = '';
+    if (!mnMasterConnected) {
+      text.textContent = `Multi-Node: Client Node — Disconnected from master ${mnStatusSSID || ''}`.trim();
+    } else if (mnMyNodeId > 0) {
+      text.textContent = `Multi-Node: Client Node ${mnMyNodeId} — Connected to master ${mnStatusSSID || ''}`.trim();
+    } else {
+      text.textContent = 'Multi-Node: Client Node — Searching for master node...';
+    }
+  } else {
+    bar.style.display = 'none';
+  }
+}
+
 // Show/hide the correct race view depending on node mode. Called on tab open and on page load.
 function onRaceTabOpen() {
   const singleView = document.getElementById('single-race-view');
@@ -6405,12 +6578,24 @@ function onRaceTabOpen() {
     singleView.style.display  = '';
     masterView.style.display  = 'none';
   }
+  mnUpdateRaceStatusBar();
 }
 
 // Dev mode: simulate a lap for a pilot by clicking their name card.
 async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
   if (!mnDevMode) return;
-  const lapMs = Math.round((Math.random() * 65000) + 25000);  // 25–90 s
+  // Use actual race clock: elapsed since start minus this pilot's already-logged total
+  let lapMs;
+  if (mnRaceStartMs > 0) {
+    const elapsedMs = Date.now() - mnRaceStartMs;
+    const pilot = nodeId === 0
+      ? _mnMasterEntry()
+      : (mnCurrentNodes || []).find(n => n.nodeId === nodeId);
+    const pilotTotalMs = pilot ? (pilot.totalMs || 0) : 0;
+    lapMs = Math.max(500, elapsedMs - pilotTotalMs);
+  } else {
+    lapMs = Math.round((Math.random() * 65000) + 25000);  // fallback if race not started
+  }
   if (nodeId === 0) {
     // Master's own timer — inject into local lapTimes and update display
     const lapSec = lapMs / 1000;
@@ -6508,10 +6693,11 @@ function mnRenderRaceTab(nodes) {
     else if (n.running && mnRaceRunning)             badge = ' <span class="mn-status-racing">Racing</span>';
     else if (n.running && !mnRaceRunning && !n.isMaster) badge = ' <span class="mn-status-solo">Solo</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
+    const statusDotColor = n.online !== false ? '#4caf50' : '#f44336';
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
       <td class="mn-lb-pilot">
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${color};margin-right:6px;vertical-align:middle;"></span>${callsign}${badge}
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
       </td>
       <td class="mn-lb-mono">${n.lapCount}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(n.totalMs)            : '—'}</td>
@@ -6605,44 +6791,34 @@ function mnRenderNodes(nodes) {
   container.innerHTML = html;
 }
 
-/** Initialize the Multi-Node tab when opened */
+/** Fetch current mode and refresh multi-node state (Race tab status bar + polling). */
 async function mnInitTab() {
   try {
     const r = await fetch('/api/mode');
     if (!r.ok) return;
-    const data = await r.json();
+    const data     = await r.json();
     const nodeMode = data.nodeMode || 0;
-    mnNodeMode = nodeMode;  // cache for Race tab view switching
-
-    document.getElementById('mn-single-banner').style.display  = (nodeMode === 0) ? '' : 'none';
-    document.getElementById('mn-master-view').style.display    = (nodeMode === 1) ? '' : 'none';
-    document.getElementById('mn-client-view').style.display    = (nodeMode === 2) ? '' : 'none';
+    mnNodeMode     = nodeMode;
 
     if (nodeMode === 1) {
-      const ssidEl = document.getElementById('mnMasterSSID');
-      if (ssidEl) ssidEl.textContent = data.ssid || '—';
+      mnStatusSSID = data.ssid || '';
       mnStartPolling();
     } else if (nodeMode === 2) {
-      const statusBadge = document.getElementById('mn-client-status-badge');
-      const nodeIdEl    = document.getElementById('mn-my-node-id');
-      if (statusBadge) {
-        const connected = data.masterConnected;
-        statusBadge.textContent = connected ? 'Connected (Node ' + data.myNodeId + ')' : 'Disconnected';
-        statusBadge.className   = 'mn-status-badge ' + (connected ? 'mn-status-connected' : 'mn-status-disconnected');
-      }
-      if (nodeIdEl) nodeIdEl.textContent = data.myNodeId || '—';
-      mnMyNodeId = data.myNodeId || 0;
+      mnMyNodeId         = data.myNodeId        || 0;
       mnMasterRaceActive = data.masterRaceActive || false;
-      // Show configured master SSID
+      mnMasterConnected  = data.masterConnected  || false;
+      // Fetch master SSID from config for the status bar
       const r2 = await fetch('/config');
       if (r2.ok) {
         const cfg = await r2.json();
-        const ssidEl2 = document.getElementById('mn-master-ssid-display');
-        if (ssidEl2) ssidEl2.textContent = cfg.masterSSID || '(not set)';
+        mnStatusSSID = cfg.masterSSID || '';
       }
+      mnStartClientPoll();
     } else {
       mnStopPolling();
+      mnStopClientPoll();
     }
+    mnUpdateRaceStatusBar();
   } catch (e) {
     console.warn('[MULTINODE] mnInitTab failed:', e);
   }
@@ -6708,15 +6884,18 @@ async function mnStopRace() {
   } catch (e) { console.error('[MULTINODE] Stop race failed:', e); }
 }
 
-// Hook into the tab-open function
-const _origOpenTab = typeof openTab === 'function' ? openTab : null;
-// Intercept tab open to init multi-node when the tab is selected
+async function mnClearRace() {
+  if (!confirm('Clear all race data for all pilots?')) return;
+  try {
+    await fetch('/api/multinode/clearLaps', { method: 'POST' });
+    clearLaps();           // clear master's own local laps
+    await mnRefreshNodes(); // re-render with empty node data from server
+  } catch (e) { console.error('[MULTINODE] Clear race failed:', e); }
+}
+
+// Stop polling whenever the user navigates away from the Race tab
 document.addEventListener('click', (e) => {
-  const link = e.target.closest('#nav-link-multinode');
-  if (link) {
-    // Stop polling when leaving master view
-    mnInitTab();
-  } else if (e.target.closest('.tablinks') && !e.target.closest('#nav-link-multinode')) {
+  if (e.target.closest('.tablinks') && !e.target.closest('#nav-link-race')) {
     mnStopPolling();
   }
 });
@@ -6733,7 +6912,7 @@ if (typeof window._mnSSEListener === 'undefined') {
 
 document.addEventListener('DOMContentLoaded', () => {
   // Ensure only the Race tab is visible on first load (prevents panels stacking)
-  const tabIds = ['race', 'history', 'calib', 'ota', 'config', 'multinode'];
+  const tabIds = ['race', 'history', 'calib', 'ota', 'config'];
 
   tabIds.forEach(id => {
     const el = document.getElementById(id);
@@ -6748,9 +6927,25 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Detect node mode and show the correct Race tab view immediately.
   // This fires early; the config-load path below is the primary trigger once config is ready.
+  // Dev Mode is now a firmware setting; loaded from /config in openSettingsModal.
+  // Keep localStorage fallback for first load before settings are opened.
+  const _storedDevMode = localStorage.getItem('mnDevMode');
+  if (_storedDevMode === '1') {
+    mnDevMode = true;
+    const _dt = document.getElementById('devModeToggle');
+    const _dl = document.getElementById('devModeLabel');
+    if (_dt) _dt.checked = true;
+    if (_dl) _dl.textContent = 'On';
+    const _pnd = document.getElementById('pilotNameDisplay');
+    if (_pnd) _pnd.style.cursor = 'pointer';
+  }
+
   fetch('/api/mode').then(r => r.ok ? r.json() : null).then(data => {
     if (!data) return;
-    mnNodeMode = data.nodeMode || 0;
+    mnNodeMode   = data.nodeMode  || 0;
+    mnMyNodeId   = data.myNodeId  || 0;
+    if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
+    if (typeof audioAnnouncer !== 'undefined') audioAnnouncer.sdAvailable = !!data.sdAvailable;
     onRaceTabOpen();
   }).catch(e => console.warn('[Race] /api/mode fetch failed:', e));
 

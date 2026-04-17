@@ -55,7 +55,6 @@
         <li><a href="#" id="nav-link-race" class="tablinks active" onclick="openTab(event, 'race')">Race</a></li>
         <li><a href="#" id="nav-link-history" class="tablinks" onclick="openTab(event, 'history')">Race History</a></li>
         <li><a href="#" id="nav-link-calib" class="tablinks" onclick="openTab(event, 'calib')">Calibration</a></li>
-        <li><a href="#" id="nav-link-multinode" class="tablinks" onclick="openTab(event, 'multinode')">Multi-Node</a></li>
         <li><a href="#" id="nav-link-config" class="tablinks" onclick="openSettingsModal()">Configuration</a></li>
       </ul>
     </header>
@@ -84,6 +83,11 @@
 
       <div id="race" class="tabcontent" style="display: block;">
 
+        <!-- ── Multi-node status bar (hidden in standalone mode) ── -->
+        <div id="mn-race-status-bar" style="display:none; text-align:center; font-size:13px; font-weight:600; color:#fff; background:#1565c0; padding:6px 14px; border-radius:6px; letter-spacing:0.02em; margin:6px 0;">
+          <span id="mn-race-status-text"></span>
+        </div>
+
         <!-- ── Single-pilot view (standalone / client mode) ── -->
         <div id="single-race-view">
           <div id="raceDataButtons" style="display: none; margin-bottom: 16px; text-align: center;">
@@ -91,6 +95,7 @@
             <button onclick="transferToRaceHistory()" style="padding: 8px 16px;">Transfer to Race History</button>
           </div>
           <span id="timer">00:00:00s</span>
+          <div id="pilotNameDisplay" style="text-align: center; font-size: 15px; font-weight: 600; color: var(--secondary-color); margin: 6px 0 2px; cursor: default;"></div>
           <div id="lapCounter" style="text-align: center; font-size: 18px; font-weight: bold; color: var(--primary-color); margin: 8px 0;">Lap 0</div>
           <div class="racebuttons">
             <button id="startRaceButton" onclick="startRace()">Start Race</button>
@@ -145,6 +150,7 @@
           <div class="racebuttons">
             <button id="mnStartRaceBtnMain" onclick="mnStartRace()">Start All</button>
             <button id="mnStopRaceBtnMain"  onclick="mnStopRace()" disabled>Stop All</button>
+            <button id="mnClearRaceBtnMain" onclick="mnClearRace()">Clear</button>
           </div>
           <div id="mn-race-container" style="margin: 16px 0;"></div>
         </div>
@@ -282,50 +288,6 @@
         </div>
       </div>
 
-      <!-- Multi-Node Tab -->
-      <div id="multinode" class="tabcontent" style="display: none;">
-        <div id="mn-single-banner" class="mn-banner mn-banner-info" style="display:none;">
-          <strong>Single Node Mode</strong> — This device operates standalone. Enable Multi-Node in Configuration → Multi-Node to use networked timing.
-        </div>
-        <div id="mn-master-view" style="display:none;">
-          <div class="mn-header-row">
-            <div>
-              <h2 style="margin:0;">Multi-Node Race</h2>
-              <div class="mn-mode-badge mn-badge-master">Master</div>
-            </div>
-          </div>
-          <div style="margin: 12px 0; font-size: 13px; color: var(--secondary-color);">
-            Clients connect to <strong id="mnMasterSSID">FPVRaceOne_??????</strong> (password: <code>fpvraceone</code>).
-            Race director connects here at <strong>192.168.5.1</strong>.
-          </div>
-          <div id="mn-nodes-container">
-            <p style="text-align:center; color: var(--secondary-color); padding: 32px 0;">
-              No client nodes registered yet. Set client devices to Client mode and connect them to this AP.
-            </p>
-          </div>
-        </div>
-        <div id="mn-client-view" style="display:none;">
-          <div class="mn-header-row">
-            <div>
-              <h2 style="margin:0;">Client Node</h2>
-              <div class="mn-mode-badge mn-badge-client">Client</div>
-            </div>
-            <div id="mn-client-status-badge" class="mn-status-badge mn-status-disconnected">Disconnected</div>
-          </div>
-          <div class="mn-client-info-card">
-            <div class="mn-info-row"><span>My Node ID</span><strong id="mn-my-node-id">—</strong></div>
-            <div class="mn-info-row"><span>Master IP</span><strong>192.168.5.1</strong></div>
-            <div class="mn-info-row"><span>My AP (pilots)</span><strong>192.168.4.1</strong></div>
-            <div class="mn-info-row"><span>Master SSID</span><strong id="mn-master-ssid-display">—</strong></div>
-          </div>
-          <div style="margin-top: 16px; font-size: 13px; color: var(--secondary-color);">
-            Your laps are automatically forwarded to the master when connected.
-            Pilots connect to your AP at <strong>192.168.4.1</strong> for local lap display.
-            <br><br>
-            <a href="http://192.168.5.1" target="_blank" style="color: var(--primary-color);">Open Master View ↗</a>
-          </div>
-        </div>
-      </div>
 
     </main>
 
@@ -648,7 +610,7 @@
                   <option value="#00FF7F">Spring Green</option>
                   <option value="#FF69B4">Hot Pink</option>
                 </select>
-                <span id="colorPreview" style="display: inline-block; width: 30px; height: 30px; margin-left: 10px; border: 2px solid var(--border-color); border-radius: 4px; background-color: #FF0000;"></span>
+                <span id="colorPreview" style="display: inline-block; width: 30px; height: 30px; margin-left: 10px; border: 2px solid var(--border-color); border-radius: 4px; background-color: #0080FF;"></span>
               </div>
             </div>
 
@@ -843,23 +805,28 @@
                 Status: Disconnected
               </div>
 
-              <h3>WiFi Configuration</h3>
+              <h3>WiFi Antenna</h3>
               <div class="config-item">
-                <label for="ssid">WiFi SSID:</label>
-                <input type="text" id="ssid" maxlength="32" placeholder="Enter WiFi network name" />
+                <label for="externalAntennaToggle">Antenna:</label>
+                <div style="flex: 1;">
+                  <label class="switch">
+                    <input type="checkbox" id="externalAntennaToggle" onchange="document.getElementById('antennaLabel').textContent=this.checked?'External':'Internal'; stagedConfig['wifiExtAntenna']=this.checked?1:0; stagedDirty=true; updateSaveButton()">
+                    <span class="slider"></span>
+                  </label>
+                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="antennaLabel">External</span>
+                </div>
               </div>
-
               <div class="config-item">
-                <label for="pwd">WiFi Password:</label>
-                <input type="password" id="pwd" maxlength="32" placeholder="Enter WiFi password" />
+                <label for="wifiTxPowerInput">TX Power (dBm):</label>
+                <div style="flex: 1; display: flex; align-items: center; gap: 8px;">
+                  <input type="number" id="wifiTxPowerInput" min="2" max="21" step="1" value="21"
+                         style="width: 70px;"
+                         oninput="autoSaveConfig()">
+                  <span style="font-size: 12px; color: var(--secondary-color);">2–21 dBm</span>
+                </div>
               </div>
-
-              <div style="display: flex; gap: 12px; margin-top: 16px;">
-                <button onclick="applyWiFiSettings()" style="flex: 1;">Apply WiFi Settings</button>
-                <button onclick="resetWiFiSettings()" style="flex: 1; background-color: var(--secondary-color);">Reset</button>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-top: 8px;">
-                Note: Device will restart after applying WiFi settings
+              <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
+                Both antenna settings take effect on next boot.
               </div>
             </div>
 
@@ -880,9 +847,11 @@
                 </select>
               </div>
 
-              <div id="mn-master-info" style="display:none; font-size: 13px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 8px;">
-                This device becomes the central race director. Other devices connect to its WiFi AP.
-                Max 8 connections (7 clients + 1 race director browser).
+              <div id="mn-master-info" style="display:none; margin-left: 170px; margin-top: -8px; margin-bottom: 8px;">
+                <div id="mn-ip-warning-box" style="background: #fff3cd; border: 1px solid #f0ad4e; border-radius: 6px; padding: 10px 14px; color: #7a4f00; font-size: 13px; font-weight: 500;">
+                  ⚠️ <strong id="mn-ip-warning-text"></strong> after reboot.<br>
+                  <span style="font-weight: normal;">Your browser will be redirected automatically. Reconnect to the FPVRaceOne WiFi if needed.</span>
+                </div>
               </div>
 
               <div id="mn-client-fields" style="display:none;">
@@ -1009,59 +978,6 @@
                 </div>
               </div>
 
-              <!-- Comment out RSSI Detection Section because it is not supported on this hardware -->
-              <div style="display:none">
-                <h3 style="margin-top: 0;">RSSI Detection</h3>
-                <div class="config-item">
-                  <label for="rssiSensitivity">RSSI Sensitivity:</label>
-                  <select id="rssiSensitivity" onchange="autoSaveConfig()">
-                    <option value="0">Normal (Legacy)</option>
-                    <option value="1" selected>High (1.5x Boost)</option>
-                  </select>
-                </div>
-                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                  High sensitivity provides better weak signal detection. Use Normal if experiencing false triggers.
-                </div>
-              </div>
-              <h3>Developer</h3>
-              <div class="config-item">
-                <label for="devModeToggle">Dev Mode (Simulate Laps):</label>
-                <div style="flex: 1;">
-                  <label class="switch">
-                    <input type="checkbox" id="devModeToggle" onchange="mnDevMode=this.checked; document.getElementById('devModeLabel').textContent=this.checked?'On':'Off'; mnRenderRaceTab(mnCurrentNodes);">
-                    <span class="slider"></span>
-                  </label>
-                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="devModeLabel">Off</span>
-                </div>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
-                When on, tap a pilot's name on the Race tab to inject a simulated random lap. For testing without quads.
-              </div>
-
-              <h3>WiFi Antenna</h3>
-              <div class="config-item">
-                <label for="externalAntennaToggle">Antenna:</label>
-                <div style="flex: 1;">
-                  <label class="switch">
-                    <input type="checkbox" id="externalAntennaToggle" onchange="document.getElementById('antennaLabel').textContent=this.checked?'External':'Internal'; autoSaveConfig()">
-                    <span class="slider"></span>
-                  </label>
-                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="antennaLabel">External</span>
-                </div>
-              </div>
-              <div class="config-item">
-                <label for="wifiTxPowerInput">TX Power (dBm):</label>
-                <div style="flex: 1; display: flex; align-items: center; gap: 8px;">
-                  <input type="number" id="wifiTxPowerInput" min="2" max="21" step="1" value="21"
-                         style="width: 70px;"
-                         oninput="autoSaveConfig()">
-                  <span style="font-size: 12px; color: var(--secondary-color);">2–21 dBm</span>
-                </div>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
-                Both antenna settings take effect on next boot.
-              </div>
-
               <h3>Appearance</h3>
               <div class="config-item">
                 <label for="themeSelect">Theme:</label>
@@ -1090,6 +1006,45 @@
                   <option value="moonlight">Moonlight</option>
                   <option value="synthwave">SynthWave '84</option>
                 </select>
+              </div>
+
+              <h3>Signal Processing</h3>
+              <div class="config-item">
+                <label for="filterModeSelect">Filter Mode:</label>
+                <select id="filterModeSelect" onchange="onFilterModeChange(); autoSaveConfig()">
+                  <option value="0">V1 — FPVRaceOne (Kalman + EMA)</option>
+                  <option value="1">V2 — RotorHazard (Bessel IIR)</option>
+                </select>
+              </div>
+              <div class="config-item" id="besselHzRow">
+                <label for="besselHzSelect">Bessel Cutoff:</label>
+                <select id="besselHzSelect" onchange="autoSaveConfig()">
+                  <option value="0">100 Hz — fastest response</option>
+                  <option value="1">50 Hz — balanced</option>
+                  <option value="2">20 Hz — smoothest</option>
+                </select>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                V1 uses a 5-stage pipeline (Kalman → Median → MA → EMA → Step limiter).
+                V2 uses a single 2nd-order Bessel IIR (RotorHazard method) with midpoint lap timestamp.
+                Changes take effect immediately without reboot.
+              </div>
+
+              <h3>Detection</h3>
+              <div class="config-item">
+                <label for="enterHoldInput" title="V1 only: consecutive samples at or above Enter RSSI required before gate is considered entered">Enter Hold Samples (V1):</label>
+                <input type="number" id="enterHoldInput" min="1" max="20" step="1" value="4"
+                       style="width: 70px;"
+                       oninput="autoSaveConfig()">
+              </div>
+              <div class="config-item">
+                <label for="exitConfirmInput" title="V1 only: consecutive samples below Exit RSSI required to confirm gate exit">Exit Confirm Samples (V1):</label>
+                <input type="number" id="exitConfirmInput" min="1" max="10" step="1" value="2"
+                       style="width: 70px;"
+                       oninput="autoSaveConfig()">
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                V1 debounce parameters. Not used in V2 mode.
               </div>
 
               <h3>Integration</h3>
@@ -1156,45 +1111,6 @@
 
               </div>
 
-              <h3>Signal Processing</h3>
-              <div class="config-item">
-                <label for="filterModeSelect">Filter Mode:</label>
-                <select id="filterModeSelect" onchange="onFilterModeChange(); autoSaveConfig()">
-                  <option value="0">V1 — FPVRaceOne (Kalman + EMA)</option>
-                  <option value="1">V2 — RotorHazard (Bessel IIR)</option>
-                </select>
-              </div>
-              <div class="config-item" id="besselHzRow">
-                <label for="besselHzSelect">Bessel Cutoff:</label>
-                <select id="besselHzSelect" onchange="autoSaveConfig()">
-                  <option value="0">100 Hz — fastest response</option>
-                  <option value="1">50 Hz — balanced</option>
-                  <option value="2">20 Hz — smoothest</option>
-                </select>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                V1 uses a 5-stage pipeline (Kalman → Median → MA → EMA → Step limiter).
-                V2 uses a single 2nd-order Bessel IIR (RotorHazard method) with midpoint lap timestamp.
-                Changes take effect immediately without reboot.
-              </div>
-
-              <h3>Detection</h3>
-              <div class="config-item">
-                <label for="enterHoldInput" title="V1 only: consecutive samples at or above Enter RSSI required before gate is considered entered">Enter Hold Samples (V1):</label>
-                <input type="number" id="enterHoldInput" min="1" max="20" step="1" value="4"
-                       style="width: 70px;"
-                       oninput="autoSaveConfig()">
-              </div>
-              <div class="config-item">
-                <label for="exitConfirmInput" title="V1 only: consecutive samples below Exit RSSI required to confirm gate exit">Exit Confirm Samples (V1):</label>
-                <input type="number" id="exitConfirmInput" min="1" max="10" step="1" value="2"
-                       style="width: 70px;"
-                       oninput="autoSaveConfig()">
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                V1 debounce parameters. Not used in V2 mode.
-              </div>
-
               <h3>Device</h3>
               <div class="config-item">
                 <label>Reboot:</label>
@@ -1202,6 +1118,21 @@
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
                 Restarts the device immediately. Required for antenna and TX power changes to take effect.
+              </div>
+
+              <h3>Developer</h3>
+              <div class="config-item">
+                <label for="devModeToggle">Dev Mode (Simulate Laps):</label>
+                <div style="flex: 1;">
+                  <label class="switch">
+                    <input type="checkbox" id="devModeToggle" onchange="mnDevMode=this.checked; document.getElementById('devModeLabel').textContent=this.checked?'On':'Off'; mnRenderRaceTab(mnCurrentNodes); const _pnd=document.getElementById('pilotNameDisplay'); if(_pnd) _pnd.style.cursor=this.checked?'pointer':'default'; stageConfig('devMode', this.checked?1:0); stagedDirty=true; updateSaveButton();">
+                    <span class="slider"></span>
+                  </label>
+                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="devModeLabel">Off</span>
+                </div>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
+                When on, tap a pilot's name on the Race tab to inject a simulated random lap. For testing without quads.
               </div>
             </div>
 

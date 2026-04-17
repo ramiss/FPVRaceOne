@@ -90,7 +90,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 13
+#define CONFIG_VERSION 15
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -145,6 +145,7 @@ typedef struct {
     char masterSSID[33];        // SSID of master to connect to (client mode only)
     char masterPassword[33];    // Password for master AP (default "fpvraceone")
     uint8_t mnSkipMasterStart;  // 1=skip master Start All if race already running on this node
+    uint8_t devMode;            // 0=off, 1=dev mode (simulate laps by clicking pilot name)
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -213,6 +214,8 @@ class Config {
     void    setNodeMode(uint8_t mode);
     bool    getMnSkipMasterStart();
     void    setMnSkipMasterStart(bool skip);
+    uint8_t getDevMode();
+    void    setDevMode(uint8_t mode);
 
     // added because we use multiple bands with the same channels and revere freq lookup no longer works
     void setBandIndex(uint8_t band);

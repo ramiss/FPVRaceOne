@@ -112,11 +112,11 @@ static void initParallelTask() {
 
 void setup() {
 
-    // ====================================================================
-    // ROTORHAZARD MODE DETECTION - CURRENTLY DISABLED
-    // Mode switching has been disabled - system now runs in WiFi mode only
-    // To re-enable: uncomment the mode detection block below
-    // ====================================================================
+    // Serial must be first so all subsequent DEBUG() calls are visible
+    Serial.begin(115200);
+    delay(100);
+    while (Serial.available()) { Serial.read(); }
+    DEBUG_INIT;
 
     // Initialize storage first (LittleFS only at boot)
     storage.init();
@@ -161,19 +161,7 @@ void setup() {
     // set LED pin
     pinMode(LED_BUILTIN, OUTPUT);
     digitalWrite(LED_BUILTIN, HIGH);
-    
-    // Initialize serial (115200)
-    Serial.begin(115200);
-    delay(100);
-    
-    // Clear serial buffer
-    while (Serial.available()) {
-        Serial.read();
-    }
-    
-    // Always enable debug output (WiFi mode only)
-    DEBUG_INIT;
-    
+
     // Suppress VFS file-not-found errors (reduces spam from API endpoint checks)
     esp_log_level_set("vfs_api", ESP_LOG_NONE);
     

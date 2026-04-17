@@ -30,10 +30,25 @@ void Config::load(void) {
     modified = false;
     EEPROM.get(0, conf);
 
+    // Ensure all char arrays are null-terminated regardless of EEPROM content
+    conf.pilotName[sizeof(conf.pilotName)-1]         = '\0';
+    conf.pilotCallsign[sizeof(conf.pilotCallsign)-1] = '\0';
+    conf.pilotPhonetic[sizeof(conf.pilotPhonetic)-1] = '\0';
+    conf.theme[sizeof(conf.theme)-1]                 = '\0';
+    conf.selectedVoice[sizeof(conf.selectedVoice)-1] = '\0';
+    conf.lapFormat[sizeof(conf.lapFormat)-1]         = '\0';
+    conf.ssid[sizeof(conf.ssid)-1]                   = '\0';
+    conf.password[sizeof(conf.password)-1]            = '\0';
+    conf.masterSSID[sizeof(conf.masterSSID)-1]       = '\0';
+    conf.masterPassword[sizeof(conf.masterPassword)-1] = '\0';
+
     uint32_t version = 0xFFFFFFFF;
     if ((conf.version & CONFIG_MAGIC_MASK) == CONFIG_MAGIC) {
         version = conf.version & ~CONFIG_MAGIC_MASK;
     }
+
+    DEBUG("EEPROM raw: version=%u (expected=%u) voiceEnabled=%u wifiExtAntenna=%u wifiTxPower=%u\n",
+          version, CONFIG_VERSION, conf.voiceEnabled, conf.wifiExtAntenna, conf.wifiTxPower);
 
     // If version is not current, try to restore from SD backup
     if (version != CONFIG_VERSION) {
@@ -90,10 +105,9 @@ void Config::write(void) {
 
 
 void Config::toJson(AsyncResponseStream& destination) {
-    // Capacity: JSON_OBJECT_SIZE(44 fields) + JSON_ARRAY_SIZE(10 webhook IPs)
-    // On ESP32 each slot is 16 bytes → 44*16 + 10*16 = 864 bytes minimum.
-    // 1024 gives a safe margin so no fields are silently dropped on overflow.
-    DynamicJsonDocument config(1344);
+    // ~51 fields + 10 webhook IPs. On ESP32 each slot = 16 bytes + possible string copies.
+    // 2048 gives a large margin to prevent silent overflow dropping fields.
+    DynamicJsonDocument config(2048);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -146,6 +160,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
+    config["devMode"] = conf.devMode;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -163,7 +178,7 @@ void Config::toJson(AsyncResponseStream& destination) {
 }
 
 void Config::toJsonString(char* buf) {
-    DynamicJsonDocument config(1024);
+    DynamicJsonDocument config(2048);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
     config["freq"] = conf.frequency;
@@ -199,6 +214,7 @@ void Config::toJsonString(char* buf) {
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
+    config["devMode"] = conf.devMode;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -212,7 +228,11 @@ void Config::toJsonString(char* buf) {
         config["hasLed"] = false;
     #endif
 
-    serializeJsonPretty(config, buf, 512);
+    config["voiceEnabled"] = conf.voiceEnabled;
+    config["wifiExtAntenna"] = conf.wifiExtAntenna;
+    config["wifiTxPower"] = conf.wifiTxPower;
+
+    serializeJsonPretty(config, buf, 2048);
 }
 
 void Config::fromJson(JsonObject source) {
@@ -410,6 +430,7 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("masterSSID"))         setStr("masterSSID",     conf.masterSSID,     sizeof(conf.masterSSID));
     if (source.containsKey("masterPassword"))     setStr("masterPassword", conf.masterPassword, sizeof(conf.masterPassword));
     if (source.containsKey("mnSkipMasterStart"))  setU8("mnSkipMasterStart", conf.mnSkipMasterStart, 0, 1);
+    if (source.containsKey("devMode"))            setU8("devMode", conf.devMode, 0, 1);
 }
 
 
@@ -745,7 +766,7 @@ char* Config::getSelectedVoice() {
 }
 
 uint8_t Config::getVoiceEnabled() {
-    return conf.webhookLap;
+    return conf.voiceEnabled;
 }
 
 char* Config::getLapFormat() {
@@ -808,6 +829,17 @@ void Config::setMnSkipMasterStart(bool skip) {
     uint8_t val = skip ? 1 : 0;
     if (conf.mnSkipMasterStart != val) {
         conf.mnSkipMasterStart = val;
+        modified = true;
+    }
+}
+
+uint8_t Config::getDevMode() {
+    return conf.devMode;
+}
+
+void Config::setDevMode(uint8_t mode) {
+    if (conf.devMode != mode) {
+        conf.devMode = mode;
         modified = true;
     }
 }
@@ -1055,7 +1087,8 @@ void Config::setDefaults(void) {
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));
-    conf.mnSkipMasterStart = 0;  // Honor master Start All by default
+    conf.mnSkipMasterStart = 0;
+    conf.devMode = 0;
     modified = true;
     write();
 }

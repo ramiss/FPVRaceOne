@@ -31,6 +31,9 @@ class AudioAnnouncer {
         this.selectedVoice = localStorage.getItem('selectedVoice') || 'default';
         console.log('[AudioAnnouncer] Selected voice:', this.selectedVoice);
         
+        // SD card availability — set externally after /api/mode fetch
+        this.sdAvailable = false;
+
         // Pre-recorded audio cache
         this.audioCache = new Map();
         this.preloadedAudios = new Set();
@@ -256,7 +259,15 @@ class AudioAnnouncer {
                 }
             }
             
-            // ElevenLabs voice selected - try pre-recorded files first
+            // ElevenLabs voice selected - try pre-recorded files first (only if SD card available)
+            if (!this.sdAvailable) {
+                if (this.piperLoaded) {
+                    await this.playPiper(cleanText);
+                } else {
+                    await this.playWebSpeech(cleanText);
+                }
+                return;
+            }
             // Check for different lap announcement formats
             // Format 1: "Pilot Lap X, time" (e.g., "Louis Lap 5, 12.34")
             const fullFormatMatch = cleanText.match(/^(.+?)\s+lap\s+(\d+)\s*,\s*([\d.]+)$/i);

@@ -54,6 +54,7 @@ public:
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
     bool   handleHeartbeat(uint8_t nodeId, bool running, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
+    void   clearAllLaps();           // master: wipe all stored laps for all nodes
 
     // ── Client-side state setters (called from webserver handlers) ──
     void   setTimerRunning(bool running);

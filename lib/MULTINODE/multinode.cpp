@@ -292,6 +292,16 @@ bool MultiNodeManager::handleQuit(uint8_t nodeId) {
     return false;
 }
 
+void MultiNodeManager::clearAllLaps() {
+    for (auto& n : _nodes) {
+        n.laps.clear();
+        n.lapCount  = 0;
+        n.running   = false;
+        n.quitEarly = false;
+    }
+    DEBUG("[MULTINODE] All laps cleared\n");
+}
+
 void MultiNodeManager::_checkNodeTimeouts(uint32_t currentTimeMs) {
     for (auto& n : _nodes) {
         if (n.online && (currentTimeMs - n.lastSeen) > MULTINODE_NODE_TIMEOUT_MS) {

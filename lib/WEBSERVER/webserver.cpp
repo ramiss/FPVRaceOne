@@ -703,6 +703,15 @@ EEPROM:\n\
         led->on(200);
     });
 
+    // On-demand config dump to serial (called when user opens Configuration tab)
+    server.on("/api/debugconfig", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        char buf[2048];
+        conf->toJsonString(buf);
+        Serial.println("[DEBUGCONFIG]");
+        Serial.println(buf);
+        request->send(200, "text/plain", "printed to serial");
+    });
+
     // Serve audio files from SD card voice directories (sounds_default, sounds_rachel, etc.)
     server.on("^\\/sounds_.+\\/.+\\.mp3$", HTTP_GET, [this](AsyncWebServerRequest *request) {
         String path = request->url();
@@ -1658,6 +1667,7 @@ EEPROM:\n\
         doc["nodeMode"] = nodeMode;
         doc["modeName"] = (nodeMode == 1) ? "master" : (nodeMode == 2) ? "client" : "single";
         doc["ssid"] = wifi_ap_ssid;
+        doc["sdAvailable"] = storage ? storage->isSDAvailable() : false;
         if (multiNode) {
             doc["masterConnected"]  = multiNode->isMasterConnected();
             doc["myNodeId"]         = multiNode->getMyNodeId();
@@ -1675,6 +1685,21 @@ EEPROM:\n\
             return;
         }
         request->send(200, "application/json", multiNode->getNodesToJson());
+    });
+
+    // /api/multinode/clearLaps — master clears all stored laps for all nodes
+    server.on("/api/multinode/clearLaps", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isMasterMode()) {
+            request->send(403, "application/json", "{\"error\":\"not master\"}");
+            return;
+        }
+        multiNode->clearAllLaps();
+        // Push updated (empty) node state to all SSE clients
+        String nodesJson = multiNode->getNodesToJson();
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%s", nodesJson.c_str());
+        events.send(buf, "multiNodeState", millis());
+        request->send(200, "application/json", "{\"ok\":true}");
     });
 
     // /api/multinode/scan — scan for nearby FPVRaceOne_ SSIDs
