@@ -6411,14 +6411,14 @@ async function applyMultiNodeSettings() {
     const box = document.createElement('div');
     box.style.cssText = 'background:var(--card-bg,#fff);border-radius:10px;padding:28px 32px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);font-family:inherit;';
     box.innerHTML = `
-      <h3 style="margin:0 0 12px;font-size:17px;">Apply Multi-Node &amp; Reboot?</h3>
-      ${ipChanging ? `<div style="background:#fff3cd;border:1px solid #f0ad4e;border-radius:6px;padding:10px 14px;color:#7a4f00;font-size:13px;margin-bottom:16px;">
+      <h3 style="margin:0 0 12px;font-size:17px;color:#222;">Apply Multi-Node &amp; Reboot?</h3>
+      ${ipChanging ? `<div style="background:#fff3cd;border:1px solid #f0ad4e;border-radius:6px;padding:10px 14px;color:#5a3e00;font-size:13px;margin-bottom:16px;">
         ⚠️ <strong>IP address will change to ${newIP}</strong> after reboot.<br>
         Your browser will be redirected automatically.
       </div>` : ''}
-      <p style="margin:0 0 20px;font-size:14px;color:var(--secondary-color,#666);">The device will save settings and reboot. This takes about 10 seconds.</p>
+      <p style="margin:0 0 20px;font-size:14px;color:#555;">The device will save settings and reboot. This takes about 10 seconds.</p>
       <div style="display:flex;gap:12px;justify-content:flex-end;">
-        <button id="_mnCancel" style="padding:8px 20px;border-radius:6px;border:1px solid var(--border-color,#ccc);background:transparent;cursor:pointer;font-size:14px;">Cancel</button>
+        <button id="_mnCancel" style="padding:8px 20px;border-radius:6px;border:1px solid #aaa;background:#f5f5f5;color:#333;cursor:pointer;font-size:14px;">Cancel</button>
         <button id="_mnContinue" style="padding:8px 20px;border-radius:6px;border:none;background:var(--primary-color,#2196F3);color:#fff;cursor:pointer;font-size:14px;font-weight:600;">Continue</button>
       </div>`;
     overlay.appendChild(box);
@@ -6428,6 +6428,12 @@ async function applyMultiNodeSettings() {
   });
 
   if (!confirmed) return;
+
+  // Force-stage nodeMode and masterSSID so saveConfig() always sends them,
+  // even if the user never triggered autoSaveConfig on the dropdown.
+  stageConfig('nodeMode', nodeMode);
+  stageConfig('masterSSID', masterSSID);
+  stagedDirty = true;
 
   try {
     await saveConfig();
@@ -6441,16 +6447,48 @@ async function applyMultiNodeSettings() {
   // Fire reboot (response may never arrive — that's expected)
   fetch('/reboot', { method: 'POST' }).catch(() => {});
 
-  // Redirect browser to new IP while device is rebooting
+  // Show overlay and poll new IP until device responds, then redirect.
   const targetURL = `http://${newIP}/`;
   const msg = document.createElement('div');
-  msg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:inherit;';
-  msg.innerHTML = `<div style="font-size:22px;font-weight:700;margin-bottom:12px;">Rebooting…</div>
-    <div style="font-size:15px;opacity:0.85;">Redirecting to <strong>${targetURL}</strong></div>`;
+  msg.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:inherit;text-align:center;padding:24px;';
+  const statusLine = document.createElement('div');
+  statusLine.style.cssText = 'font-size:14px;opacity:0.7;margin-top:10px;';
+  statusLine.textContent = 'Waiting for device…';
+  const manualLink = document.createElement('div');
+  manualLink.style.cssText = 'font-size:13px;opacity:0;margin-top:14px;transition:opacity 0.5s;';
+  manualLink.innerHTML = `Taking longer than expected? <a href="${targetURL}" style="color:#7ecfff;">Click here to go manually</a>`;
+  msg.innerHTML = `
+    <div style="font-size:24px;font-weight:700;margin-bottom:10px;">Rebooting…</div>
+    <div style="font-size:15px;opacity:0.9;margin-bottom:4px;">Redirecting to <strong>${targetURL}</strong></div>
+    ${ipChanging ? `<div style="font-size:13px;opacity:0.65;margin-bottom:4px;">(Make sure you reconnect to the module's WiFi if needed)</div>` : ''}`;
+  msg.appendChild(statusLine);
+  msg.appendChild(manualLink);
   document.body.appendChild(msg);
 
-  // Wait ~8 s for the device to come back up, then redirect
-  setTimeout(() => { window.location.href = targetURL; }, 8000);
+  // After 18 s show the manual link in case the user needs to switch WiFi first
+  setTimeout(() => { manualLink.style.opacity = '1'; }, 18000);
+
+  // Poll every 500 ms; fetch mode:'no-cors' resolves (opaque) when reachable,
+  // throws NetworkError when not — works cross-origin without CORS headers.
+  // Wait 2 s first so the device has time to actually start rebooting.
+  await new Promise(r => setTimeout(r, 2000));
+  let dots = 0;
+  const maxAttempts = 60; // 60 × 500 ms = 30 s hard cap
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      await fetch(targetURL, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
+      statusLine.textContent = 'Device online — redirecting!';
+      await new Promise(r => setTimeout(r, 300));
+      window.location.href = targetURL;
+      return;
+    } catch (_) {
+      dots = (dots + 1) % 4;
+      statusLine.textContent = 'Waiting for device' + '.'.repeat(dots + 1);
+      await new Promise(r => setTimeout(r, 500));
+    }
+  }
+  // Hard cap — redirect anyway
+  window.location.href = targetURL;
 }
 
 /** Scan for nearby FPVRaceOne_ networks and show results in the settings panel */

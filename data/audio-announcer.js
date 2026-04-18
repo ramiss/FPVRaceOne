@@ -259,13 +259,9 @@ class AudioAnnouncer {
                 }
             }
             
-            // ElevenLabs voice selected - try pre-recorded files first (only if SD card available)
+            // No SD card — skip Piper and pre-recorded files, use Web Speech API directly
             if (!this.sdAvailable) {
-                if (this.piperLoaded) {
-                    await this.playPiper(cleanText);
-                } else {
-                    await this.playWebSpeech(cleanText);
-                }
+                await this.playWebSpeech(cleanText);
                 return;
             }
             // Check for different lap announcement formats
