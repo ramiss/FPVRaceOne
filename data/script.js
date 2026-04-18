@@ -398,7 +398,7 @@ function setupWiFiEvents() {
     try {
       const data     = JSON.parse(e.data);
       const node     = mnCurrentNodes.find(n => n.nodeId === data.node);
-      const callsign = node ? (node.pilotCallsign || node.pilotName || ('Node ' + data.node)) : ('Node ' + data.node);
+      const callsign = node ? (node.pilotName || ('Node ' + data.node)) : ('Node ' + data.node);
       // Refresh immediately so the new lap appears without waiting for the next poll
       mnRefreshNodes();
       // Announce the lap using the existing announcer
@@ -747,18 +747,12 @@ onload = async function (e) {
     maxLapsInput.value = (configData.maxLaps !== undefined) ? configData.maxLaps : 0;
     updateMaxLaps(maxLapsInput, maxLapsInput.value);
 
-    // Load pilot callsign, phonetic name, and color from device config
-    const callsignInput = document.getElementById('pcallsign');
-    const phoneticInput = document.getElementById('pphonetic');
+    // Load pilot color from device config
     const colorInput = document.getElementById('pilotColor');
 
-    if (callsignInput && configData.pilotCallsign !== undefined) {
-      callsignInput.value = configData.pilotCallsign;
+    if (configData.name !== undefined) {
       const pilotNameDisplay = document.getElementById('pilotNameDisplay');
-      if (pilotNameDisplay) pilotNameDisplay.textContent = configData.pilotCallsign || '';
-    }
-    if (phoneticInput && configData.pilotPhonetic !== undefined) {
-      phoneticInput.value = configData.pilotPhonetic;
+      if (pilotNameDisplay) pilotNameDisplay.textContent = configData.name || '';
     }
     if (colorInput && configData.pilotColor !== undefined) {
       const hexColor = '#' + ('000000' + configData.pilotColor.toString(16)).slice(-6).toUpperCase();
@@ -1704,8 +1698,6 @@ function stageBandChan() {
 
 function buildConfigSnapshotFromUI() {
   // Pilot settings
-  const callsignInput = document.getElementById('pcallsign');
-  const phoneticInput = document.getElementById('pphonetic');
   const colorInput = document.getElementById('pilotColor');
 
   let pilotColorInt = 0x0080FF;
@@ -1829,8 +1821,6 @@ function buildConfigSnapshotFromUI() {
 
     // Pilot
     name: (document.getElementById('pname')?.value || ''),
-    pilotCallsign: callsignInput ? callsignInput.value : '',
-    pilotPhonetic: phoneticInput ? phoneticInput.value : '',
     pilotColor: pilotColorInt,
 
     // UI prefs
@@ -1982,8 +1972,6 @@ function attachConfigStagingListeners() {
   wire('wifiTxPowerInput', 'change');
 
   // Pilot settings
-  wire('pcallsign', 'input');
-  wire('pphonetic', 'input');
   wire('pilotColor', 'input');
 
   // WiFi credentials
@@ -2012,8 +2000,6 @@ function autoSaveConfig() {
 
 async function saveConfig() {
   // Get pilot settings
-  const callsignInput = document.getElementById('pcallsign');
-  const phoneticInput = document.getElementById('pphonetic');
   const colorInput = document.getElementById('pilotColor');
   const themeSelect = document.getElementById('themeSelect');
   const voiceSelect = document.getElementById('voiceSelect');
@@ -2038,8 +2024,6 @@ async function saveConfig() {
     maxLaps: maxLaps,
     rssiSens: rssiSensitivitySelect ? parseInt(rssiSensitivitySelect.value) : 1,
     name: pilotNameInput.value,
-    pilotCallsign: callsignInput ? callsignInput.value : '',
-    pilotPhonetic: phoneticInput ? phoneticInput.value : '',
     pilotColor: pilotColorInt,
     theme: themeSelect ? themeSelect.value : 'oceanic',
     selectedVoice: voiceSelect ? voiceSelect.value : 'default',
@@ -2188,9 +2172,6 @@ if (announcerSelect) {
 if (pilotNameInput) {
   pilotNameInput.addEventListener('input', autoSaveConfig);
 }
-// pcallsign and pphonetic listeners are already attached by
-// attachConfigStagingListeners() → wire(). Duplicates removed to prevent
-// autoSaveConfig firing twice per keystroke.
 const colorInput = document.getElementById('pilotColor');
 if (colorInput) {
   colorInput.addEventListener('change', autoSaveConfig);
@@ -2282,9 +2263,7 @@ function playBeepTone(duration, frequency, type) {
 }
 
 function addLap(lapStr) {
-  // Use phonetic name for TTS if available, otherwise use regular pilot name
-  const phoneticInput = document.getElementById('pphonetic');
-  const pilotName = (phoneticInput && phoneticInput.value) ? phoneticInput.value : pilotNameInput.value;
+  const pilotName = pilotNameInput.value;
   
   const newLap = parseFloat(lapStr);
   lapNo += 1;
@@ -2337,7 +2316,7 @@ function addLap(lapStr) {
       break;
     case "1lap":
       if (lapNo == 0) {
-        queueSpeak(`<p>entered gate 1</p>`);
+        queueSpeak(`<p>${pilotName} entered gate 1</p>`);
       } else {
         let text;
         switch (lapFormat) {
@@ -2345,10 +2324,10 @@ function addLap(lapStr) {
             text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
             break;
           case 'laptime':
-            text = `<p>Lap ${lapNo}, ${lapSpeak}</p>`;
+            text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
             break;
           case 'timeonly':
-            text = `<p>${lapSpeak}</p>`;
+            text = `<p>${pilotName} ${lapSpeak}</p>`;
             break;
           default:
             text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
@@ -2358,7 +2337,7 @@ function addLap(lapStr) {
       break;
     case "2lap":
       if (lapNo == 0) {
-        queueSpeak(`<p>entered gate 1</p>`);
+        queueSpeak(`<p>${pilotName} entered gate 1</p>`);
       } else if (last2lapStr != "") {
         const text2 = "<p>" + pilotName + " 2 laps " + formatMsSpeak(Math.round(parseFloat(last2lapStr) * 1000)) + "</p>";
         queueSpeak(text2);
@@ -2366,7 +2345,7 @@ function addLap(lapStr) {
       break;
     case "3lap":
       if (lapNo == 0) {
-        queueSpeak(`<p>entered gate 1</p>`);
+        queueSpeak(`<p>${pilotName} entered gate 1</p>`);
       } else if (last3lapStr != "") {
         const text3 = "<p>" + pilotName + " 3 laps " + formatMsSpeak(Math.round(parseFloat(last3lapStr) * 1000)) + "</p>";
         queueSpeak(text3);
@@ -2821,8 +2800,7 @@ function generateAudio() {
   }
 
   const pilotName = pilotNameInput.value;
-  const phoneticName = document.getElementById('pphonetic')?.value || pilotName;
-  queueSpeak(`<div>Testing sound for pilot ${phoneticName}</div>`);
+  queueSpeak(`<div>Testing sound for pilot ${pilotName}</div>`);
   for (let i = 1; i <= 3; i++) {
     queueSpeak('<div>' + i + '</div>')
   }
@@ -3036,7 +3014,6 @@ function downloadCurrentRaceData() {
     best3Total = best3.reduce((sum, t) => sum + t, 0);
   }
 
-  const pilotCallsign = document.getElementById('pcallsign')?.value || '';
   const bandValue = bandSelect.options[bandSelect.selectedIndex].value;
   const channelValue = parseInt(channelSelect.options[channelSelect.selectedIndex].value);
 
@@ -3052,7 +3029,6 @@ function downloadCurrentRaceData() {
     medianLap: Math.round(median * 1000),
     best3LapsTotal: Math.round(best3Total * 1000),
     pilotName: pilotNameInput.value || '',
-    pilotCallsign: pilotCallsign,
     frequency: frequency,
     band: bandValue,
     channel: channelValue,
@@ -3426,21 +3402,15 @@ function saveCurrentRace() {
   }
   
   // Get current pilot and frequency info
-  const pilotCallsign = document.getElementById('pcallsign')?.value || '';
   const bandValue = bandSelect.options[bandSelect.selectedIndex].value;
   const channelValue = parseInt(channelSelect.options[channelSelect.selectedIndex].value);
-  
+
   // Calculate total race distance: track length per lap × number of laps
   let totalRaceDistance = 0;
-  console.log(`DEBUG: trackLapLength=${trackLapLength}, currentTrackId=${currentTrackId}, currentTrackName='${currentTrackName}'`);
   if (trackLapLength > 0 && lapTimes.length > 0) {
     totalRaceDistance = trackLapLength * lapTimes.length;
-    console.log(`Saving race: trackLapLength=${trackLapLength}m, lapCount=${lapTimes.length}, totalDistance=${totalRaceDistance}m`);
-  } else {
-    console.warn(`WARNING: No track distance to save! trackLapLength=${trackLapLength}, lapCount=${lapTimes.length}`);
-    console.warn(`Did you select a track before starting the race? currentTrackId=${currentTrackId}`);
   }
-  
+
   const raceData = {
     timestamp: Math.floor(Date.now() / 1000),
     lapTimes: lapTimes.map(t => Math.round(t * 1000)), // Convert to milliseconds
@@ -3448,7 +3418,6 @@ function saveCurrentRace() {
     medianLap: Math.round(median * 1000),
     best3LapsTotal: Math.round(best3Total * 1000),
     pilotName: pilotNameInput.value || '',
-    pilotCallsign: pilotCallsign,
     frequency: frequency,
     band: bandValue,
     channel: channelValue,
@@ -3575,7 +3544,7 @@ function renderRaceHistory() {
     const totalTime = race.lapTimes.reduce((sum, t) => sum + t, 0) / 1000;
     const name = race.name || '';
     const tag = race.tag || '';
-    const pilotCallsign = race.pilotCallsign || race.pilotName || '';
+    const pilotName = race.pilotName || race.pilotCallsign || '';
     const freqDisplay = race.frequency ? `${race.band}${race.channel} (${race.frequency}MHz)` : '';
     const trackDisplay = race.trackName ? race.trackName : '';
     const distanceDisplay = race.totalDistance ? `${race.totalDistance.toFixed(1)}m` : '';
@@ -3592,7 +3561,7 @@ function renderRaceHistory() {
             ${tag ? '<span class="race-tag">' + tag + '</span>' : ''}
             <div class="race-date">${dateStr}</div>
             ${name ? '<div class="race-name">' + name + '</div>' : ''}
-            ${pilotCallsign ? '<div style="font-size: 14px; color: var(--secondary-color); margin-top: 4px;">Pilot: ' + pilotCallsign + '</div>' : ''}
+            ${pilotName ? '<div style="font-size: 14px; color: var(--secondary-color); margin-top: 4px;">Pilot: ' + pilotName + '</div>' : ''}
             ${freqDisplay ? '<div style="font-size: 14px; color: var(--secondary-color);">Channel: ' + freqDisplay + '</div>' : ''}
             ${trackDisplay ? '<div style="font-size: 14px; color: var(--secondary-color);">Track: ' + trackDisplay + (distanceDisplay ? ' (' + distanceDisplay + ')' : '') + '</div>' : ''}
           </div>
@@ -4260,8 +4229,7 @@ async function importRaces(input) {
         fastestLap: r.fastestLap || 0,
         medianLap: r.medianLap || 0,
         best3LapsTotal: r.best3LapsTotal || 0,
-        pilotName: r.pilotName || "",
-        pilotCallsign: r.pilotCallsign || "",
+        pilotName: r.pilotName || r.pilotCallsign || "",
         frequency: r.frequency || 0,
         band: r.band || "",
         channel: r.channel || 0,
@@ -4393,8 +4361,6 @@ function downloadConfig() {
         selectedVoice: localStorage.getItem('selectedVoice') || 'default',
         ttsEngine: localStorage.getItem('ttsEngine') || 'piper',
         // Pilot frontend settings
-        pilotCallsign: localStorage.getItem('pilotCallsign') || '',
-        pilotPhonetic: localStorage.getItem('pilotPhonetic') || '',
         pilotColor: localStorage.getItem('pilotColor') || '#0080FF',
         // LED settings (get from current UI state)
         ledPreset: parseInt(document.getElementById('ledPreset')?.value || 2),
@@ -4497,12 +4463,6 @@ function importConfig(input) {
           localStorage.setItem('ttsEngine', config.ttsEngine);
         }
         // Pilot frontend settings
-        if (config.pilotCallsign !== undefined) {
-          localStorage.setItem('pilotCallsign', config.pilotCallsign);
-        }
-        if (config.pilotPhonetic !== undefined) {
-          localStorage.setItem('pilotPhonetic', config.pilotPhonetic);
-        }
         if (config.pilotColor) {
           localStorage.setItem('pilotColor', config.pilotColor);
         }
@@ -6171,15 +6131,7 @@ function openSettingsModal() {
         }
         
         // Pilot settings
-        const callsignInput = document.getElementById('pcallsign');
-        const phoneticInput = document.getElementById('pphonetic');
         const colorInput = document.getElementById('pilotColor');
-        if (callsignInput && config.pilotCallsign !== undefined) {
-          callsignInput.value = config.pilotCallsign;
-        }
-        if (phoneticInput && config.pilotPhonetic !== undefined) {
-          phoneticInput.value = config.pilotPhonetic;
-        }
         if (colorInput && config.pilotColor !== undefined) {
           const hexColor = '#' + ('000000' + config.pilotColor.toString(16)).slice(-6).toUpperCase();
           colorInput.value = hexColor;
@@ -6578,13 +6530,13 @@ async function mnRefreshNodes() {
   } catch (_) {}
 }
 
-// Format milliseconds as a TTS-friendly string ("3 minutes 49 point 46" or "49 point 46").
+// Format milliseconds as a TTS-friendly string ("3 minutes 49 point 4 6" or "49 point 5 0").
 function formatMsSpeak(ms) {
   if (!ms || ms <= 0) return '0';
   const m   = Math.floor(ms / 60000);
   const s   = Math.floor((ms % 60000) / 1000);
   const cs  = Math.floor((ms % 1000) / 10);
-  const dec = cs.toString().padStart(2, '0');
+  const dec = cs.toString().padStart(2, '0').split('').join(' ');
   if (m > 0) return `${m} minute${m !== 1 ? 's' : ''} ${s} point ${dec}`;
   return `${s} point ${dec}`;
 }
@@ -6682,11 +6634,9 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
 // Build the master's own pilot entry from local lap data so it appears in the grid.
 function _mnMasterEntry() {
   const nameEl      = document.getElementById('pname');
-  const callsignEl  = document.getElementById('pcallsign');
   const colorEl     = document.getElementById('pilotColor');
-  const name        = nameEl     ? nameEl.value     : 'Master';
-  const callsign    = callsignEl ? callsignEl.value : name;
-  const colorHex    = colorEl    ? colorEl.value    : '#0080FF';
+  const name        = nameEl ? nameEl.value : 'Master';
+  const colorHex    = colorEl ? colorEl.value : '#0080FF';
   const colorInt    = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
   // lapTimes is seconds (float); convert to the same shape as client laps
   const laps = (Array.isArray(window.lapTimes) ? window.lapTimes : [])
@@ -6695,7 +6645,7 @@ function _mnMasterEntry() {
   const totalMs   = laps.reduce((s, l) => s + l.lapTimeMs, 0);
   const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
   const fastestMs = lapCount > 0 ? Math.min(...laps.map(l => l.lapTimeMs)) : Infinity;
-  return { nodeId: 0, pilotName: name, pilotCallsign: callsign || name, pilotColor: colorInt,
+  return { nodeId: 0, pilotName: name, pilotColor: colorInt,
            online: true, running: false, quitEarly: false, isMaster: true,
            laps, lapCount, totalMs, avgMs, fastestMs };
 }
@@ -6750,7 +6700,8 @@ function mnRenderRaceTab(nodes) {
 
   ranked.forEach((n, i) => {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
-    const callsign = (n.pilotCallsign || n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId)) + (n.isMaster ? ' [Master]' : '');
+    const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
+    const hostTag  = n.isMaster ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Host</span>' : '';
     let badge = '';
     if      (n.quitEarly)                           badge = ' <span class="mn-status-dnf">DNF</span>';
     else if (n.running && mnRaceRunning)             badge = ' <span class="mn-status-racing">Racing</span>';
@@ -6766,7 +6717,7 @@ function mnRenderRaceTab(nodes) {
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
       <td class="mn-lb-pilot">
-        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
+        ${hostTag}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
       </td>
       <td class="mn-lb-mono">${n.lapCount}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(n.totalMs)            : '—'}</td>
@@ -6781,7 +6732,7 @@ function mnRenderRaceTab(nodes) {
   html += '<div class="mn-pilot-cards">';
   allSlots.forEach(n => {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
-    const callsign = (n.pilotCallsign || n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId)) + (n.isMaster ? ' [Master]' : '');
+    const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
 
     if (n.empty) {
       html += `<div class="mn-pilot-card mn-pilot-card-empty">
@@ -6829,10 +6780,9 @@ let _mnModalNodeId = null;
 function mnOpenPilotModal(nodeId) {
   _mnModalNodeId = nodeId;
   const node = mnCurrentNodes.find(n => n.nodeId === nodeId);
-  const name     = node ? (node.pilotName     || '') : '';
-  const callsign = node ? (node.pilotCallsign || '') : '';
+  const name     = node ? (node.pilotName || '') : '';
   const colorHex = node ? '#' + ((node.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0') : '#0080ff';
-  document.getElementById('mnPilotModalTitle').textContent = 'Node ' + nodeId + (callsign ? ' \u2014 ' + callsign : '');
+  document.getElementById('mnPilotModalTitle').textContent = 'Node ' + nodeId + (name ? ' \u2014 ' + name : '');
   document.getElementById('mnPilotModalName').value  = name;
   const mnColorSelect  = document.getElementById('mnPilotModalColor');
   const mnColorPreview = document.getElementById('mnPilotModalColorPreview');
@@ -6878,7 +6828,7 @@ async function mnRemoveFromModal() {
   if (!_mnModalNodeId) return;
   const nodeId   = _mnModalNodeId;
   const node     = mnCurrentNodes.find(n => n.nodeId === nodeId);
-  const callsign = node ? (node.pilotCallsign || node.pilotName || 'Node ' + nodeId) : 'Node ' + nodeId;
+  const callsign = node ? (node.pilotName || 'Node ' + nodeId) : 'Node ' + nodeId;
   mnClosePilotModal();
   await mnRemoveNode(nodeId, callsign);
 }
@@ -6910,7 +6860,7 @@ function mnRenderNodes(nodes) {
   nodes.forEach(n => {
     const colorHex    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
     const onlineCls   = n.online ? 'mn-node-online' : 'mn-node-offline';
-    const callsign    = n.pilotCallsign || n.pilotName || 'Node ' + n.nodeId;
+    const callsign    = n.pilotName || 'Node ' + n.nodeId;
     let runDotCls, runLabel;
     if      (n.quitEarly) { runDotCls = 'mn-run-dot dnf';     runLabel = 'DNF'; }
     else if (n.running)   { runDotCls = 'mn-run-dot running'; runLabel = 'Racing'; }
@@ -6931,7 +6881,7 @@ function mnRenderNodes(nodes) {
         <span class="mn-run-label">${runLabel}</span>
       </div>
       <div style="font-size:13px;">
-        ${n.pilotName}${n.pilotCallsign ? ' (' + n.pilotCallsign + ')' : ''} — Laps: <strong>${n.lapCount || 0}</strong>
+        ${n.pilotName || 'Node ' + n.nodeId} — Laps: <strong>${n.lapCount || 0}</strong>
       </div>
     </div>`;
   });

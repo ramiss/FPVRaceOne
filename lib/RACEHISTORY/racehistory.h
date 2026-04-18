@@ -18,7 +18,6 @@ struct RaceSession {
     String name;
     String tag;
     String pilotName;
-    String pilotCallsign;
     uint16_t frequency;
     String band;
     uint8_t channel;

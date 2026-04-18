@@ -871,7 +871,6 @@ EEPROM:\n\
         race.medianLap = jsonObj["medianLap"];
         race.best3LapsTotal = jsonObj["best3LapsTotal"];
         race.pilotName = jsonObj["pilotName"] | "";
-        race.pilotCallsign = jsonObj["pilotCallsign"] | "";
         race.frequency = jsonObj["frequency"] | 0;
         race.band = jsonObj["band"] | "";
         race.channel = jsonObj["channel"] | 0;
@@ -977,7 +976,6 @@ EEPROM:\n\
                     raceObj["name"] = race.name;
                     raceObj["tag"] = race.tag;
                     raceObj["pilotName"] = race.pilotName;
-                    raceObj["pilotCallsign"] = race.pilotCallsign;
                     raceObj["frequency"] = race.frequency;
                     raceObj["band"] = race.band;
                     raceObj["channel"] = race.channel;
@@ -1741,14 +1739,13 @@ EEPROM:\n\
             }
             JsonObject obj          = json.as<JsonObject>();
             String pilotName        = obj["pilotName"]     | "";
-            String pilotCallsign    = obj["pilotCallsign"] | "";
             uint32_t pilotColor     = obj["pilotColor"]    | 0x0080FFu;
             String clientIP         = obj["clientIP"]      | "";
             String staIP            = request->client()->remoteIP().toString();
 
             String macAddress   = obj["mac"]      | "";
             uint8_t assignedId  = obj["nodeId"]   | 0;  // client's self-reported nodeId (0 on first registration)
-            bool ok = multiNode->handleRegister(pilotName, pilotCallsign,
+            bool ok = multiNode->handleRegister(pilotName,
                                                  pilotColor, staIP, clientIP,
                                                  macAddress, assignedId);
 
@@ -1956,7 +1953,7 @@ EEPROM:\n\
                 return;
             }
             DynamicJsonDocument patch(64);
-            patch["pilotName"] = pilotName;
+            patch["name"] = pilotName;
             conf->fromJson(patch.as<JsonObject>());
             conf->write();
             request->send(200, "application/json", "{\"status\":\"OK\"}");
@@ -1973,7 +1970,7 @@ EEPROM:\n\
             }
             JsonObject obj = json.as<JsonObject>();
             DynamicJsonDocument patch(128);
-            if (obj.containsKey("pilotName"))  patch["pilotName"]  = obj["pilotName"].as<String>();
+            if (obj.containsKey("pilotName"))  patch["name"]  = obj["pilotName"].as<String>();
             if (obj.containsKey("pilotColor")) patch["pilotColor"] = obj["pilotColor"].as<uint32_t>();
             conf->fromJson(patch.as<JsonObject>());
             conf->write();

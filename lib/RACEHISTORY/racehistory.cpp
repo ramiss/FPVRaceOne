@@ -62,7 +62,6 @@ bool RaceHistory::saveRace(const RaceSession& race) {
     raceObj["name"] = race.name;
     raceObj["tag"] = race.tag;
     raceObj["pilotName"] = race.pilotName;
-    raceObj["pilotCallsign"] = race.pilotCallsign;
     raceObj["frequency"] = race.frequency;
     raceObj["band"] = race.band;
     raceObj["channel"] = race.channel;
@@ -145,8 +144,7 @@ bool RaceHistory::loadRaces() {
         race.best3LapsTotal = doc["best3LapsTotal"];
         race.name = doc["name"] | "";
         race.tag = doc["tag"] | "";
-        race.pilotName = doc["pilotName"] | "";
-        race.pilotCallsign = doc["pilotCallsign"] | "";
+        { String pn = doc["pilotName"] | ""; race.pilotName = pn.length() ? pn : (doc["pilotCallsign"] | ""); }
         race.frequency = doc["frequency"] | 0;
         race.band = doc["band"] | "";
         race.channel = doc["channel"] | 0;
@@ -262,7 +260,6 @@ bool RaceHistory::updateRace(uint32_t timestamp, const String& name, const Strin
     raceObj["name"] = targetRace->name;
     raceObj["tag"] = targetRace->tag;
     raceObj["pilotName"] = targetRace->pilotName;
-    raceObj["pilotCallsign"] = targetRace->pilotCallsign;
     raceObj["frequency"] = targetRace->frequency;
     raceObj["band"] = targetRace->band;
     raceObj["channel"] = targetRace->channel;
@@ -360,7 +357,6 @@ bool RaceHistory::updateLaps(uint32_t timestamp, const std::vector<uint32_t>& ne
     raceObj["name"] = targetRace->name;
     raceObj["tag"] = targetRace->tag;
     raceObj["pilotName"] = targetRace->pilotName;
-    raceObj["pilotCallsign"] = targetRace->pilotCallsign;
     raceObj["frequency"] = targetRace->frequency;
     raceObj["band"] = targetRace->band;
     raceObj["channel"] = targetRace->channel;
@@ -421,7 +417,6 @@ String RaceHistory::toJsonString() {
         raceObj["name"] = race.name;
         raceObj["tag"] = race.tag;
         raceObj["pilotName"] = race.pilotName;
-        raceObj["pilotCallsign"] = race.pilotCallsign;
         raceObj["frequency"] = race.frequency;
         raceObj["band"] = race.band;
         raceObj["channel"] = race.channel;
@@ -468,8 +463,7 @@ bool RaceHistory::fromJsonString(const String& json) {
             race.best3LapsTotal = raceObj["best3LapsTotal"] | 0;
             race.name = (const char*)(raceObj["name"] | "");
             race.tag = (const char*)(raceObj["tag"] | "");
-            race.pilotName = (const char*)(raceObj["pilotName"] | "");
-            race.pilotCallsign = (const char*)(raceObj["pilotCallsign"] | "");
+            { const char* pn = raceObj["pilotName"] | ""; race.pilotName = strlen(pn) ? pn : (const char*)(raceObj["pilotCallsign"] | ""); }
             race.frequency = raceObj["frequency"] | 0;
             race.band = (const char*)(raceObj["band"] | "");
             race.channel = raceObj["channel"] | 0;
@@ -498,8 +492,7 @@ bool RaceHistory::fromJsonString(const String& json) {
         race.best3LapsTotal = raceObj["best3LapsTotal"];
         race.name = raceObj["name"] | "";
         race.tag = raceObj["tag"] | "";
-        race.pilotName = raceObj["pilotName"] | "";
-        race.pilotCallsign = raceObj["pilotCallsign"] | "";
+        { const char* pn = raceObj["pilotName"] | ""; race.pilotName = strlen(pn) ? pn : (const char*)(raceObj["pilotCallsign"] | ""); }
         race.frequency = raceObj["frequency"] | 0;
         race.band = raceObj["band"] | "";
         race.channel = raceObj["channel"] | 0;

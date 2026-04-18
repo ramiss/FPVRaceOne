@@ -21,7 +21,6 @@ struct MultiNodeLap {
 struct NodeInfo {
     uint8_t  nodeId;
     String   pilotName;
-    String   pilotCallsign;
     uint32_t pilotColor;
     String   clientIP;   // client's own AP IP (master uses this to push commands)
     String   staIP;      // client's STA IP assigned by master's DHCP
@@ -50,7 +49,7 @@ public:
     void queueRaceStop();
 
     // ── Master-side handlers (called from AsyncWebServer request threads) ──
-    bool   handleRegister(const String& pilotName, const String& pilotCallsign,
+    bool   handleRegister(const String& pilotName,
                           uint32_t pilotColor,
                           const String& staIP, const String& clientIP,
                           const String& macAddress,

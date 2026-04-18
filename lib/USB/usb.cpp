@@ -189,8 +189,7 @@ void USBTransport::processCommand(const char* cmdLine) {
             race.fastestLap = data["fastestLap"];
             race.medianLap = data["medianLap"];
             race.best3LapsTotal = data["best3LapsTotal"];
-            race.pilotName = data["pilotName"] | "";
-            race.pilotCallsign = data["pilotCallsign"] | "";
+            { const char* pn = data["pilotName"] | ""; race.pilotName = strlen(pn) ? pn : (const char*)(data["pilotCallsign"] | ""); }
             race.frequency = data["frequency"] | 0;
             race.band = data["band"] | "";
             race.channel = data["channel"] | 0;

@@ -1803,8 +1803,12 @@ footer {
     padding: 12px 8px;
   }
   
-  #timer, .mn-race-timer-display {
+  #timer {
     font-size: 32px;
+    margin: 12px 0;
+  }
+  .mn-race-timer-display {
+    font-size: 38px;
     margin: 12px 0;
   }
   
@@ -1901,8 +1905,11 @@ footer {
     min-width: 70px;
   }
   
-  #timer, .mn-race-timer-display {
+  #timer {
     font-size: 28px;
+  }
+  .mn-race-timer-display {
+    font-size: 34px;
   }
   
   table {
@@ -2086,7 +2093,7 @@ footer {
 
 /* ── Master race timer display ──────────────────────────────── */
 .mn-race-timer-display {
-  font-size: 24px;
+  font-size: 32px;
   font-weight: bold;
   display: block;
   text-align: center;

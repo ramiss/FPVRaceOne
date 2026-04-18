@@ -115,7 +115,6 @@ bool MultiNodeManager::isMasterMode() const {
 void MultiNodeManager::_sendRegistration() {
     DynamicJsonDocument doc(256);
     doc["pilotName"]     = _conf->getPilotName()     ? _conf->getPilotName()     : "";
-    doc["pilotCallsign"] = _conf->getPilotCallsign() ? _conf->getPilotCallsign() : "";
     doc["pilotColor"]    = _conf->getPilotColor();
     doc["clientIP"]      = MULTINODE_CLIENT_AP_IP;
     doc["nodeId"]        = _myNodeId;  // 0 on first registration
@@ -223,7 +222,7 @@ bool MultiNodeManager::_postToMasterWithResponse(const String& endpoint, const S
 //  Master-side handlers (called from AsyncWebServer request threads)
 // ──────────────────────────────────────────────────────────────────────
 
-bool MultiNodeManager::handleRegister(const String& pilotName, const String& pilotCallsign,
+bool MultiNodeManager::handleRegister(const String& pilotName,
                                        uint32_t pilotColor,
                                        const String& staIP, const String& clientIP,
                                        const String& macAddress,
@@ -236,7 +235,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName, const String& pil
         bool ipMatch   = n.staIP.length() > 0 && n.staIP == staIP;
         if (macMatch || idMatch || ipMatch) {
             n.pilotName     = pilotName;
-            n.pilotCallsign = pilotCallsign;
             n.pilotColor    = pilotColor;
             n.clientIP      = clientIP;
             n.staIP         = staIP;
@@ -268,7 +266,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName, const String& pil
     NodeInfo n;
     n.nodeId        = newId;
     n.pilotName     = pilotName;
-    n.pilotCallsign = pilotCallsign;
     n.pilotColor    = pilotColor;
     n.staIP         = staIP;
     n.clientIP      = clientIP;
@@ -377,7 +374,6 @@ String MultiNodeManager::getNodesToJson() const {
         JsonObject o        = arr.createNestedObject();
         o["nodeId"]         = n.nodeId;
         o["pilotName"]      = n.pilotName;
-        o["pilotCallsign"]  = n.pilotCallsign;
         o["pilotColor"]     = n.pilotColor;
         o["online"]         = n.online;
         o["running"]        = n.running;

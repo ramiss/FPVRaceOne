@@ -101,7 +101,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 15
+#define CONFIG_VERSION 16
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -137,8 +137,6 @@ typedef struct {
     uint8_t webhookRaceStop;   // Send /RaceStop webhook (0=disabled, 1=enabled)
     uint8_t webhookLap;        // Send /Lap webhook (0=disabled, 1=enabled)
     char pilotName[21];
-    char pilotCallsign[21];    // Pilot callsign (for announcements)
-    char pilotPhonetic[21];    // Phonetic pronunciation
     uint32_t pilotColor;       // Pilot color (0xRRGGBB)
     char theme[21];            // UI theme name
     char selectedVoice[21];    // Voice selection (default, rachel, piper, etc)
@@ -205,8 +203,6 @@ class Config {
     char* getSsid();
     char* getPassword();
     uint8_t getOperationMode();
-    char* getPilotCallsign();
-    char* getPilotPhonetic();
     uint32_t getPilotColor();
     char* getTheme();
     char* getSelectedVoice();

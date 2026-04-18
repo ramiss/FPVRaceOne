@@ -32,8 +32,6 @@ void Config::load(void) {
 
     // Ensure all char arrays are null-terminated regardless of EEPROM content
     conf.pilotName[sizeof(conf.pilotName)-1]         = '\0';
-    conf.pilotCallsign[sizeof(conf.pilotCallsign)-1] = '\0';
-    conf.pilotPhonetic[sizeof(conf.pilotPhonetic)-1] = '\0';
     conf.theme[sizeof(conf.theme)-1]                 = '\0';
     conf.selectedVoice[sizeof(conf.selectedVoice)-1] = '\0';
     conf.lapFormat[sizeof(conf.lapFormat)-1]         = '\0';
@@ -141,8 +139,6 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["webhookRaceStop"] = conf.webhookRaceStop;
     config["webhookLap"] = conf.webhookLap;
     config["name"] = conf.pilotName;
-    config["pilotCallsign"] = conf.pilotCallsign;
-    config["pilotPhonetic"] = conf.pilotPhonetic;
     config["pilotColor"] = conf.pilotColor;
     config["theme"] = conf.theme;
     config["selectedVoice"] = conf.selectedVoice;
@@ -202,8 +198,6 @@ void Config::toJsonString(char* buf) {
     config["tracksEnabled"] = conf.tracksEnabled;
     config["selectedTrackId"] = conf.selectedTrackId;
     config["name"] = conf.pilotName;
-    config["pilotCallsign"] = conf.pilotCallsign;
-    config["pilotPhonetic"] = conf.pilotPhonetic;
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
     config["filterMode"] = conf.filterMode;
@@ -394,8 +388,6 @@ void Config::fromJson(JsonObject source) {
 
     // ===== Pilot/UI strings =====
     setStr("name",          conf.pilotName,     sizeof(conf.pilotName));
-    if (source.containsKey("pilotCallsign")) setStr("pilotCallsign", conf.pilotCallsign, sizeof(conf.pilotCallsign));
-    if (source.containsKey("pilotPhonetic")) setStr("pilotPhonetic", conf.pilotPhonetic, sizeof(conf.pilotPhonetic));
 
     if (source.containsKey("pilotColor")) {
         uint32_t c = source["pilotColor"].as<uint32_t>();
@@ -584,14 +576,6 @@ void Config::fromJson(JsonObject source) {
             modified = true;
         }
     }
-    if (source.containsKey("pilotCallsign") && source["pilotCallsign"] != conf.pilotCallsign) {
-        strlcpy(conf.pilotCallsign, source["pilotCallsign"] | "", sizeof(conf.pilotCallsign));
-        modified = true;
-    }
-    if (source.containsKey("pilotPhonetic") && source["pilotPhonetic"] != conf.pilotPhonetic) {
-        strlcpy(conf.pilotPhonetic, source["pilotPhonetic"] | "", sizeof(conf.pilotPhonetic));
-        modified = true;
-    }
     if (source.containsKey("pilotColor") && source["pilotColor"] != conf.pilotColor) {
         conf.pilotColor = source["pilotColor"];
         modified = true;
@@ -743,14 +727,6 @@ uint8_t Config::getWebhookRaceStop() {
 
 uint8_t Config::getWebhookLap() {
     return conf.webhookLap;
-}
-
-char* Config::getPilotCallsign() {
-    return conf.pilotCallsign;
-}
-
-char* Config::getPilotPhonetic() {
-    return conf.pilotPhonetic;
 }
 
 uint32_t Config::getPilotColor() {
@@ -1068,9 +1044,7 @@ void Config::setDefaults(void) {
     conf.webhookRaceStart = 1;  // Race start enabled by default
     conf.webhookRaceStop = 1;  // Race stop enabled by default
     conf.webhookLap = 1;  // Lap enabled by default
-    strlcpy(conf.pilotName, "Louis", sizeof(conf.pilotName));  // Default pilot name
-    strlcpy(conf.pilotCallsign, "Louis", sizeof(conf.pilotCallsign));  // Default callsign
-    strlcpy(conf.pilotPhonetic, "Louie", sizeof(conf.pilotPhonetic));  // Default phonetic
+    strlcpy(conf.pilotName, "Pilot", sizeof(conf.pilotName));  // Default pilot name
     conf.pilotColor = 0x0080FF;  // Default blue color
     strlcpy(conf.theme, "oceanic", sizeof(conf.theme));  // Default theme
     strlcpy(conf.selectedVoice, "piper", sizeof(conf.selectedVoice));  // Default voice
