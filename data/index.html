@@ -861,20 +861,19 @@
                          placeholder="e.g. FPVRaceOne_AB12CD"
                          oninput="autoSaveConfig()" />
                 </div>
-                <div class="config-item">
-                  <label for="mnSkipMasterStartToggle">Ignore Race Director Start if already racing: </label>
-                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="autoSaveConfig()" />
-                </div>
                 <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                  SSID of the Master device (if known). Leave blank to query available FPVRaceOne devices.
+                  Enter Master SSID if known or click Scan below.
                 </div>
                 <div class="config-item" style="margin-top: 12px;">
                   <label>Scan for Masters:</label>
-                  <button onclick="mnScanNetworks()" style="padding: 6px 14px; background-color: var(--secondary-color);">Scan</button>
+                  <button onclick="mnScanNetworks()" style="padding: 6px 14px;">Scan</button>
                 </div>
                 <div id="mnScanResults" style="margin-left: 170px; margin-top: 4px; font-size: 13px;"></div>
               </div>
-
+              <div class="config-item">
+                  <label for="mnSkipMasterStartToggle">Ignore Race Director Start if already racing: </label>
+                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="autoSaveConfig()" />
+                </div>
               <div style="margin-top: 20px;">
                 <button onclick="applyMultiNodeSettings()" style="background-color: var(--primary-color); color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Apply Multi-Node &amp; Reboot</button>
               </div>

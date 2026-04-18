@@ -464,11 +464,16 @@ main {
 
 .config-item {
   display: flex;
+  align-items: center;
 }
 
 .config-item > label:not(.switch) {
   min-width: 170px;
+  max-width: 170px;
   font-weight: bold;
+  white-space: normal;
+  line-height: 1.35;
+  padding-right: 12px;
 }
 
 .config-item input[type="text"],
@@ -1650,13 +1655,13 @@ footer {
   }
 
   .config-item {
-      flex-direction: column;
-      align-items: stretch;
+      flex-direction: row;
+      align-items: center;
   }
 
   .config-item label {
       flex: 0 0 auto;
-      margin-bottom: 8px;
+      margin-bottom: 0;
   }
 
   .input-with-value {
@@ -1763,13 +1768,14 @@ footer {
   }
   
   .config-item {
-    flex-direction: column;
-    gap: 8px;
+    flex-direction: row;
+    align-items: center;
+    gap: 0;
   }
-  
+
   .config-item > label:not(.switch) {
-    min-width: unset;
-    width: 100%;
+    min-width: 170px;
+    max-width: 170px;
   }
   
   .config-item input[type="text"],

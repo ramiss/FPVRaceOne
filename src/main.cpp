@@ -1,5 +1,8 @@
 #include "debug.h"
 #include "led.h"
+#if RSSI_LOGGING_ENABLED
+#include "rssilog.h"
+#endif
 #include "multinode.h"
 #include "webserver.h"
 #include "racehistory.h"
@@ -65,6 +68,9 @@ RgbLed* g_rgbLed = &rgbLed;
 void* g_rgbLed = nullptr;
 #endif
 static LapTimer timer;
+#if RSSI_LOGGING_ENABLED
+static RssiLogger rssiLogger;
+#endif
 // Battery monitoring removed - legacy feature no longer used
 // static BatteryMonitor monitor;
 
@@ -192,6 +198,9 @@ void setup() {
     rgbLed.setPreset((led_preset_e)config.getLedPreset());
 #endif
     timer.init(&config, &rx, &buzzer, &led, &webhookManager);
+#if RSSI_LOGGING_ENABLED
+    rssiLogger.init();
+#endif
     // Battery monitoring removed
     // monitor.init(PIN_VBAT, VBAT_SCALE, VBAT_ADD, &buzzer, &led);
     
@@ -295,6 +304,9 @@ void loop() {
     
     // Timing always runs
     timer.handleLapTimerUpdate(currentTimeMs);
+#if RSSI_LOGGING_ENABLED
+    rssiLogger.log(timer.snapshot);
+#endif
     
     // Broadcast lap events to all transports (WiFi + USB)
     if (timer.isLapAvailable()) {

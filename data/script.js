@@ -1977,6 +1977,9 @@ function attachConfigStagingListeners() {
   wire('ssid', 'input');
   wire('pwd', 'input');
 
+  // Multi-node
+  wire('masterSSIDInput', 'input');
+
   // NOTE:
   // Your minLap/alarm/maxLaps/announcerRate/etc already call autoSaveConfig()
   // inside their updateX() functions, so they are covered.
@@ -6313,6 +6316,7 @@ function openSettingsModal() {
         const masterSSIDInput = document.getElementById('masterSSIDInput');
         if (masterSSIDInput && config.masterSSID !== undefined) {
           masterSSIDInput.value = config.masterSSID;
+          if (config.masterSSID) _savedMasterSSID = config.masterSSID;
           if (mnNodeMode === 2) { mnStatusSSID = config.masterSSID; mnUpdateRaceStatusBar(); }
         }
         const mnSkipToggle = document.getElementById('mnSkipMasterStartToggle');
@@ -6364,6 +6368,8 @@ let mnDevMode             = false; // dev mode: click pilot name to simulate a l
 let mnStatusSSID          = '';    // SSID string for the race status bar
 
 /** Show/hide client-specific fields in the Multi-Node settings section */
+let _savedMasterSSID = '';
+
 function onNodeModeChange() {
   const sel = document.getElementById('nodeModeSelect');
   if (!sel) return;
@@ -6371,8 +6377,17 @@ function onNodeModeChange() {
   const clientFields  = document.getElementById('mn-client-fields');
   const masterInfo    = document.getElementById('mn-master-info');
   const warningText   = document.getElementById('mn-ip-warning-text');
+  const ssidInput     = document.getElementById('masterSSIDInput');
 
-  if (clientFields) clientFields.style.display = (mode === 2) ? '' : 'none';
+  if (mode === 2) {
+    // Switching TO client — restore any previously entered SSID
+    if (clientFields) clientFields.style.display = '';
+    if (ssidInput && _savedMasterSSID) ssidInput.value = _savedMasterSSID;
+  } else {
+    // Switching AWAY from client — save the current SSID value before hiding
+    if (ssidInput && ssidInput.value.trim()) _savedMasterSSID = ssidInput.value.trim();
+    if (clientFields) clientFields.style.display = 'none';
+  }
 
   // Show IP-change warning when selected mode has a different IP than the live firmware mode
   const deviceIsMaster   = (mnNodeMode === 1);

@@ -6,6 +6,9 @@
 #include "config.h"
 #include "kalman.h"
 #include "led.h"
+#if RSSI_LOGGING_ENABLED
+#include "rssilog.h"   // for RssiSnapshot — logger is wired in main.cpp only
+#endif
 
 // Forward declarations to avoid circular dependency
 struct Track;
@@ -29,6 +32,11 @@ class LapTimer {
     void stop();
     bool isRunning() const;
     void handleLapTimerUpdate(uint32_t currentTimeMs);
+
+#if RSSI_LOGGING_ENABLED
+    // Updated every handleLapTimerUpdate() call; read by main.cpp for RSSI logging
+    RssiSnapshot snapshot = {};
+#endif
     uint8_t getRssi();
     uint32_t getLapTime();
     bool isLapAvailable();

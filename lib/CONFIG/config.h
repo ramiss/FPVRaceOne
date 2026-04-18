@@ -8,6 +8,17 @@
 // Firmware version (update for each release)
 #define FIRMWARE_VERSION "1.0.0"
 
+// RSSI Logging for Dev only. Set to 0 for production
+// Set to 1 to enable dedicated RSSI logging SD card (see lib/RSSILOG/)
+// Set to 0 to compile it out entirely
+// VCC           →   3.3 V
+// GND           →   GND
+// CS            →   GPIO 15
+// SCK           →   GPIO 14
+// MOSI          →   GPIO 13
+// MISO          →   GPIO 25   ← must be 25, NOT 12 (GPIO12 is a boot-strapping pin)
+#define RSSI_LOGGING_ENABLED 0
+
 //ESP23-C3
 #if defined(ESP32C3)
 

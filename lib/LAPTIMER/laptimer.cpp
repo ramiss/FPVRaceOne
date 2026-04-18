@@ -191,6 +191,10 @@ static inline uint8_t besselStep(float bv[3], float b0, float a1, float a2, uint
 }
 
 void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
+#if RSSI_LOGGING_ENABLED
+    snapshot.lapEvent = false;
+#endif
+
     // --- Stage 1: raw RSSI ---
     uint8_t rawRssi = rx->readRssi();
 
@@ -271,6 +275,23 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
 
     // Store final value used by lap logic
     rssi[rssiCount] = out;
+
+#if RSSI_LOGGING_ENABLED
+    snapshot.timeMs           = currentTimeMs;
+    snapshot.raw              = rawRssi;
+    snapshot.kalman           = lastKalmanRssi;
+    snapshot.ma               = lastAvgRssi;
+    snapshot.out              = out;
+    snapshot.enterThresh      = conf->getEnterRssi();
+    snapshot.exitThresh       = conf->getExitRssi();
+    snapshot.peak             = rssiPeak;
+    snapshot.timerState       = (uint8_t)state;
+    snapshot.enteredGate      = enteredGate;
+    snapshot.gateExited       = gateExited;
+    snapshot.enterHoldSamples = enterHoldSamples;
+    snapshot.filterMode       = conf->getFilterMode();
+    // snapshot.lapEvent is set in finishLap(); lapTimeMs and lapCount updated there
+#endif
 
 #if LAPTIMER_RACE_DEBUG
     if (state == RUNNING) {
@@ -471,6 +492,12 @@ void LapTimer::finishLap() {
         lapTimes[lapCount] = rssiPeakTimeMs - startTimeMs;
     }
     DEBUG("Lap finished, lap time = %u\n", lapTimes[lapCount]);
+
+#if RSSI_LOGGING_ENABLED
+    snapshot.lapEvent  = true;
+    snapshot.lapTimeMs = lapTimes[lapCount];
+    snapshot.lapCount  = lapCount;
+#endif
 
     if (selectedTrack && selectedTrack->distance > 0) {
         totalDistanceTravelled += selectedTrack->distance;
