@@ -243,7 +243,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName, const String& pil
             if (macAddress.length() > 0) n.macAddress = macAddress;
             n.lastSeen      = millis();
             n.online        = true;
-            n.quitEarly     = false;  // clear DNF on re-registration
             assignedNodeId  = n.nodeId;
             DEBUG("[MULTINODE] Re-registered node %u (%s): %s\n", n.nodeId, macAddress.c_str(), pilotName.c_str());
             return true;
@@ -359,6 +358,18 @@ bool MultiNodeManager::removeNode(uint8_t nodeId) {
     return false;
 }
 
+bool MultiNodeManager::updateNodePilot(uint8_t nodeId, const String& name, uint32_t color) {
+    for (auto& n : _nodes) {
+        if (n.nodeId == nodeId) {
+            n.pilotName  = name;
+            n.pilotColor = color;
+            DEBUG("[MULTINODE] Node %u pilot updated locally: %s\n", nodeId, name.c_str());
+            return true;
+        }
+    }
+    return false;
+}
+
 String MultiNodeManager::getNodesToJson() const {
     DynamicJsonDocument doc(8192);  // enlarged for full lap history
     JsonArray arr = doc.createNestedArray("nodes");
@@ -389,14 +400,14 @@ String MultiNodeManager::getNodesToJson() const {
 
 void MultiNodeManager::_broadcastRaceStart() {
     for (const auto& n : _nodes) {
-        if (!n.online || n.clientIP.isEmpty()) continue;
+        if (!n.online || n.staIP.isEmpty()) continue;
         HTTPClient http;
-        String url = "http://" + n.clientIP + "/timer/masterStart";
+        String url = "http://" + n.staIP + "/timer/masterStart";
         if (http.begin(url)) {
             http.setTimeout(500);
             int code = http.POST("");
             http.end();
-            DEBUG("[MULTINODE] Race start → node %u: HTTP %d\n", n.nodeId, code);
+            DEBUG("[MULTINODE] Race start → node %u (%s): HTTP %d\n", n.nodeId, n.staIP.c_str(), code);
         }
         vTaskDelay(1);  // yield between nodes so async_tcp stays fed
     }
@@ -404,14 +415,14 @@ void MultiNodeManager::_broadcastRaceStart() {
 
 void MultiNodeManager::_broadcastRaceStop() {
     for (const auto& n : _nodes) {
-        if (!n.online || n.clientIP.isEmpty()) continue;
+        if (!n.online || n.staIP.isEmpty()) continue;
         HTTPClient http;
-        String url = "http://" + n.clientIP + "/timer/masterStop";
+        String url = "http://" + n.staIP + "/timer/masterStop";
         if (http.begin(url)) {
             http.setTimeout(500);
             int code = http.POST("");
             http.end();
-            DEBUG("[MULTINODE] Race stop → node %u: HTTP %d\n", n.nodeId, code);
+            DEBUG("[MULTINODE] Race stop → node %u (%s): HTTP %d\n", n.nodeId, n.staIP.c_str(), code);
         }
         vTaskDelay(1);
     }

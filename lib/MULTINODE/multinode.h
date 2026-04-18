@@ -59,6 +59,7 @@ public:
     bool   handleHeartbeat(uint8_t nodeId, bool running, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
     bool   removeNode(uint8_t nodeId);     // master: manually remove a node slot
+    bool   updateNodePilot(uint8_t nodeId, const String& name, uint32_t color); // master: update local display immediately after edit
     void   clearAllLaps();                 // master: wipe all stored laps for all nodes
 
     // ── Client-side state setters (called from webserver handlers) ──

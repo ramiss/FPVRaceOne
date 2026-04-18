@@ -399,12 +399,15 @@ function setupWiFiEvents() {
       const data     = JSON.parse(e.data);
       const node     = mnCurrentNodes.find(n => n.nodeId === data.node);
       const callsign = node ? (node.pilotCallsign || node.pilotName || ('Node ' + data.node)) : ('Node ' + data.node);
-      const lapStr   = formatMsRace(data.ms);
       // Refresh immediately so the new lap appears without waiting for the next poll
       mnRefreshNodes();
       // Announce the lap using the existing announcer
       if (typeof queueSpeak === 'function') {
-        queueSpeak(`<p>${callsign} Lap ${data.lap}, ${lapStr}</p>`);
+        if (data.lap === 1) {
+          queueSpeak(`<p>${callsign} entered gate 1</p>`);
+        } else {
+          queueSpeak(`<p>${callsign} Lap ${data.lap}, ${formatMsSpeak(data.ms)}</p>`);
+        }
       }
     } catch (_) {}
   }, false);
@@ -727,12 +730,12 @@ onload = async function (e) {
       updateAnnouncerRate(announcerRateInput, announcerRateInput.value);
     }
 
-    if (configData.enterRssi !== undefined) {
+    if (configData.enterRssi !== undefined && enterRssiInput) {
       enterRssiInput.value = configData.enterRssi;
       updateEnterRssi(enterRssiInput, enterRssiInput.value);
     }
 
-    if (configData.exitRssi !== undefined) {
+    if (configData.exitRssi !== undefined && exitRssiInput) {
       exitRssiInput.value = configData.exitRssi;
       updateExitRssi(exitRssiInput, exitRssiInput.value);
     }
@@ -1677,7 +1680,7 @@ function updateExitRssi(obj, value) {
 
   if (exitRssi >= enterRssi) {
     enterRssi = Math.min(255, exitRssi + 1);
-    enterRssiInput.value = enterRssi;
+    if (enterRssiInput) enterRssiInput.value = enterRssi;
     enterRssiSpan.textContent = enterRssi;
   }
 
@@ -2110,7 +2113,10 @@ async function loadFirmwareVersion() {
     if (data && data.firmwareVersion) {
       const v = data.firmwareVersion;
       const footer = document.getElementById('firmwareVersion');
-      if (footer) footer.textContent = `FPVRaceOne Personal Lap Timer v${v}`;
+      if (footer) {
+        const built = footer.textContent.match(/Boot ID:\s+\S+/);
+        footer.textContent = `FPVRaceOne Personal Lap Timer v${v}` + (built ? `  \u2022  ${built[0]}` : '');
+      }
       const badge = document.getElementById('updateVersionDisplay');
       if (badge) badge.textContent = `v${v}`;
     }
@@ -2324,44 +2330,45 @@ function addLap(lapStr) {
   // Highlight fastest lap
   highlightFastestLap();
 
+  const lapSpeak = formatMsSpeak(Math.round(parseFloat(lapStr) * 1000));
   switch (announcerSelect.options[announcerSelect.selectedIndex].value) {
     case "beep":
       beep(100, 330, "square");
       break;
     case "1lap":
       if (lapNo == 0) {
-        queueSpeak(`<p>Gate 1 ${lapStr}<p>`);
+        queueSpeak(`<p>entered gate 1</p>`);
       } else {
         let text;
         switch (lapFormat) {
           case 'full':
-            text = `<p>${pilotName} Lap ${lapNo}, ${lapStr}</p>`;
+            text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
             break;
           case 'laptime':
-            text = `<p>Lap ${lapNo}, ${lapStr}</p>`;
+            text = `<p>Lap ${lapNo}, ${lapSpeak}</p>`;
             break;
           case 'timeonly':
-            text = `<p>${lapStr}</p>`;
+            text = `<p>${lapSpeak}</p>`;
             break;
           default:
-            text = `<p>${pilotName} Lap ${lapNo}, ${lapStr}</p>`;
+            text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
         }
         queueSpeak(text);
       }
       break;
     case "2lap":
       if (lapNo == 0) {
-        queueSpeak(`<p>Gate 1 ${lapStr}<p>`);
+        queueSpeak(`<p>entered gate 1</p>`);
       } else if (last2lapStr != "") {
-        const text2 = "<p>" + pilotName + " 2 laps " + last2lapStr + "</p>";
+        const text2 = "<p>" + pilotName + " 2 laps " + formatMsSpeak(Math.round(parseFloat(last2lapStr) * 1000)) + "</p>";
         queueSpeak(text2);
       }
       break;
     case "3lap":
       if (lapNo == 0) {
-        queueSpeak(`<p>Gate 1 ${lapStr}<p>`);
+        queueSpeak(`<p>entered gate 1</p>`);
       } else if (last3lapStr != "") {
-        const text3 = "<p>" + pilotName + " 3 laps " + last3lapStr + "</p>";
+        const text3 = "<p>" + pilotName + " 3 laps " + formatMsSpeak(Math.round(parseFloat(last3lapStr) * 1000)) + "</p>";
         queueSpeak(text3);
       }
       break;
@@ -2387,28 +2394,15 @@ function addLap(lapStr) {
 }
 
 function startTimer() {
-  var millis = 0;
-  var seconds = 0;
-  var minutes = 0;
+  const _timerStart = Date.now();
   timerInterval = setInterval(function () {
-    millis += 1;
-
-    if (millis == 100) {
-      millis = 0;
-      seconds++;
-
-      if (seconds == 60) {
-        seconds = 0;
-        minutes++;
-
-        if (minutes == 60) {
-          minutes = 0;
-        }
-      }
-    }
+    const elapsed = Date.now() - _timerStart;
+    const minutes = Math.floor(elapsed / 60000);
+    const seconds = Math.floor((elapsed % 60000) / 1000);
+    const millis  = Math.floor((elapsed % 1000) / 10);
     let m = minutes < 10 ? "0" + minutes : minutes;
     let s = seconds < 10 ? "0" + seconds : seconds;
-    let ms = millis < 10 ? "0" + millis : millis;
+    let ms = millis  < 10 ? "0" + millis  : millis;
     timer.innerHTML = `${m}:${s}:${ms}s`;
   }, 10);
 
@@ -2446,12 +2440,12 @@ function startRaceDisplayOnly() {
   addLapButton.disabled = false;
 
   clearInterval(timerInterval);
-  var millis = 0, seconds = 0, minutes = 0;
+  const _timerStart = Date.now();
   timerInterval = setInterval(function () {
-    millis++;
-    if (millis === 100) { millis = 0; seconds++; }
-    if (seconds === 60)  { seconds = 0; minutes++; }
-    if (minutes === 60)  { minutes = 0; }
+    const elapsed = Date.now() - _timerStart;
+    const minutes = Math.floor(elapsed / 60000);
+    const seconds = Math.floor((elapsed % 60000) / 1000);
+    const millis  = Math.floor((elapsed % 1000) / 10);
     const m  = minutes < 10 ? '0' + minutes : minutes;
     const s  = seconds < 10 ? '0' + seconds : seconds;
     const ms = millis   < 10 ? '0' + millis  : millis;
@@ -2971,15 +2965,9 @@ function stopRace() {
   startRaceButton.disabled = false;
   addLapButton.disabled = true;
 
-  // If this was a master-initiated race, notify master that pilot quit early
-  if (mnMasterRaceActive && mnMyNodeId > 0) {
-    mnMasterRaceActive = false;
-    fetch('/api/multinode/quit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodeId: mnMyNodeId })
-    }).catch(() => {});
-  }
+  // Quit notification is handled server-side: /timer/stop sets _quitPending,
+  // which process() forwards to the master. No JS call needed here.
+  if (mnMasterRaceActive) mnMasterRaceActive = false;
 
   // Stop distance polling
   stopDistancePolling();
@@ -5162,10 +5150,8 @@ function calculateThresholds() {
 
 function applyCalculatedThresholds() {
   // Apply to sliders
-  enterRssiInput.value = wizardState.calculatedEnter;
-  exitRssiInput.value = wizardState.calculatedExit;
-  updateEnterRssi(enterRssiInput, wizardState.calculatedEnter);
-  updateExitRssi(exitRssiInput, wizardState.calculatedExit);
+  if (enterRssiInput) { enterRssiInput.value = wizardState.calculatedEnter; updateEnterRssi(enterRssiInput, wizardState.calculatedEnter); }
+  if (exitRssiInput)  { exitRssiInput.value  = wizardState.calculatedExit;  updateExitRssi(exitRssiInput,  wizardState.calculatedExit);  }
   
   // Save to backend
   saveConfig();
@@ -6161,11 +6147,11 @@ function openSettingsModal() {
           announcerRateInput.value = (parseFloat(config.anRate) / 10).toFixed(1);
           updateAnnouncerRate(announcerRateInput, announcerRateInput.value);
         }
-        if (config.enterRssi !== undefined) {
+        if (config.enterRssi !== undefined && enterRssiInput) {
           enterRssiInput.value = config.enterRssi;
           updateEnterRssi(enterRssiInput, enterRssiInput.value);
         }
-        if (config.exitRssi !== undefined) {
+        if (config.exitRssi !== undefined && exitRssiInput) {
           exitRssiInput.value = config.exitRssi;
           updateExitRssi(exitRssiInput, exitRssiInput.value);
         }
@@ -6592,6 +6578,17 @@ async function mnRefreshNodes() {
   } catch (_) {}
 }
 
+// Format milliseconds as a TTS-friendly string ("3 minutes 49 point 46" or "49 point 46").
+function formatMsSpeak(ms) {
+  if (!ms || ms <= 0) return '0';
+  const m   = Math.floor(ms / 60000);
+  const s   = Math.floor((ms % 60000) / 1000);
+  const cs  = Math.floor((ms % 1000) / 10);
+  const dec = cs.toString().padStart(2, '0');
+  if (m > 0) return `${m} minute${m !== 1 ? 's' : ''} ${s} point ${dec}`;
+  return `${s} point ${dec}`;
+}
+
 // Format milliseconds as M:SS.cs (e.g. 1:23.45) for the race view.
 function formatMsRace(ms) {
   if (!ms || ms <= 0) return '—';
@@ -6610,15 +6607,15 @@ function mnUpdateRaceStatusBar() {
   if (!bar || !text) return;
   if (mnNodeMode === 1) {
     bar.style.display = '';
-    text.textContent  = `Multi-Node: Master — ${mnStatusSSID || 'FPVRaceOne'}`;
+    text.textContent  = `Multi-Node (Master) — ${mnStatusSSID || 'FPVRaceOne'}`;
   } else if (mnNodeMode === 2) {
     bar.style.display = '';
     if (!mnMasterConnected) {
-      text.textContent = `Multi-Node: Client Node — Disconnected from master ${mnStatusSSID || ''}`.trim();
+      text.textContent = `Multi-Node (Client) — Disconnected from ${mnStatusSSID || ''}`.trim();
     } else if (mnMyNodeId > 0) {
-      text.textContent = `Multi-Node: Client Node ${mnMyNodeId} — Connected to master ${mnStatusSSID || ''}`.trim();
+      text.textContent = `Multi-Node (Client) ${mnMyNodeId} — Connected to ${mnStatusSSID || ''}`.trim();
     } else {
-      text.textContent = 'Multi-Node: Client Node — Searching for master node...';
+      text.textContent = 'Multi-Node (Client) — Searching for master node...';
     }
   } else {
     bar.style.display = 'none';
@@ -6650,18 +6647,22 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
   let lapMs;
   if (mnRaceStartMs > 0) {
     const elapsedMs = Date.now() - mnRaceStartMs;
-    const pilot = nodeId === 0
-      ? _mnMasterEntry()
-      : (mnCurrentNodes || []).find(n => n.nodeId === nodeId);
-    const pilotTotalMs = pilot ? (pilot.totalMs || 0) : 0;
-    lapMs = Math.max(500, elapsedMs - pilotTotalMs);
+    if (nodeId === 0) {
+      const pilot = _mnMasterEntry();
+      const pilotTotalMs = pilot ? (pilot.totalMs || 0) : 0;
+      lapMs = Math.max(500, elapsedMs - pilotTotalMs);
+    } else {
+      const pilot = (mnCurrentNodes || []).find(n => n.nodeId === nodeId);
+      const pilotLaps = (pilot && Array.isArray(pilot.laps)) ? pilot.laps : [];
+      const pilotTotalMs = pilotLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+      lapMs = Math.max(500, elapsedMs - pilotTotalMs);
+    }
   } else {
     lapMs = Math.round((Math.random() * 65000) + 25000);  // fallback if race not started
   }
   if (nodeId === 0) {
     // Master's own timer — inject into local lapTimes and update display
     const lapSec = lapMs / 1000;
-    if (typeof lapTimes !== 'undefined') lapTimes.push(lapSec);
     if (typeof addLap === 'function') addLap(lapSec.toFixed(2));
     mnRenderRaceTab(mnCurrentNodes);
   } else {
@@ -6674,9 +6675,8 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
       setTimeout(() => mnRefreshNodes(), 200);
     } catch (e) { console.warn('[DEV] lap inject failed:', e); }
   }
-  if (typeof queueSpeak === 'function') {
-    queueSpeak(`<p>${callsign} Lap ${nextLapNumber}, ${formatMsRace(lapMs)}</p>`);
-  }
+  // For nodeId === 0, addLap() handles TTS.
+  // For nodeId !== 0, the multiNodeLap SSE listener handles TTS (avoids double-speak).
 }
 
 // Build the master's own pilot entry from local lap data so it appears in the grid.
@@ -6704,6 +6704,7 @@ function _mnMasterEntry() {
 // Always shows 8 slots: 1 master + 7 client slots (populated or empty).
 function mnRenderRaceTab(nodes) {
   mnCurrentNodes = nodes;
+
   const masterView = document.getElementById('master-race-view');
   if (!masterView || masterView.style.display === 'none') return;
 
@@ -6744,25 +6745,23 @@ function mnRenderRaceTab(nodes) {
 
   // ── Summary leaderboard table ──────────────────────────────────
   let html = '<table class="mn-leaderboard"><thead><tr>';
-  html += '<th></th><th>Pilot</th><th>Laps</th><th>Total</th><th>Avg</th><th>Fastest</th><th style="width:36px;"></th>';
+  html += '<th></th><th>Pilot</th><th>Laps</th><th>Total</th><th>Avg</th><th>Fastest</th><th style="width:44px;min-width:44px">&nbsp;</th>';
   html += '</tr></thead><tbody>';
 
   ranked.forEach((n, i) => {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
-    const callsign = n.pilotCallsign || n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
+    const callsign = (n.pilotCallsign || n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId)) + (n.isMaster ? ' [Master]' : '');
     let badge = '';
     if      (n.quitEarly)                           badge = ' <span class="mn-status-dnf">DNF</span>';
     else if (n.running && mnRaceRunning)             badge = ' <span class="mn-status-racing">Racing</span>';
     else if (n.running && !mnRaceRunning && !n.isMaster) badge = ' <span class="mn-status-solo">Solo</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
     const statusDotColor = n.online !== false ? '#4caf50' : '#f44336';
-    const actionsCell = n.isMaster ? '<td></td>' :
+    const actionsCell = n.isMaster ? '<td class="mn-lb-actions"></td>' :
       `<td class="mn-lb-actions">
-        <button class="mn-action-btn" onclick="mnToggleMenu(event,${n.nodeId},'${(n.pilotName||'').replace(/'/g,"\\'")}')" title="Node options">⋮</button>
-        <div class="mn-action-menu" id="mn-menu-${n.nodeId}">
-          <button onclick="mnEditName(${n.nodeId},'${(n.pilotName||'').replace(/'/g,"\\'")}')">Edit Name</button>
-          <button class="mn-menu-danger" onclick="mnRemoveNode(${n.nodeId},'${callsign.replace(/'/g,"\\'")}')">Remove</button>
-        </div>
+        <button class="mn-edit-btn" onclick="mnOpenPilotModal(${n.nodeId})" title="Edit pilot">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </button>
       </td>`;
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
@@ -6782,7 +6781,7 @@ function mnRenderRaceTab(nodes) {
   html += '<div class="mn-pilot-cards">';
   allSlots.forEach(n => {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
-    const callsign = n.pilotCallsign || n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
+    const callsign = (n.pilotCallsign || n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId)) + (n.isMaster ? ' [Master]' : '');
 
     if (n.empty) {
       html += `<div class="mn-pilot-card mn-pilot-card-empty">
@@ -6793,7 +6792,8 @@ function mnRenderRaceTab(nodes) {
     }
 
     const devAttr = mnDevMode ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.lapCount+1},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${mnDevMode ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    const isRacing = n.isMaster ? mnRaceRunning : n.running;
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${mnDevMode ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Solo race in progress (client running outside a master race)
     if (n.running && !mnRaceRunning && !n.isMaster) {
@@ -6822,25 +6822,68 @@ function mnRenderRaceTab(nodes) {
   container.innerHTML = html;
 }
 
-// ── Node action menu helpers ──────────────────────────────────────────────
+// ── Node pilot edit modal ─────────────────────────────────────────────────
 
-function mnToggleMenu(evt, nodeId, pilotName) {
-  evt.stopPropagation();
-  // Close all other menus first
-  document.querySelectorAll('.mn-action-menu.open').forEach(m => {
-    if (m.id !== 'mn-menu-' + nodeId) m.classList.remove('open');
-  });
-  const menu = document.getElementById('mn-menu-' + nodeId);
-  if (menu) menu.classList.toggle('open');
+let _mnModalNodeId = null;
+
+function mnOpenPilotModal(nodeId) {
+  _mnModalNodeId = nodeId;
+  const node = mnCurrentNodes.find(n => n.nodeId === nodeId);
+  const name     = node ? (node.pilotName     || '') : '';
+  const callsign = node ? (node.pilotCallsign || '') : '';
+  const colorHex = node ? '#' + ((node.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0') : '#0080ff';
+  document.getElementById('mnPilotModalTitle').textContent = 'Node ' + nodeId + (callsign ? ' \u2014 ' + callsign : '');
+  document.getElementById('mnPilotModalName').value  = name;
+  const mnColorSelect  = document.getElementById('mnPilotModalColor');
+  const mnColorPreview = document.getElementById('mnPilotModalColorPreview');
+  const colorUpper = colorHex.toUpperCase();
+  let matched = false;
+  for (const opt of mnColorSelect.options) {
+    if (opt.value.toUpperCase() === colorUpper) { opt.selected = true; matched = true; break; }
+  }
+  if (!matched) mnColorSelect.options[5].selected = true; // fallback Blue
+  mnColorPreview.style.backgroundColor = mnColorSelect.value;
+  document.getElementById('mnPilotModal').style.display = 'flex';
+  setTimeout(() => document.getElementById('mnPilotModalName').focus(), 50);
 }
 
-// Close menus on outside click
-document.addEventListener('click', () => {
-  document.querySelectorAll('.mn-action-menu.open').forEach(m => m.classList.remove('open'));
-});
+function mnClosePilotModal() {
+  document.getElementById('mnPilotModal').style.display = 'none';
+  _mnModalNodeId = null;
+}
+
+function mnClosePilotModalBackdrop(evt) {
+  if (evt.target === document.getElementById('mnPilotModal')) mnClosePilotModal();
+}
+
+async function mnSavePilotModal() {
+  if (!_mnModalNodeId) return;
+  const nodeId     = _mnModalNodeId;
+  const name       = document.getElementById('mnPilotModalName').value.trim();
+  const colorHex   = document.getElementById('mnPilotModalColor').value;
+  const pilotColor = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
+  mnClosePilotModal();
+  try {
+    const r = await fetch('/api/multinode/editPilot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeId, pilotName: name, pilotColor })
+    });
+    if (!r.ok) alert('Update failed \u2014 is the client device reachable?');
+    mnRefreshNodes();
+  } catch (e) { console.error('editPilot failed', e); alert('Update failed'); }
+}
+
+async function mnRemoveFromModal() {
+  if (!_mnModalNodeId) return;
+  const nodeId   = _mnModalNodeId;
+  const node     = mnCurrentNodes.find(n => n.nodeId === nodeId);
+  const callsign = node ? (node.pilotCallsign || node.pilotName || 'Node ' + nodeId) : 'Node ' + nodeId;
+  mnClosePilotModal();
+  await mnRemoveNode(nodeId, callsign);
+}
 
 async function mnRemoveNode(nodeId, callsign) {
-  document.querySelectorAll('.mn-action-menu.open').forEach(m => m.classList.remove('open'));
   if (!confirm(`Remove "${callsign}" from slot ${nodeId}?\n\nThe pilot can reconnect and will be assigned the next available slot.`)) return;
   try {
     await fetch('/api/multinode/removeNode', {
@@ -6852,23 +6895,9 @@ async function mnRemoveNode(nodeId, callsign) {
   } catch (e) { console.error('removeNode failed', e); }
 }
 
-async function mnEditName(nodeId, currentName) {
-  document.querySelectorAll('.mn-action-menu.open').forEach(m => m.classList.remove('open'));
-  const newName = prompt(`Edit pilot name for Node ${nodeId}:`, currentName);
-  if (!newName || newName.trim() === currentName) return;
-  try {
-    const r = await fetch('/api/multinode/editName', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodeId, pilotName: newName.trim() })
-    });
-    if (!r.ok) alert('Name update failed — is the client device reachable?');
-    mnRefreshNodes();
-  } catch (e) { console.error('editName failed', e); }
-}
-
 // Multi-Node tab: simple node status cards (race data is on the Race tab).
 function mnRenderNodes(nodes) {
+
   const container = document.getElementById('mn-nodes-container');
   if (!container) return;
 
@@ -6893,6 +6922,9 @@ function mnRenderNodes(nodes) {
         <strong>${callsign}</strong>
         <span class="mn-node-status-pill ${n.online ? 'mn-pill-online' : 'mn-pill-offline'}">${n.online ? 'Online' : 'Offline'}</span>
         <span style="margin-left:auto;font-size:12px;color:var(--secondary-color);">Node ${n.nodeId}</span>
+        <button class="mn-edit-btn" style="margin-left:6px;" onclick="mnOpenPilotModal(${n.nodeId})" title="Edit pilot">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+        </button>
       </div>
       <div class="mn-node-race-status">
         <span class="${runDotCls}"></span>
@@ -6944,8 +6976,8 @@ function _mnFormatRaceTimer(ms) {
   const totalS = Math.floor(ms / 1000);
   const m      = Math.floor(totalS / 60);
   const s      = totalS % 60;
-  const t      = Math.floor((ms % 1000) / 100);
-  return `${m}:${String(s).padStart(2, '0')}.${t}`;
+  const cs     = Math.floor((ms % 1000) / 10);
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(cs).padStart(2, '0')}s`;
 }
 
 function _mnStartTimer() {
@@ -6970,20 +7002,21 @@ async function mnStartRace() {
     await beepAudioContext.resume().catch(() => {});
   }
 
+  // Set race-running flag before the countdown so heartbeats arriving during
+  // the countdown don't trigger the "solo race in progress" label.
+  mnRaceRunning = true;
+
   // Countdown announcement — identical sequence to single-pilot startRace()
   await _raceCountdown("Arm your quads");
 
-  // Send start broadcast to all clients
-  try { await fetch('/api/multinode/race/start', { method: 'POST' }); }
-  catch (e) { console.error('[MULTINODE] Start race failed:', e); }
-
-  // Beep and start master timer
+  // Beep, start master timer, then broadcast GO to clients — all at the same moment.
   beep(1, 1, "square");
   beep(500, 880, "square");
   if (navigator.vibrate) navigator.vibrate(500);
 
-  mnRaceRunning = true;
   _mnStartTimer();
+  try { await fetch('/api/multinode/race/start', { method: 'POST' }); }
+  catch (e) { console.error('[MULTINODE] Start race failed:', e); }
   ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.classList.remove('active'); });
   ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
   mnRenderRaceTab(mnCurrentNodes);
@@ -7063,6 +7096,17 @@ document.addEventListener('DOMContentLoaded', () => {
     mnMasterConnected = data.masterConnected || false;
     if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
     if (typeof audioAnnouncer !== 'undefined') audioAnnouncer.sdAvailable = !!data.sdAvailable;
+    // Apply devMode from firmware config so race tab renders correctly on first load.
+    if (data.devMode !== undefined) {
+      mnDevMode = !!data.devMode;
+      const _dt = document.getElementById('devModeToggle');
+      const _dl = document.getElementById('devModeLabel');
+      const _pnd = document.getElementById('pilotNameDisplay');
+      if (_dt) _dt.checked = mnDevMode;
+      if (_dl) _dl.textContent = mnDevMode ? 'On' : 'Off';
+      if (_pnd) _pnd.style.cursor = mnDevMode ? 'pointer' : 'default';
+      localStorage.setItem('mnDevMode', mnDevMode ? '1' : '0');
+    }
     onRaceTabOpen();
     // Client mode: start the connection-state poll (mnInitTab is only called for master)
     if (data.nodeMode === 2) {

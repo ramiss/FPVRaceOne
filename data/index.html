@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FPVRaceOne Lap Timer</title>
     <link rel="icon" type="image/svg+xml" href="logo-white.svg" id="favicon" />
-    <link rel="stylesheet" type="text/css" href="style.css" />
+    <link rel="stylesheet" type="text/css" href="style.css?v=%BUILD_TIME%" />
     <script src="jquery-3.7.1.min.js"></script>
     <script src="audio-announcer.js"></script>
     <script src="smoothie.js"></script>
@@ -294,10 +294,47 @@
     <footer>
       <div class="footer-bar" style="display:flex; align-items:center; justify-content:center; padding: 4px 12px;">
         <span id="firmwareVersion" style="font-size: 12px; color: rgba(255,255,255,0.9);">
-          FPVRaceOne Personal Lap Timer va —
+          FPVRaceOne Personal Lap Timer v — &nbsp;&#x2022;&nbsp; Boot ID: %BUILD_TIME%
         </span>
       </div>
     </footer>
+
+    <!-- Node Pilot Edit Modal -->
+    <div id="mnPilotModal" class="modal" style="display:none;" onclick="mnClosePilotModalBackdrop(event)">
+      <div class="modal-content" style="max-width:360px;">
+        <h3>Edit Pilot — <span id="mnPilotModalTitle"></span></h3>
+        <div class="config-item" style="margin-bottom:14px;">
+          <label for="mnPilotModalName">Pilot Name</label>
+          <input type="text" id="mnPilotModalName" autocomplete="off" style="width:100%;box-sizing:border-box;">
+        </div>
+        <div class="config-item" style="margin-bottom:14px;">
+          <label for="mnPilotModalColor">Pilot Color:</label>
+          <select id="mnPilotModalColor" onchange="document.getElementById('mnPilotModalColorPreview').style.backgroundColor=this.value">
+            <option value="#FF0000">Red</option>
+            <option value="#FF6B00">Orange</option>
+            <option value="#FFD700">Gold</option>
+            <option value="#00FF00">Green</option>
+            <option value="#00FFFF">Cyan</option>
+            <option value="#0080FF" selected>Blue</option>
+            <option value="#8000FF">Purple</option>
+            <option value="#FF00FF">Magenta</option>
+            <option value="#FF1493">Pink</option>
+            <option value="#FFFFFF">White</option>
+            <option value="#808080">Gray</option>
+            <option value="#000000">Black</option>
+            <option value="#8B4513">Brown</option>
+            <option value="#00FF7F">Spring Green</option>
+            <option value="#FF69B4">Hot Pink</option>
+          </select>
+          <span id="mnPilotModalColorPreview" style="display:inline-block;width:30px;height:30px;margin-left:10px;border:2px solid var(--border-color);border-radius:4px;background-color:#0080FF;"></span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:20px;align-items:center;">
+          <button onclick="mnSavePilotModal()">Save</button>
+          <button onclick="mnClosePilotModal()" style="background:var(--border-color)!important;color:var(--text-color)!important;">Cancel</button>
+          <button onclick="mnRemoveFromModal()" title="Removes this pilot from their slot. They can rejoin and will be assigned the next available slot." style="margin-left:auto;background:#c0392b!important;color:#fff!important;">Kick From Slot</button>
+        </div>
+      </div>
+    </div>
 
     <!-- Edit Race Modal -->
     <div id="editRaceModal" class="modal" style="display: none;" onclick="closeEditModalOnBackdrop(event)">
@@ -1208,7 +1245,7 @@
         </div>
       </div>
     </div>
-    <script src="script.js"></script>
+    <script src="script.js?v=%BUILD_TIME%"></script>
   </body>
 </html>
 

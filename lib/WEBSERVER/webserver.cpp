@@ -47,6 +47,9 @@ static DNSServer dnsServer;
 static IPAddress ipAddress;
 static AsyncWebServer server(80);
 static AsyncEventSource events("/events");
+// Randomised at boot — changes on every reboot so the browser always fetches
+// fresh JS/CSS after a filesystem or firmware upload (both require a reboot).
+static String _bootToken;
 
 static const char *wifi_hostname = "FPVRaceOne";
 static const char *wifi_ap_ssid_prefix = "FPVRaceOne";
@@ -390,7 +393,10 @@ static void handleRoot(AsyncWebServerRequest *request) {
         return;
     }
 
-    request->send(LittleFS, "/index.html", "text/html");
+    request->send(LittleFS, "/index.html", "text/html", false, [](const String& var) -> String {
+        if (var == "BUILD_TIME") return _bootToken;
+        return String();
+    });
 }
 
 static void handleNotFound(AsyncWebServerRequest *request) {
@@ -485,7 +491,8 @@ void Webserver::startServices() {
     }
 
     startLittleFS();
-    
+    _bootToken = String(esp_random(), HEX);  // unique per boot → cache-busts JS/CSS on every reboot
+
     // Initialize storage (SD card or LittleFS fallback)
     storage->init();
     
@@ -1679,6 +1686,7 @@ EEPROM:\n\
         doc["modeName"] = (nodeMode == 1) ? "master" : (nodeMode == 2) ? "client" : "single";
         doc["ssid"] = wifi_ap_ssid;
         doc["sdAvailable"] = storage ? storage->isSDAvailable() : false;
+        doc["devMode"] = conf->getDevMode();
         if (multiNode) {
             doc["masterConnected"]  = multiNode->isMasterConnected();
             doc["myNodeId"]         = multiNode->getMyNodeId();
@@ -1860,20 +1868,20 @@ EEPROM:\n\
             uint8_t    nodeId    = obj["nodeId"]    | 0;
             String     pilotName = obj["pilotName"] | "";
 
-            // Find node's client IP to proxy the request
-            String clientIP;
+            // Find node's STA IP to proxy the request (staIP = client's DHCP IP on master's network)
+            String staIP;
             const auto& nodes = multiNode->getNodes();
             for (const auto& n : nodes) {
-                if (n.nodeId == nodeId) { clientIP = n.clientIP; break; }
+                if (n.nodeId == nodeId) { staIP = n.staIP; break; }
             }
-            if (clientIP.isEmpty()) {
+            if (staIP.isEmpty()) {
                 request->send(404, "application/json", "{\"status\":\"NOT_FOUND\"}");
                 return;
             }
 
             // Proxy the name change to the client's /api/pilotName endpoint
             HTTPClient http;
-            String url = "http://" + clientIP + "/api/pilotName";
+            String url = "http://" + staIP + "/api/pilotName";
             bool sent = false;
             if (http.begin(url)) {
                 http.addHeader("Content-Type", "application/json");
@@ -1890,6 +1898,53 @@ EEPROM:\n\
         });
     server.addHandler(mnEditNameHandler);
 
+    // /api/multinode/editPilot — master pushes pilot name + color to a client node
+    AsyncCallbackJsonWebHandler *mnEditPilotHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/editPilot",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj       = json.as<JsonObject>();
+            uint8_t    nodeId    = obj["nodeId"]     | 0;
+            String     pilotName = obj["pilotName"]  | "";
+            uint32_t   pilotColor = obj["pilotColor"] | 0x0080FFu;
+
+            String staIP;
+            const auto& nodes = multiNode->getNodes();
+            for (const auto& n : nodes) {
+                if (n.nodeId == nodeId) { staIP = n.staIP; break; }
+            }
+            if (staIP.isEmpty()) {
+                request->send(404, "application/json", "{\"status\":\"NOT_FOUND\"}");
+                return;
+            }
+
+            HTTPClient http;
+            String url = "http://" + staIP + "/api/pilotInfo";
+            bool sent = false;
+            if (http.begin(url)) {
+                http.addHeader("Content-Type", "application/json");
+                http.setTimeout(2000);
+                DynamicJsonDocument body(128);
+                body["pilotName"]  = pilotName;
+                body["pilotColor"] = pilotColor;
+                String bodyStr;
+                serializeJson(body, bodyStr);
+                sent = (http.POST(bodyStr) == 200);
+                http.end();
+            }
+            if (sent) {
+                // Update master's local NodeInfo immediately so the display reflects the
+                // change without waiting for the client's next registration heartbeat.
+                multiNode->updateNodePilot(nodeId, pilotName, pilotColor);
+            }
+            request->send(sent ? 200 : 502, "application/json",
+                          sent ? "{\"status\":\"OK\"}" : "{\"status\":\"PROXY_FAILED\"}");
+        });
+    server.addHandler(mnEditPilotHandler);
+
     // /api/pilotName — client receives a name update from master
     AsyncCallbackJsonWebHandler *pilotNameHandler = new AsyncCallbackJsonWebHandler(
         "/api/pilotName",
@@ -1900,7 +1955,6 @@ EEPROM:\n\
                 request->send(400, "application/json", "{\"status\":\"INVALID\"}");
                 return;
             }
-            // Update config — caller must write() to persist
             DynamicJsonDocument patch(64);
             patch["pilotName"] = pilotName;
             conf->fromJson(patch.as<JsonObject>());
@@ -1908,6 +1962,24 @@ EEPROM:\n\
             request->send(200, "application/json", "{\"status\":\"OK\"}");
         });
     server.addHandler(pilotNameHandler);
+
+    // /api/pilotInfo — client receives name + color update from master
+    AsyncCallbackJsonWebHandler *pilotInfoHandler = new AsyncCallbackJsonWebHandler(
+        "/api/pilotInfo",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!conf) {
+                request->send(503, "application/json", "{\"error\":\"no config\"}");
+                return;
+            }
+            JsonObject obj = json.as<JsonObject>();
+            DynamicJsonDocument patch(128);
+            if (obj.containsKey("pilotName"))  patch["pilotName"]  = obj["pilotName"].as<String>();
+            if (obj.containsKey("pilotColor")) patch["pilotColor"] = obj["pilotColor"].as<uint32_t>();
+            conf->fromJson(patch.as<JsonObject>());
+            conf->write();
+            request->send(200, "application/json", "{\"status\":\"OK\"}");
+        });
+    server.addHandler(pilotInfoHandler);
 
     // /api/multinode/race/start — start master timer immediately, queue client POSTs
     // to parallelTask so async_tcp is never blocked by outbound HTTP calls
