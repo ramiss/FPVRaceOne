@@ -12,11 +12,13 @@ void MultiNodeManager::init(Config* config) {
     _localLapCount       = 0;
     _lastHeartbeatMs     = 0;
     _lastRegistrationMs  = 0;
+    _heartbeatFailCount  = 0;
     _masterRaceActive    = false;
     _timerRunning        = false;
     _raceStartPending    = false;
     _raceStopPending     = false;
     _quitPending         = false;
+    _myMacAddress        = WiFi.macAddress();
     _nodes.clear();
 }
 
@@ -24,26 +26,34 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
     if (!_conf) return;
 
     if (isClientMode()) {
+        bool prevConnected = _masterConnected;
+
         if (WiFi.status() != WL_CONNECTED) {
             if (_masterConnected) {
                 _masterConnected = false;
                 DEBUG("[MULTINODE] STA disconnected from master\n");
             }
-            return;
+        } else {
+            // Periodic registration — fast retry when disconnected, slow keep-alive when connected
+            uint32_t regInterval = _masterConnected ? MULTINODE_REGISTER_INTERVAL_MS
+                                                    : MULTINODE_RECONNECT_INTERVAL_MS;
+            if (_lastRegistrationMs == 0 ||
+                (currentTimeMs - _lastRegistrationMs) > regInterval) {
+                _sendRegistration();
+                _lastRegistrationMs = currentTimeMs;
+            }
+
+            // 1-second heartbeat (only when connected)
+            if (_masterConnected &&
+                (currentTimeMs - _lastHeartbeatMs) > MULTINODE_HEARTBEAT_INTERVAL_MS) {
+                _sendHeartbeat();
+                _lastHeartbeatMs = currentTimeMs;
+            }
         }
 
-        // Periodic registration (initial and keep-alive)
-        if (_lastRegistrationMs == 0 ||
-            (currentTimeMs - _lastRegistrationMs) > MULTINODE_REGISTER_INTERVAL_MS) {
-            _sendRegistration();
-            _lastRegistrationMs = currentTimeMs;
-        }
-
-        // 1-second heartbeat
-        if (_masterConnected &&
-            (currentTimeMs - _lastHeartbeatMs) > MULTINODE_HEARTBEAT_INTERVAL_MS) {
-            _sendHeartbeat();
-            _lastHeartbeatMs = currentTimeMs;
+        // Notify browser via SSE when connection state changes
+        if (prevConnected != _masterConnected) {
+            _clientStateChangedFlag = true;
         }
 
         // Drain queued lap (written by Core 1)
@@ -109,6 +119,7 @@ void MultiNodeManager::_sendRegistration() {
     doc["pilotColor"]    = _conf->getPilotColor();
     doc["clientIP"]      = MULTINODE_CLIENT_AP_IP;
     doc["nodeId"]        = _myNodeId;  // 0 on first registration
+    doc["mac"]           = _myMacAddress;
 
     String body;
     serializeJson(doc, body);
@@ -137,9 +148,25 @@ void MultiNodeManager::_sendHeartbeat() {
     String body;
     serializeJson(doc, body);
 
-    if (!_postToMaster("/api/multinode/heartbeat", body)) {
+    String resp;
+    bool ok = _postToMasterWithResponse("/api/multinode/heartbeat", body, resp);
+    if (ok) {
+        _heartbeatFailCount = 0;
+    } else if (resp.indexOf("NOT_FOUND") >= 0) {
+        // Master doesn't know this nodeId (e.g. master rebooted) — re-register immediately
+        DEBUG("[MULTINODE] Heartbeat 404 — master lost our node, re-registering\n");
         _masterConnected = false;
-        DEBUG("[MULTINODE] Heartbeat failed — master unreachable\n");
+        _myNodeId = 0;
+        _heartbeatFailCount = 0;
+        _lastRegistrationMs = 0;  // fire registration on next process() tick
+    } else {
+        _heartbeatFailCount++;
+        DEBUG("[MULTINODE] Heartbeat failed (%u/%u)\n", _heartbeatFailCount, MULTINODE_HEARTBEAT_FAIL_LIMIT);
+        if (_heartbeatFailCount >= MULTINODE_HEARTBEAT_FAIL_LIMIT) {
+            _masterConnected = false;
+            _heartbeatFailCount = 0;
+            DEBUG("[MULTINODE] Master unreachable — marking disconnected\n");
+        }
     }
 }
 
@@ -199,19 +226,26 @@ bool MultiNodeManager::_postToMasterWithResponse(const String& endpoint, const S
 bool MultiNodeManager::handleRegister(const String& pilotName, const String& pilotCallsign,
                                        uint32_t pilotColor,
                                        const String& staIP, const String& clientIP,
+                                       const String& macAddress,
                                        uint8_t& assignedNodeId) {
-    // Re-registration: update existing node by STA IP
+    // Re-registration: match by MAC first (most stable), then nodeId, then STA IP
+    uint8_t incomingNodeId = assignedNodeId;
     for (auto& n : _nodes) {
-        if (n.staIP == staIP) {
+        bool macMatch  = macAddress.length() > 0 && macAddress == n.macAddress;
+        bool idMatch   = incomingNodeId > 0 && n.nodeId == incomingNodeId;
+        bool ipMatch   = n.staIP.length() > 0 && n.staIP == staIP;
+        if (macMatch || idMatch || ipMatch) {
             n.pilotName     = pilotName;
             n.pilotCallsign = pilotCallsign;
             n.pilotColor    = pilotColor;
             n.clientIP      = clientIP;
+            n.staIP         = staIP;
+            if (macAddress.length() > 0) n.macAddress = macAddress;
             n.lastSeen      = millis();
             n.online        = true;
             n.quitEarly     = false;  // clear DNF on re-registration
             assignedNodeId  = n.nodeId;
-            DEBUG("[MULTINODE] Re-registered node %u: %s\n", n.nodeId, pilotName.c_str());
+            DEBUG("[MULTINODE] Re-registered node %u (%s): %s\n", n.nodeId, macAddress.c_str(), pilotName.c_str());
             return true;
         }
     }
@@ -239,6 +273,7 @@ bool MultiNodeManager::handleRegister(const String& pilotName, const String& pil
     n.pilotColor    = pilotColor;
     n.staIP         = staIP;
     n.clientIP      = clientIP;
+    n.macAddress    = macAddress;
     n.lastSeen      = millis();
     n.online        = true;
     n.lapCount      = 0;
@@ -305,10 +340,23 @@ void MultiNodeManager::clearAllLaps() {
 void MultiNodeManager::_checkNodeTimeouts(uint32_t currentTimeMs) {
     for (auto& n : _nodes) {
         if (n.online && (currentTimeMs - n.lastSeen) > MULTINODE_NODE_TIMEOUT_MS) {
-            n.online = false;
+            n.online  = false;
+            n.running = false;
             DEBUG("[MULTINODE] Node %u (%s) timed out\n", n.nodeId, n.pilotName.c_str());
         }
     }
+    // Nodes are never auto-removed — use removeNode() to manually free a slot.
+}
+
+bool MultiNodeManager::removeNode(uint8_t nodeId) {
+    for (auto it = _nodes.begin(); it != _nodes.end(); ++it) {
+        if (it->nodeId == nodeId) {
+            DEBUG("[MULTINODE] Node %u (%s) manually removed\n", it->nodeId, it->pilotName.c_str());
+            _nodes.erase(it);
+            return true;
+        }
+    }
+    return false;
 }
 
 String MultiNodeManager::getNodesToJson() const {
@@ -325,6 +373,7 @@ String MultiNodeManager::getNodesToJson() const {
         o["quitEarly"]      = n.quitEarly;
         o["lapCount"]       = n.lapCount;
         o["clientIP"]       = n.clientIP;
+        o["mac"]            = n.macAddress;
         JsonArray laps      = o.createNestedArray("laps");
         // Send all stored laps so the race view can compute full stats
         for (size_t i = 0; i < n.laps.size(); i++) {

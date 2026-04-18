@@ -419,6 +419,16 @@ function setupWiFiEvents() {
       stopRaceDisplayOnly();
     }
   }, false);
+
+  // Client node's own connection state changed — update status bar immediately
+  eventSource.addEventListener("multiNodeClientState", function (e) {
+    try {
+      const d = JSON.parse(e.data);
+      mnMasterConnected = !!d.connected;
+      mnMyNodeId        = d.nodeId || 0;
+      mnUpdateRaceStatusBar();
+    } catch (_) {}
+  }, false);
 }
 
 function setupUSBEvents() {
@@ -6560,12 +6570,11 @@ function mnStartClientPoll() {
       const r = await fetch('/api/mode');
       if (!r.ok) return;
       const d = await r.json();
-      const prevConnected = mnMasterConnected;
-      mnMasterConnected  = d.masterConnected || false;
-      mnMyNodeId         = d.myNodeId        || 0;
-      if (prevConnected !== mnMasterConnected) mnUpdateRaceStatusBar();
+      mnMasterConnected = d.masterConnected || false;
+      mnMyNodeId        = d.myNodeId        || 0;
+      mnUpdateRaceStatusBar();
     } catch (_) {}
-  }, 5000);
+  }, 2000);
 }
 
 function mnStopClientPoll() {
@@ -6735,7 +6744,7 @@ function mnRenderRaceTab(nodes) {
 
   // ── Summary leaderboard table ──────────────────────────────────
   let html = '<table class="mn-leaderboard"><thead><tr>';
-  html += '<th></th><th>Pilot</th><th>Laps</th><th>Total</th><th>Avg</th><th>Fastest</th>';
+  html += '<th></th><th>Pilot</th><th>Laps</th><th>Total</th><th>Avg</th><th>Fastest</th><th style="width:36px;"></th>';
   html += '</tr></thead><tbody>';
 
   ranked.forEach((n, i) => {
@@ -6747,6 +6756,14 @@ function mnRenderRaceTab(nodes) {
     else if (n.running && !mnRaceRunning && !n.isMaster) badge = ' <span class="mn-status-solo">Solo</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
     const statusDotColor = n.online !== false ? '#4caf50' : '#f44336';
+    const actionsCell = n.isMaster ? '<td></td>' :
+      `<td class="mn-lb-actions">
+        <button class="mn-action-btn" onclick="mnToggleMenu(event,${n.nodeId},'${(n.pilotName||'').replace(/'/g,"\\'")}')" title="Node options">⋮</button>
+        <div class="mn-action-menu" id="mn-menu-${n.nodeId}">
+          <button onclick="mnEditName(${n.nodeId},'${(n.pilotName||'').replace(/'/g,"\\'")}')">Edit Name</button>
+          <button class="mn-menu-danger" onclick="mnRemoveNode(${n.nodeId},'${callsign.replace(/'/g,"\\'")}')">Remove</button>
+        </div>
+      </td>`;
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
       <td class="mn-lb-pilot">
@@ -6756,6 +6773,7 @@ function mnRenderRaceTab(nodes) {
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(n.totalMs)            : '—'}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(Math.round(n.avgMs)) : '—'}</td>
       <td class="mn-lb-mono${isFastPilot ? ' mn-lb-fastest' : ''}">${n.lapCount > 0 ? formatMsRace(n.fastestMs) : '—'}</td>
+      ${actionsCell}
     </tr>`;
   });
   html += '</tbody></table>';
@@ -6802,6 +6820,51 @@ function mnRenderRaceTab(nodes) {
   html += '</div>';
 
   container.innerHTML = html;
+}
+
+// ── Node action menu helpers ──────────────────────────────────────────────
+
+function mnToggleMenu(evt, nodeId, pilotName) {
+  evt.stopPropagation();
+  // Close all other menus first
+  document.querySelectorAll('.mn-action-menu.open').forEach(m => {
+    if (m.id !== 'mn-menu-' + nodeId) m.classList.remove('open');
+  });
+  const menu = document.getElementById('mn-menu-' + nodeId);
+  if (menu) menu.classList.toggle('open');
+}
+
+// Close menus on outside click
+document.addEventListener('click', () => {
+  document.querySelectorAll('.mn-action-menu.open').forEach(m => m.classList.remove('open'));
+});
+
+async function mnRemoveNode(nodeId, callsign) {
+  document.querySelectorAll('.mn-action-menu.open').forEach(m => m.classList.remove('open'));
+  if (!confirm(`Remove "${callsign}" from slot ${nodeId}?\n\nThe pilot can reconnect and will be assigned the next available slot.`)) return;
+  try {
+    await fetch('/api/multinode/removeNode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeId })
+    });
+    mnRefreshNodes();
+  } catch (e) { console.error('removeNode failed', e); }
+}
+
+async function mnEditName(nodeId, currentName) {
+  document.querySelectorAll('.mn-action-menu.open').forEach(m => m.classList.remove('open'));
+  const newName = prompt(`Edit pilot name for Node ${nodeId}:`, currentName);
+  if (!newName || newName.trim() === currentName) return;
+  try {
+    const r = await fetch('/api/multinode/editName', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeId, pilotName: newName.trim() })
+    });
+    if (!r.ok) alert('Name update failed — is the client device reachable?');
+    mnRefreshNodes();
+  } catch (e) { console.error('editName failed', e); }
 }
 
 // Multi-Node tab: simple node status cards (race data is on the Race tab).
@@ -6995,11 +7058,22 @@ document.addEventListener('DOMContentLoaded', () => {
 
   fetch('/api/mode').then(r => r.ok ? r.json() : null).then(data => {
     if (!data) return;
-    mnNodeMode   = data.nodeMode  || 0;
-    mnMyNodeId   = data.myNodeId  || 0;
+    mnNodeMode        = data.nodeMode       || 0;
+    mnMyNodeId        = data.myNodeId       || 0;
+    mnMasterConnected = data.masterConnected || false;
     if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
     if (typeof audioAnnouncer !== 'undefined') audioAnnouncer.sdAvailable = !!data.sdAvailable;
     onRaceTabOpen();
+    // Client mode: start the connection-state poll (mnInitTab is only called for master)
+    if (data.nodeMode === 2) {
+      if (!mnStatusSSID) {
+        fetch('/config').then(r2 => r2.ok ? r2.json() : null).then(cfg => {
+          if (cfg) mnStatusSSID = cfg.masterSSID || '';
+          mnUpdateRaceStatusBar();
+        }).catch(() => {});
+      }
+      mnStartClientPoll();
+    }
   }).catch(e => console.warn('[Race] /api/mode fetch failed:', e));
 
   // Keep paused scanner overlays correct on resize/rotation

@@ -3,10 +3,12 @@
 #include <WiFi.h>
 #include <vector>
 
-#define MULTINODE_MAX_NODES            7
-#define MULTINODE_HEARTBEAT_INTERVAL_MS  1000
-#define MULTINODE_REGISTER_INTERVAL_MS   5000
-#define MULTINODE_NODE_TIMEOUT_MS        8000
+#define MULTINODE_MAX_NODES              7
+#define MULTINODE_HEARTBEAT_INTERVAL_MS  2000   // send heartbeat every 2 s (less load on dual-mode WiFi)
+#define MULTINODE_HEARTBEAT_FAIL_LIMIT      5   // consecutive failures before declaring disconnected
+#define MULTINODE_REGISTER_INTERVAL_MS   5000   // re-register interval when already connected
+#define MULTINODE_RECONNECT_INTERVAL_MS   800   // retry interval when disconnected
+#define MULTINODE_NODE_TIMEOUT_MS        4000   // mark node offline after 4 s without heartbeat
 #define MULTINODE_MASTER_IP              "192.168.5.1"
 #define MULTINODE_CLIENT_AP_IP           "192.168.4.1"
 
@@ -23,6 +25,7 @@ struct NodeInfo {
     uint32_t pilotColor;
     String   clientIP;   // client's own AP IP (master uses this to push commands)
     String   staIP;      // client's STA IP assigned by master's DHCP
+    String   macAddress; // client's WiFi MAC — primary unique key
     uint32_t lastSeen;
     bool     online;
     bool     running   = false;  // true while client's race timer is active
@@ -50,11 +53,13 @@ public:
     bool   handleRegister(const String& pilotName, const String& pilotCallsign,
                           uint32_t pilotColor,
                           const String& staIP, const String& clientIP,
+                          const String& macAddress,
                           uint8_t& assignedNodeId);
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
     bool   handleHeartbeat(uint8_t nodeId, bool running, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
-    void   clearAllLaps();           // master: wipe all stored laps for all nodes
+    bool   removeNode(uint8_t nodeId);     // master: manually remove a node slot
+    void   clearAllLaps();                 // master: wipe all stored laps for all nodes
 
     // ── Client-side state setters (called from webserver handlers) ──
     void   setTimerRunning(bool running);
@@ -67,7 +72,8 @@ public:
     // ── Status getters ──
     bool    isClientMode()      const;
     bool    isMasterMode()      const;
-    bool    isMasterConnected() const { return _masterConnected; }
+    bool    isMasterConnected()        const { return _masterConnected; }
+    bool    consumeClientStateChanged()      { bool v = _clientStateChangedFlag; _clientStateChangedFlag = false; return v; }
     uint8_t getMyNodeId()       const { return _myNodeId; }
     String  getMasterStatusJson() const;
 
@@ -83,17 +89,20 @@ private:
     uint32_t _lastHeartbeatMs    = 0;
     uint32_t _lastRegistrationMs = 0;
     uint8_t  _localLapCount      = 0;
+    uint8_t  _heartbeatFailCount = 0;
+    String   _myMacAddress;              // this device's WiFi MAC (set in init)
 
     // Client-side state
     bool     _masterRaceActive   = false;
     bool     _timerRunning       = false;
 
     // Thread-safe flags (set by async handler on Core 0, consumed by process() on Core 0)
-    volatile bool     _lapPending        = false;
-    volatile uint32_t _pendingLapTime    = 0;
-    volatile bool     _raceStartPending  = false;
-    volatile bool     _raceStopPending   = false;
-    volatile bool     _quitPending       = false;
+    volatile bool     _lapPending              = false;
+    volatile uint32_t _pendingLapTime          = 0;
+    volatile bool     _raceStartPending        = false;
+    volatile bool     _raceStopPending         = false;
+    volatile bool     _quitPending             = false;
+    volatile bool     _clientStateChangedFlag  = false;  // set in process() when _masterConnected changes
 
     void _sendRegistration();
     void _sendHeartbeat();

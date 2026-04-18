@@ -1,5 +1,6 @@
 #include "webserver.h"
 #include <ElegantOTA.h>
+#include <HTTPClient.h>
 
 #include <DNSServer.h>
 #include <ESPmDNS.h>
@@ -177,6 +178,16 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     if (servicesStarted && ((currentTimeMs - sseKeepaliveMs) > WEB_SSE_KEEPALIVE_MS)) {
         events.send("ping", "keepalive", millis());
         sseKeepaliveMs = currentTimeMs;
+    }
+
+    // Push multiNodeClientState SSE to client browser when connection state changes
+    if (servicesStarted && multiNode && multiNode->isClientMode() &&
+        multiNode->consumeClientStateChanged()) {
+        char buf[80];
+        snprintf(buf, sizeof(buf), "{\"connected\":%s,\"nodeId\":%u}",
+                 multiNode->isMasterConnected() ? "true" : "false",
+                 multiNode->getMyNodeId());
+        events.send(buf, "multiNodeClientState");
     }
 
     wl_status_t status = WiFi.status();
@@ -1727,10 +1738,11 @@ EEPROM:\n\
             String clientIP         = obj["clientIP"]      | "";
             String staIP            = request->client()->remoteIP().toString();
 
-            uint8_t assignedId = 0;
+            String macAddress   = obj["mac"]      | "";
+            uint8_t assignedId  = obj["nodeId"]   | 0;  // client's self-reported nodeId (0 on first registration)
             bool ok = multiNode->handleRegister(pilotName, pilotCallsign,
                                                  pilotColor, staIP, clientIP,
-                                                 assignedId);
+                                                 macAddress, assignedId);
 
             DynamicJsonDocument resp(64);
             if (ok) {
@@ -1815,6 +1827,87 @@ EEPROM:\n\
                           ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
         });
     server.addHandler(mnQuitHandler);
+
+    // /api/multinode/removeNode — master manually removes a node slot
+    AsyncCallbackJsonWebHandler *mnRemoveHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/removeNode",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj = json.as<JsonObject>();
+            uint8_t nodeId = obj["nodeId"] | 0;
+            bool ok = multiNode->removeNode(nodeId);
+            if (ok) {
+                String nodesJson = multiNode->getNodesToJson();
+                events.send(nodesJson.c_str(), "multiNodeState");
+            }
+            request->send(ok ? 200 : 404, "application/json",
+                          ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
+        });
+    server.addHandler(mnRemoveHandler);
+
+    // /api/multinode/editName — master pushes a new pilot name to a client node
+    AsyncCallbackJsonWebHandler *mnEditNameHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/editName",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj       = json.as<JsonObject>();
+            uint8_t    nodeId    = obj["nodeId"]    | 0;
+            String     pilotName = obj["pilotName"] | "";
+
+            // Find node's client IP to proxy the request
+            String clientIP;
+            const auto& nodes = multiNode->getNodes();
+            for (const auto& n : nodes) {
+                if (n.nodeId == nodeId) { clientIP = n.clientIP; break; }
+            }
+            if (clientIP.isEmpty()) {
+                request->send(404, "application/json", "{\"status\":\"NOT_FOUND\"}");
+                return;
+            }
+
+            // Proxy the name change to the client's /api/pilotName endpoint
+            HTTPClient http;
+            String url = "http://" + clientIP + "/api/pilotName";
+            bool sent = false;
+            if (http.begin(url)) {
+                http.addHeader("Content-Type", "application/json");
+                http.setTimeout(2000);
+                DynamicJsonDocument body(128);
+                body["pilotName"] = pilotName;
+                String bodyStr;
+                serializeJson(body, bodyStr);
+                sent = (http.POST(bodyStr) == 200);
+                http.end();
+            }
+            request->send(sent ? 200 : 502, "application/json",
+                          sent ? "{\"status\":\"OK\"}" : "{\"status\":\"PROXY_FAILED\"}");
+        });
+    server.addHandler(mnEditNameHandler);
+
+    // /api/pilotName — client receives a name update from master
+    AsyncCallbackJsonWebHandler *pilotNameHandler = new AsyncCallbackJsonWebHandler(
+        "/api/pilotName",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            JsonObject obj       = json.as<JsonObject>();
+            String     pilotName = obj["pilotName"] | "";
+            if (pilotName.isEmpty() || !conf) {
+                request->send(400, "application/json", "{\"status\":\"INVALID\"}");
+                return;
+            }
+            // Update config — caller must write() to persist
+            DynamicJsonDocument patch(64);
+            patch["pilotName"] = pilotName;
+            conf->fromJson(patch.as<JsonObject>());
+            conf->write();
+            request->send(200, "application/json", "{\"status\":\"OK\"}");
+        });
+    server.addHandler(pilotNameHandler);
 
     // /api/multinode/race/start — start master timer immediately, queue client POSTs
     // to parallelTask so async_tcp is never blocked by outbound HTTP calls
