@@ -298,6 +298,55 @@ async function onWiFiReconnect() {
       console.error('[Reconnect] Failed to restart RSSI streaming:', err);
     }
   }
+
+  // Re-fetch mode and race state to restore everything after a page reload or reconnect.
+  try {
+    const r = await fetch('/api/mode');
+    if (!r.ok) return;
+    const data = await r.json();
+    const newMode     = data.nodeMode    || 0;
+    const modeChanged = newMode !== mnNodeMode;
+    mnNodeMode        = newMode;
+    mnMyNodeId        = data.myNodeId        || 0;
+    mnMasterConnected = data.masterConnected  || false;
+    mnMasterRaceActive = data.masterRaceActive || false;
+    if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
+
+    const timerRunning  = data.timerRunning  || false;
+    const raceElapsedMs = data.raceElapsedMs || 0;
+
+    if (modeChanged || newMode === 1) {
+      // Restore master race state before polling kicks in so mnRenderRaceTab sees it
+      if (newMode === 1 && timerRunning) {
+        mnRaceRunning = true;
+        if (!mnRaceTimerIntervalId) _mnStartTimer(raceElapsedMs);
+      }
+      onRaceTabOpen();
+      if (newMode === 1 && !mnPollingInterval) mnInitTab();
+      if (newMode === 2) mnStartClientPoll();
+    }
+
+    // Restore single-pilot and client timer display
+    if (timerRunning && (newMode === 0 || newMode === 2)) {
+      startRaceDisplayOnly(raceElapsedMs);
+    }
+
+    // Restore in-progress laps: single mode shows lap table; master populates lapTimes[]
+    // so _mnMasterEntry() returns the correct history for the race tab grid
+    if (timerRunning && (newMode === 0 || newMode === 1)) {
+      try {
+        const lr = await fetch('/api/laps/current');
+        if (lr.ok) {
+          const ld = await lr.json();
+          if (ld.laps && ld.laps.length > 0) _restoreInProgressLaps(ld.laps);
+        }
+      } catch (_) {}
+    }
+
+    mnUpdateRaceStatusBar();
+  } catch (err) {
+    console.warn('[Reconnect] /api/mode fetch failed:', err);
+  }
 }
 
 function setupWiFiEvents() {
@@ -414,13 +463,40 @@ function setupWiFiEvents() {
 
   // Master pushed race start/stop to this client node
   eventSource.addEventListener("masterRaceState", function (e) {
-    if (e.data === "started") {
+    if (e.data === "prearming") {
+      // Master countdown in progress — flash Start button yellow but don't start timer
+      const btn = document.getElementById('startRaceButton');
+      if (btn) btn.classList.add('active');
+    } else if (e.data === "started") {
       mnMasterRaceActive = true;
+      const btn = document.getElementById('startRaceButton');
+      if (btn) btn.classList.remove('active');
       startRaceDisplayOnly();
     } else if (e.data === "stopped") {
       mnMasterRaceActive = false;
+      const btn = document.getElementById('startRaceButton');
+      if (btn) btn.classList.remove('active');
       stopRaceDisplayOnly();
     }
+  }, false);
+
+  // Master updated this client's pilot name/color — reflect in UI immediately
+  eventSource.addEventListener("pilotInfoChanged", function (e) {
+    try {
+      const d = JSON.parse(e.data);
+      if (d.name !== undefined && pilotNameInput) {
+        pilotNameInput.value = d.name;
+        const pilotNameDisplay = document.getElementById('pilotNameDisplay');
+        if (pilotNameDisplay) pilotNameDisplay.textContent = d.name;
+      }
+      if (d.pilotColor !== undefined) {
+        const colorInput = document.getElementById('pilotColor');
+        if (colorInput) {
+          colorInput.value = '#' + ('000000' + d.pilotColor.toString(16)).slice(-6).toUpperCase();
+          updateColorPreview();
+        }
+      }
+    } catch (_) {}
   }, false);
 
   // Client node's own connection state changed — update status bar immediately
@@ -2262,6 +2338,34 @@ function playBeepTone(duration, frequency, type) {
   }, duration);
 }
 
+// Silently restore in-progress laps after page reload — no TTS, no state side-effects
+function _restoreInProgressLaps(laps) {
+  lapNo = -1;
+  lapTimes = [];
+  const table = document.getElementById('lapTable');
+  if (!table) return;
+  while (table.rows.length > 0) table.deleteRow(0);
+  let cumSec = 0;
+  laps.forEach((l, idx) => {
+    const lapSec = (l.lapTimeMs / 1000).toFixed(2);
+    const newLap = parseFloat(lapSec);
+    lapTimes.push(newLap);
+    lapNo = idx;
+    cumSec += newLap;
+    const row = table.insertRow();
+    row.setAttribute('data-lap-index', idx);
+    const c1 = row.insertCell(0); c1.innerHTML = lapNo + 1;
+    const c2 = row.insertCell(1);
+    c2.innerHTML = lapNo === 0 ? `Gate 1: ${lapSec}s` : `${lapSec}s`;
+    const gap = idx > 0 ? (newLap - lapTimes[idx - 1]).toFixed(2) : null;
+    const c3 = row.insertCell(2);
+    c3.innerHTML = gap !== null ? (parseFloat(gap) > 0 ? '+' + gap : gap) + 's' : '-';
+    const c4 = row.insertCell(3); c4.innerHTML = cumSec.toFixed(2) + 's';
+  });
+  highlightFastestLap();
+  updateLapCounter();
+}
+
 function addLap(lapStr) {
   const pilotName = pilotNameInput.value;
   
@@ -2411,7 +2515,7 @@ function queueSpeak(obj) {
 
 // Start the visual race display without sending /timer/start to the server.
 // Used when the master remotely starts the race on this client node.
-function startRaceDisplayOnly() {
+function startRaceDisplayOnly(offsetMs = 0) {
   updateLapCounter();
   startRaceButton.disabled = true;
   startRaceButton.classList.add('active');
@@ -2419,7 +2523,7 @@ function startRaceDisplayOnly() {
   addLapButton.disabled = false;
 
   clearInterval(timerInterval);
-  const _timerStart = Date.now();
+  const _timerStart = Date.now() - offsetMs;
   timerInterval = setInterval(function () {
     const elapsed = Date.now() - _timerStart;
     const minutes = Math.floor(elapsed / 60000);
@@ -6639,8 +6743,9 @@ function _mnMasterEntry() {
   const colorHex    = colorEl ? colorEl.value : '#0080FF';
   const colorInt    = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
   // lapTimes is seconds (float); convert to the same shape as client laps
+  // index 0 = gate 1 (lapNumber 0), index 1 = lap 1 (lapNumber 1), etc.
   const laps = (Array.isArray(window.lapTimes) ? window.lapTimes : [])
-    .map((t, i) => ({ lapNumber: i + 1, lapTimeMs: Math.round(t * 1000) }));
+    .map((t, i) => ({ lapNumber: i, lapTimeMs: Math.round(t * 1000) }));
   const lapCount  = laps.length;
   const totalMs   = laps.reduce((s, l) => s + l.lapTimeMs, 0);
   const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
@@ -6695,7 +6800,7 @@ function mnRenderRaceTab(nodes) {
 
   // ── Summary leaderboard table ──────────────────────────────────
   let html = '<table class="mn-leaderboard"><thead><tr>';
-  html += '<th></th><th>Pilot</th><th>Laps</th><th>Total</th><th>Avg</th><th>Fastest</th><th style="width:44px;min-width:44px">&nbsp;</th>';
+  html += '<th></th><th>Pilot</th><th>Laps</th><th>Total</th><th>Avg</th><th>Fastest</th>';
   html += '</tr></thead><tbody>';
 
   ranked.forEach((n, i) => {
@@ -6708,22 +6813,19 @@ function mnRenderRaceTab(nodes) {
     else if (n.running && !mnRaceRunning && !n.isMaster) badge = ' <span class="mn-status-solo">Solo</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
     const statusDotColor = n.online !== false ? '#4caf50' : '#f44336';
-    const actionsCell = n.isMaster ? '<td class="mn-lb-actions"></td>' :
-      `<td class="mn-lb-actions">
-        <button class="mn-edit-btn" onclick="mnOpenPilotModal(${n.nodeId})" title="Edit pilot">
-          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-        </button>
-      </td>`;
+    const editBtn = n.isMaster ? '' :
+      `<button class="mn-edit-btn" onclick="mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;">
+        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
+      </button>`;
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
       <td class="mn-lb-pilot">
-        ${hostTag}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
+        ${hostTag}${editBtn}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
       </td>
       <td class="mn-lb-mono">${n.lapCount}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(n.totalMs)            : '—'}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(Math.round(n.avgMs)) : '—'}</td>
       <td class="mn-lb-mono${isFastPilot ? ' mn-lb-fastest' : ''}">${n.lapCount > 0 ? formatMsRace(n.fastestMs) : '—'}</td>
-      ${actionsCell}
     </tr>`;
   });
   html += '</tbody></table>';
@@ -6744,7 +6846,8 @@ function mnRenderRaceTab(nodes) {
 
     const devAttr = mnDevMode ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.lapCount+1},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
     const isRacing = n.isMaster ? mnRaceRunning : n.running;
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${mnDevMode ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${mnDevMode ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Solo race in progress (client running outside a master race)
     if (n.running && !mnRaceRunning && !n.isMaster) {
@@ -6777,6 +6880,39 @@ function mnRenderRaceTab(nodes) {
 
 let _mnModalNodeId = null;
 
+function mnModalUpdateChannels(selectChannelIndex) {
+  const bandSel = document.getElementById('mnPilotModalBand');
+  const chanSel = document.getElementById('mnPilotModalChannel');
+  if (!bandSel || !chanSel) return;
+  const bandIndex = parseInt(bandSel.value) || 0;
+  const freqs = freqLookup[bandIndex] || [];
+  chanSel.innerHTML = '';
+  freqs.forEach((f, i) => {
+    if (f === 0) return;
+    const opt = document.createElement('option');
+    opt.value = String(i + 1);  // 1-based value
+    opt.textContent = String(i + 1);
+    chanSel.appendChild(opt);
+  });
+  // Select by 0-based index if provided, else keep first
+  if (selectChannelIndex !== undefined) {
+    const desired = String(selectChannelIndex + 1);
+    if (Array.from(chanSel.options).some(o => o.value === desired)) chanSel.value = desired;
+  }
+  mnModalUpdateFreq();
+}
+
+function mnModalUpdateFreq() {
+  const bandSel = document.getElementById('mnPilotModalBand');
+  const chanSel = document.getElementById('mnPilotModalChannel');
+  const freqEl  = document.getElementById('mnPilotModalFreq');
+  if (!bandSel || !chanSel || !freqEl) return;
+  const bandIndex = parseInt(bandSel.value) || 0;
+  const chanNum   = parseInt(chanSel.value) || 1;
+  const freq = (freqLookup[bandIndex] || [])[chanNum - 1] || 0;
+  freqEl.textContent = freq ? freq + ' MHz' : 'N/A';
+}
+
 function mnOpenPilotModal(nodeId) {
   _mnModalNodeId = nodeId;
   const node = mnCurrentNodes.find(n => n.nodeId === nodeId);
@@ -6793,6 +6929,12 @@ function mnOpenPilotModal(nodeId) {
   }
   if (!matched) mnColorSelect.options[5].selected = true; // fallback Blue
   mnColorPreview.style.backgroundColor = mnColorSelect.value;
+  // Band / channel
+  const bandSel = document.getElementById('mnPilotModalBand');
+  if (bandSel && node) {
+    bandSel.value = String(node.bandIndex || 0);
+    mnModalUpdateChannels(node.channelIndex || 0);
+  }
   document.getElementById('mnPilotModal').style.display = 'flex';
   setTimeout(() => document.getElementById('mnPilotModalName').focus(), 50);
 }
@@ -6812,12 +6954,17 @@ async function mnSavePilotModal() {
   const name       = document.getElementById('mnPilotModalName').value.trim();
   const colorHex   = document.getElementById('mnPilotModalColor').value;
   const pilotColor = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
+  const bandSel    = document.getElementById('mnPilotModalBand');
+  const chanSel    = document.getElementById('mnPilotModalChannel');
+  const bandIndex  = bandSel  ? parseInt(bandSel.value)  : 0;
+  const chanIndex  = chanSel  ? parseInt(chanSel.value) - 1 : 0;  // value is 1-based, store 0-based
+  const freq       = (freqLookup[bandIndex] || [])[chanIndex] || 0;
   mnClosePilotModal();
   try {
     const r = await fetch('/api/multinode/editPilot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodeId, pilotName: name, pilotColor })
+      body: JSON.stringify({ nodeId, pilotName: name, pilotColor, band: bandIndex, chan: chanIndex, freq })
     });
     if (!r.ok) alert('Update failed \u2014 is the client device reachable?');
     mnRefreshNodes();
@@ -6930,8 +7077,8 @@ function _mnFormatRaceTimer(ms) {
   return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(cs).padStart(2, '0')}s`;
 }
 
-function _mnStartTimer() {
-  mnRaceStartMs = Date.now();
+function _mnStartTimer(offsetMs = 0) {
+  mnRaceStartMs = Date.now() - offsetMs;
   mnRaceTimerIntervalId = setInterval(() => {
     const el = document.getElementById('mn-race-timer');
     if (el) el.textContent = _mnFormatRaceTimer(Date.now() - mnRaceStartMs);
@@ -6946,6 +7093,9 @@ function _mnStopTimer() {
 async function mnStartRace() {
   // Disable button immediately and lock out double-presses
   ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) { b.disabled = true; b.classList.add('active'); } });
+
+  // Signal clients to flash their Start button during countdown
+  try { await fetch('/api/multinode/race/prearm', { method: 'POST' }); } catch (_) {}
 
   // Unlock AudioContext (iOS/Safari)
   if (typeof beepAudioContext !== 'undefined' && beepAudioContext && beepAudioContext.state === 'suspended') {

@@ -577,6 +577,14 @@ EEPROM:\n\
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
+    // /timer/masterPreArm — called by master before countdown; clients flash Start button
+    server.on("/timer/masterPreArm", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (multiNode && multiNode->isClientMode()) {
+            events.send("prearming", "masterRaceState");
+        }
+        request->send(200, "application/json", "{\"status\": \"OK\"}");
+    });
+
     // /timer/masterStart — called by master broadcast; respects client skip toggle
     server.on("/timer/masterStart", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (multiNode && multiNode->isClientMode() &&
@@ -1685,6 +1693,8 @@ EEPROM:\n\
         doc["ssid"] = wifi_ap_ssid;
         doc["sdAvailable"] = storage ? storage->isSDAvailable() : false;
         doc["devMode"] = conf->getDevMode();
+        doc["timerRunning"]  = timer ? timer->isRunning() : false;
+        doc["raceElapsedMs"] = timer ? (uint32_t)timer->getElapsedMs() : 0;
         if (multiNode) {
             doc["masterConnected"]  = multiNode->isMasterConnected();
             doc["myNodeId"]         = multiNode->getMyNodeId();
@@ -1693,6 +1703,23 @@ EEPROM:\n\
         String output;
         serializeJson(doc, output);
         request->send(200, "application/json", output);
+    });
+
+    // /api/laps/current — returns in-progress lap data for page reload restore
+    server.on("/api/laps/current", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        DynamicJsonDocument doc(512);
+        bool running   = timer ? timer->isRunning() : false;
+        uint8_t count  = (running && timer) ? timer->getLapCount() : 0;
+        doc["running"]  = running;
+        doc["lapCount"] = count;
+        JsonArray arr = doc.createNestedArray("laps");
+        for (uint8_t i = 0; i < count; i++) {
+            JsonObject lap = arr.createNestedObject();
+            lap["lapNumber"] = i + 1;
+            lap["lapTimeMs"] = timer->getLapTimeAt(i);
+        }
+        String out; serializeJson(doc, out);
+        request->send(200, "application/json", out);
     });
 
     // /api/multinode/nodes — master returns all registered client nodes
@@ -1740,13 +1767,17 @@ EEPROM:\n\
             JsonObject obj          = json.as<JsonObject>();
             String pilotName        = obj["pilotName"]     | "";
             uint32_t pilotColor     = obj["pilotColor"]    | 0x0080FFu;
+            uint8_t  bandIndex      = obj["band"]          | 0;
+            uint8_t  channelIndex   = obj["chan"]          | 0;
+            uint16_t freq           = obj["freq"]          | 0;
             String clientIP         = obj["clientIP"]      | "";
             String staIP            = request->client()->remoteIP().toString();
 
             String macAddress   = obj["mac"]      | "";
             uint8_t assignedId  = obj["nodeId"]   | 0;  // client's self-reported nodeId (0 on first registration)
             bool ok = multiNode->handleRegister(pilotName,
-                                                 pilotColor, staIP, clientIP,
+                                                 pilotColor, bandIndex, channelIndex, freq,
+                                                 staIP, clientIP,
                                                  macAddress, assignedId);
 
             DynamicJsonDocument resp(64);
@@ -1903,10 +1934,14 @@ EEPROM:\n\
                 request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
                 return;
             }
-            JsonObject obj       = json.as<JsonObject>();
-            uint8_t    nodeId    = obj["nodeId"]     | 0;
-            String     pilotName = obj["pilotName"]  | "";
+            JsonObject obj        = json.as<JsonObject>();
+            uint8_t    nodeId     = obj["nodeId"]     | 0;
+            String     pilotName  = obj["pilotName"]  | "";
             uint32_t   pilotColor = obj["pilotColor"] | 0x0080FFu;
+            bool       hasBand    = obj.containsKey("band");
+            uint8_t    bandIndex  = obj["band"]        | 0;
+            uint8_t    chanIndex  = obj["chan"]         | 0;
+            uint16_t   freq       = obj["freq"]        | 0;
 
             String staIP;
             const auto& nodes = multiNode->getNodes();
@@ -1924,18 +1959,22 @@ EEPROM:\n\
             if (http.begin(url)) {
                 http.addHeader("Content-Type", "application/json");
                 http.setTimeout(2000);
-                DynamicJsonDocument body(128);
+                DynamicJsonDocument body(256);
                 body["pilotName"]  = pilotName;
                 body["pilotColor"] = pilotColor;
+                if (hasBand) {
+                    body["band"] = bandIndex;
+                    body["chan"] = chanIndex;
+                    body["freq"] = freq;
+                }
                 String bodyStr;
                 serializeJson(body, bodyStr);
                 sent = (http.POST(bodyStr) == 200);
                 http.end();
             }
             if (sent) {
-                // Update master's local NodeInfo immediately so the display reflects the
-                // change without waiting for the client's next registration heartbeat.
                 multiNode->updateNodePilot(nodeId, pilotName, pilotColor);
+                if (hasBand) multiNode->updateNodeChannel(nodeId, bandIndex, chanIndex, freq);
             }
             request->send(sent ? 200 : 502, "application/json",
                           sent ? "{\"status\":\"OK\"}" : "{\"status\":\"PROXY_FAILED\"}");
@@ -1969,14 +2008,34 @@ EEPROM:\n\
                 return;
             }
             JsonObject obj = json.as<JsonObject>();
-            DynamicJsonDocument patch(128);
-            if (obj.containsKey("pilotName"))  patch["name"]  = obj["pilotName"].as<String>();
+            DynamicJsonDocument patch(256);
+            if (obj.containsKey("pilotName"))  patch["name"]       = obj["pilotName"].as<String>();
             if (obj.containsKey("pilotColor")) patch["pilotColor"] = obj["pilotColor"].as<uint32_t>();
+            if (obj.containsKey("band"))       patch["band"]       = obj["band"].as<int>();
+            if (obj.containsKey("chan"))       patch["chan"]       = obj["chan"].as<int>();
+            if (obj.containsKey("freq"))       patch["freq"]       = obj["freq"].as<int>();
             conf->fromJson(patch.as<JsonObject>());
             conf->write();
+            // Push update to this client's browser so name/color reflect immediately
+            DynamicJsonDocument notify(128);
+            notify["name"]       = conf->getPilotName();
+            notify["pilotColor"] = conf->getPilotColor();
+            String notifyStr;
+            serializeJson(notify, notifyStr);
+            events.send(notifyStr.c_str(), "pilotInfoChanged");
             request->send(200, "application/json", "{\"status\":\"OK\"}");
         });
     server.addHandler(pilotInfoHandler);
+
+    // /api/multinode/race/prearm — broadcast pre-arm signal to all clients (flashes their Start button)
+    server.on("/api/multinode/race/prearm", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!multiNode) {
+            request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+            return;
+        }
+        multiNode->queueRacePreArm();
+        request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
 
     // /api/multinode/race/start — start master timer immediately, queue client POSTs
     // to parallelTask so async_tcp is never blocked by outbound HTTP calls

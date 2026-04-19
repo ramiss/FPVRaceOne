@@ -15,6 +15,7 @@ void MultiNodeManager::init(Config* config) {
     _heartbeatFailCount  = 0;
     _masterRaceActive    = false;
     _timerRunning        = false;
+    _racePreArmPending   = false;
     _raceStartPending    = false;
     _raceStopPending     = false;
     _quitPending         = false;
@@ -72,6 +73,10 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         _checkNodeTimeouts(currentTimeMs);
 
         // Deferred broadcasts — queued by the async handler, executed here on Core 0
+        if (_racePreArmPending) {
+            _racePreArmPending = false;
+            _broadcastRacePreArm();
+        }
         if (_raceStartPending) {
             _raceStartPending = false;
             _broadcastRaceStart();
@@ -83,8 +88,9 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
     }
 }
 
-void MultiNodeManager::queueRaceStart() { _raceStartPending = true; }
-void MultiNodeManager::queueRaceStop()  { _raceStopPending  = true; }
+void MultiNodeManager::queueRacePreArm() { _racePreArmPending = true; }
+void MultiNodeManager::queueRaceStart()  { _raceStartPending  = true; }
+void MultiNodeManager::queueRaceStop()   { _raceStopPending   = true; }
 
 void MultiNodeManager::setTimerRunning(bool running) {
     _timerRunning = running;
@@ -116,6 +122,9 @@ void MultiNodeManager::_sendRegistration() {
     DynamicJsonDocument doc(256);
     doc["pilotName"]     = _conf->getPilotName()     ? _conf->getPilotName()     : "";
     doc["pilotColor"]    = _conf->getPilotColor();
+    doc["band"]          = _conf->getBandIndex();
+    doc["chan"]          = _conf->getChannelIndex();
+    doc["freq"]          = _conf->getFrequency();
     doc["clientIP"]      = MULTINODE_CLIENT_AP_IP;
     doc["nodeId"]        = _myNodeId;  // 0 on first registration
     doc["mac"]           = _myMacAddress;
@@ -224,6 +233,7 @@ bool MultiNodeManager::_postToMasterWithResponse(const String& endpoint, const S
 
 bool MultiNodeManager::handleRegister(const String& pilotName,
                                        uint32_t pilotColor,
+                                       uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
                                        const String& staIP, const String& clientIP,
                                        const String& macAddress,
                                        uint8_t& assignedNodeId) {
@@ -236,6 +246,9 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
         if (macMatch || idMatch || ipMatch) {
             n.pilotName     = pilotName;
             n.pilotColor    = pilotColor;
+            n.bandIndex     = bandIndex;
+            n.channelIndex  = channelIndex;
+            n.frequency     = frequency;
             n.clientIP      = clientIP;
             n.staIP         = staIP;
             if (macAddress.length() > 0) n.macAddress = macAddress;
@@ -267,6 +280,9 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     n.nodeId        = newId;
     n.pilotName     = pilotName;
     n.pilotColor    = pilotColor;
+    n.bandIndex     = bandIndex;
+    n.channelIndex  = channelIndex;
+    n.frequency     = frequency;
     n.staIP         = staIP;
     n.clientIP      = clientIP;
     n.macAddress    = macAddress;
@@ -367,6 +383,18 @@ bool MultiNodeManager::updateNodePilot(uint8_t nodeId, const String& name, uint3
     return false;
 }
 
+bool MultiNodeManager::updateNodeChannel(uint8_t nodeId, uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency) {
+    for (auto& n : _nodes) {
+        if (n.nodeId == nodeId) {
+            n.bandIndex    = bandIndex;
+            n.channelIndex = channelIndex;
+            n.frequency    = frequency;
+            return true;
+        }
+    }
+    return false;
+}
+
 String MultiNodeManager::getNodesToJson() const {
     DynamicJsonDocument doc(8192);  // enlarged for full lap history
     JsonArray arr = doc.createNestedArray("nodes");
@@ -375,6 +403,9 @@ String MultiNodeManager::getNodesToJson() const {
         o["nodeId"]         = n.nodeId;
         o["pilotName"]      = n.pilotName;
         o["pilotColor"]     = n.pilotColor;
+        o["bandIndex"]      = n.bandIndex;
+        o["channelIndex"]   = n.channelIndex;
+        o["frequency"]      = n.frequency;
         o["online"]         = n.online;
         o["running"]        = n.running;
         o["quitEarly"]      = n.quitEarly;
@@ -392,6 +423,21 @@ String MultiNodeManager::getNodesToJson() const {
     String out;
     serializeJson(doc, out);
     return out;
+}
+
+void MultiNodeManager::_broadcastRacePreArm() {
+    for (const auto& n : _nodes) {
+        if (!n.online || n.staIP.isEmpty()) continue;
+        HTTPClient http;
+        String url = "http://" + n.staIP + "/timer/masterPreArm";
+        if (http.begin(url)) {
+            http.setTimeout(500);
+            int code = http.POST("");
+            http.end();
+            DEBUG("[MULTINODE] Race pre-arm → node %u (%s): HTTP %d\n", n.nodeId, n.staIP.c_str(), code);
+        }
+        vTaskDelay(1);
+    }
 }
 
 void MultiNodeManager::_broadcastRaceStart() {

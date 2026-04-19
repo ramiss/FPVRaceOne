@@ -22,6 +22,9 @@ struct NodeInfo {
     uint8_t  nodeId;
     String   pilotName;
     uint32_t pilotColor;
+    uint8_t  bandIndex    = 0;
+    uint8_t  channelIndex = 0;
+    uint16_t frequency    = 0;
     String   clientIP;   // client's own AP IP (master uses this to push commands)
     String   staIP;      // client's STA IP assigned by master's DHCP
     String   macAddress; // client's WiFi MAC — primary unique key
@@ -47,10 +50,12 @@ public:
     // process() will execute the actual HTTP POSTs on the next Core 0 tick.
     void queueRaceStart();
     void queueRaceStop();
+    void queueRacePreArm();
 
     // ── Master-side handlers (called from AsyncWebServer request threads) ──
     bool   handleRegister(const String& pilotName,
                           uint32_t pilotColor,
+                          uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
                           const String& staIP, const String& clientIP,
                           const String& macAddress,
                           uint8_t& assignedNodeId);
@@ -58,7 +63,8 @@ public:
     bool   handleHeartbeat(uint8_t nodeId, bool running, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
     bool   removeNode(uint8_t nodeId);     // master: manually remove a node slot
-    bool   updateNodePilot(uint8_t nodeId, const String& name, uint32_t color); // master: update local display immediately after edit
+    bool   updateNodePilot(uint8_t nodeId, const String& name, uint32_t color);
+    bool   updateNodeChannel(uint8_t nodeId, uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency);
     void   clearAllLaps();                 // master: wipe all stored laps for all nodes
 
     // ── Client-side state setters (called from webserver handlers) ──
@@ -99,6 +105,7 @@ private:
     // Thread-safe flags (set by async handler on Core 0, consumed by process() on Core 0)
     volatile bool     _lapPending              = false;
     volatile uint32_t _pendingLapTime          = 0;
+    volatile bool     _racePreArmPending       = false;
     volatile bool     _raceStartPending        = false;
     volatile bool     _raceStopPending         = false;
     volatile bool     _quitPending             = false;
@@ -108,6 +115,7 @@ private:
     void _sendHeartbeat();
     void _processQueuedLap();
     void _sendQuitNotification();
+    void _broadcastRacePreArm();
     void _broadcastRaceStart();
     void _broadcastRaceStop();
     bool _postToMaster(const String& endpoint, const String& body);

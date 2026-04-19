@@ -141,6 +141,17 @@ bool LapTimer::isRunning() const {
     return state == RUNNING || state == WAITING;
 }
 
+uint32_t LapTimer::getElapsedMs() const {
+    return isRunning() ? (millis() - raceStartTimeMs) : 0;
+}
+
+uint8_t LapTimer::getLapCount() const { return lapCount; }
+
+uint32_t LapTimer::getLapTimeAt(uint8_t index) const {
+    if (index >= LAPTIMER_LAP_HISTORY) return 0;
+    return lapTimes[index];
+}
+
 void LapTimer::stop() {
     DEBUG("LapTimer stopped\n");
     state = STOPPED;

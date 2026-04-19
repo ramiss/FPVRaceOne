@@ -30,7 +30,10 @@ class LapTimer {
     void init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook = nullptr);
     void start();
     void stop();
-    bool isRunning() const;
+    bool     isRunning()           const;
+    uint32_t getElapsedMs()        const;  // ms since race start (0 if stopped)
+    uint8_t  getLapCount()         const;  // laps completed so far
+    uint32_t getLapTimeAt(uint8_t index) const;  // lap time at 0-based index
     void handleLapTimerUpdate(uint32_t currentTimeMs);
 
 #if RSSI_LOGGING_ENABLED

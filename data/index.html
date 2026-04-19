@@ -6,10 +6,10 @@
     <title>FPVRaceOne Lap Timer</title>
     <link rel="icon" type="image/svg+xml" href="logo-white.svg" id="favicon" />
     <link rel="stylesheet" type="text/css" href="style.css?v=%BUILD_TIME%" />
-    <script src="jquery-3.7.1.min.js"></script>
-    <script src="audio-announcer.js"></script>
-    <script src="smoothie.js"></script>
-    <script src="usb-transport.js"></script>
+    <script src="jquery-3.7.1.min.js" defer></script>
+    <script src="audio-announcer.js" defer></script>
+    <script src="smoothie.js" defer></script>
+    <script src="usb-transport.js" defer></script>
   </head>
 
   <body>
@@ -328,6 +328,39 @@
           </select>
           <span id="mnPilotModalColorPreview" style="display:inline-block;width:30px;height:30px;margin-left:10px;border:2px solid var(--border-color);border-radius:4px;background-color:#0080FF;"></span>
         </div>
+        <div class="config-item" style="margin-bottom:14px;">
+          <label for="mnPilotModalBand">Band:</label>
+          <select id="mnPilotModalBand" onchange="mnModalUpdateChannels()">
+            <option value="0">Analog A</option>
+            <option value="1">Analog B</option>
+            <option value="2">Analog E</option>
+            <option value="3">Analog F</option>
+            <option value="4">Analog R</option>
+            <option value="5">Analog L</option>
+            <option value="6">DJIv1 (25Mhz)</option>
+            <option value="7">DJIv1 (25Mhz)CE</option>
+            <option value="8">DJIv1 (50Mhz)</option>
+            <option value="9">DJI03 &amp; 04 (10/20Mhz)</option>
+            <option value="10">DJI03 &amp; 04 (20Mhz)CE</option>
+            <option value="11">DJI03 &amp; 04 (40Mhz)</option>
+            <option value="12">DJI03 &amp; 04 (40Mhz)CE</option>
+            <option value="13">DJI04 Race</option>
+            <option value="14">HDZero Race</option>
+            <option value="15">HDZero E</option>
+            <option value="16">HDZero F</option>
+            <option value="17">HDZero CE</option>
+            <option value="18">WLKSnail Race</option>
+            <option value="19">WLKSnail (25Mhz)</option>
+            <option value="20">WLKSnail (25Mhz)CE</option>
+            <option value="21">WLKSnail (50Mhz)</option>
+          </select>
+        </div>
+        <div class="config-item" style="margin-bottom:14px;">
+          <label for="mnPilotModalChannel">Channel:</label>
+          <select id="mnPilotModalChannel" onchange="mnModalUpdateFreq()"></select>
+          <span id="mnPilotModalFreq" style="margin-left:10px;font-size:13px;color:var(--secondary-color);"></span>
+        </div>
+        <div style="font-size:12px;color:var(--secondary-color);margin-bottom:14px;">Wait ~20 seconds after changing band/channel for the new frequency to calibrate.</div>
         <div style="display:flex;gap:8px;margin-top:20px;align-items:center;">
           <button onclick="mnSavePilotModal()">Save</button>
           <button onclick="mnClosePilotModal()" style="background:var(--border-color)!important;color:var(--text-color)!important;">Cancel</button>
@@ -1232,7 +1265,7 @@
         </div>
       </div>
     </div>
-    <script src="script.js?v=%BUILD_TIME%"></script>
+    <script src="script.js?v=%BUILD_TIME%" defer></script>
   </body>
 </html>
 
