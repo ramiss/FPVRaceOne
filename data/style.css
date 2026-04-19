@@ -2165,6 +2165,10 @@ footer {
 }
 .mn-edit-btn:hover { opacity: 1; background: var(--border-color) !important; }
 
+/* Edit button inside coloured pilot card header — white icon, semi-transparent */
+.mn-card-edit-btn { color: #fff !important; opacity: 0.7; }
+.mn-card-edit-btn:hover { opacity: 1; background: rgba(255,255,255,0.2) !important; }
+
 /* Empty pilot slot */
 .mn-pilot-card-empty .mn-pilot-card-header-empty {
   background: var(--bg-primary) !important;

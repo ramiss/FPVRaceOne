@@ -822,7 +822,12 @@ EEPROM:\n\
         led->on(200);
     });
     
-    // Serve other static files from LittleFS only
+    // index.html: no-cache so OTA updates are reflected immediately.
+    // script.js / style.css: 5-minute TTL so the browser reuses them within a session
+    // without burning a fresh TCP connection on every SSE reconnect.
+    server.serveStatic("/index.html", LittleFS, "/index.html").setCacheControl("no-cache, no-store, must-revalidate");
+    server.serveStatic("/script.js",  LittleFS, "/script.js") .setCacheControl("max-age=300");
+    server.serveStatic("/style.css",  LittleFS, "/style.css") .setCacheControl("max-age=300");
     server.serveStatic("/", LittleFS, "/").setCacheControl("no-cache, no-store, must-revalidate");
 
     events.onConnect([this](AsyncEventSourceClient *client) {

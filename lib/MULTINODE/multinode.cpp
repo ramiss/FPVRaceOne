@@ -181,12 +181,11 @@ void MultiNodeManager::_sendHeartbeat() {
 void MultiNodeManager::_processQueuedLap() {
     if (!_masterConnected || _myNodeId == 0) return;
 
-    _localLapCount++;
-
     DynamicJsonDocument doc(128);
     doc["nodeId"]    = _myNodeId;
     doc["lapTimeMs"] = (uint32_t)_pendingLapTime;
     doc["lapNumber"] = _localLapCount;
+    _localLapCount++;
     String body;
     serializeJson(doc, body);
 
@@ -218,7 +217,7 @@ bool MultiNodeManager::_postToMasterWithResponse(const String& endpoint, const S
     String url = String("http://") + MULTINODE_MASTER_IP + endpoint;
     if (!http.begin(url)) return false;
     http.addHeader("Content-Type", "application/json");
-    http.setTimeout(2000);
+    http.setTimeout(800);
     int code = http.POST(body);
     if (code == 200) {
         response = http.getString();

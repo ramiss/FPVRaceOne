@@ -106,6 +106,18 @@ var lapNo = -1;
 var lapTimes = [];
 var maxLaps = 0;
 
+// Fetch with automatic retry — returns the Response or throws after maxAttempts failures.
+async function fetchWithRetry(url, options, maxAttempts = 3, delayMs = 1000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const r = await fetch(url, options);
+      if (r.ok) return r;
+    } catch (_) {}
+    if (attempt < maxAttempts) await new Promise(res => setTimeout(res, delayMs));
+  }
+  throw new Error(`fetchWithRetry: ${url} failed after ${maxAttempts} attempts`);
+}
+
 // Track data for current race
 var currentTrackId = 0;
 var currentTrackName = '';
@@ -162,10 +174,10 @@ async function initializeTransport() {
   loadRaceHistory();
 
   if (!hasUSB || currentConnectionMode === 'wifi') {
-    // WiFi-only mode
+    // WiFi-only mode — delay SSE so HTML/CSS/JS finish loading first before
+    // the persistent SSE connection opens (avoids hitting ESP32 TCP conn limit).
     console.log('[Init] Initializing WiFi-only mode');
-    setupWiFiEvents();
-    updateConnectionStatus('WiFi', true);
+    setTimeout(() => { setupWiFiEvents(); updateConnectionStatus('WiFi', true); }, 400);
     return;
   }
   
@@ -221,8 +233,7 @@ async function initializeTransport() {
   // Fall back to WiFi if USB failed and in auto mode
   if (currentConnectionMode === 'auto' && !usbConnected) {
     console.log('USB not available, falling back to WiFi');
-    setupWiFiEvents();
-    updateConnectionStatus('WiFi', true);
+    setTimeout(() => { setupWiFiEvents(); updateConnectionStatus('WiFi', true); }, 400);
   } else if (currentConnectionMode === 'usb' && !usbConnected) {
     updateConnectionStatus('USB', false);
   }
@@ -301,8 +312,7 @@ async function onWiFiReconnect() {
 
   // Re-fetch mode and race state to restore everything after a page reload or reconnect.
   try {
-    const r = await fetch('/api/mode');
-    if (!r.ok) return;
+    const r = await fetchWithRetry('/api/mode', {}, 3, 1500);
     const data = await r.json();
     const newMode     = data.nodeMode    || 0;
     const modeChanged = newMode !== mnNodeMode;
@@ -315,32 +325,47 @@ async function onWiFiReconnect() {
     const timerRunning  = data.timerRunning  || false;
     const raceElapsedMs = data.raceElapsedMs || 0;
 
-    if (modeChanged || newMode === 1) {
-      // Restore master race state before polling kicks in so mnRenderRaceTab sees it
-      if (newMode === 1 && timerRunning) {
-        mnRaceRunning = true;
-        if (!mnRaceTimerIntervalId) _mnStartTimer(raceElapsedMs);
-      }
-      onRaceTabOpen();
-      if (newMode === 1 && !mnPollingInterval) mnInitTab();
-      if (newMode === 2) mnStartClientPoll();
+    // Restore master race clock
+    if (newMode === 1 && timerRunning) {
+      mnRaceRunning = true;
+      if (!mnRaceTimerIntervalId) _mnStartTimer(raceElapsedMs);
     }
 
-    // Restore single-pilot and client timer display
+    // Restore single / client timer display
     if (timerRunning && (newMode === 0 || newMode === 2)) {
       startRaceDisplayOnly(raceElapsedMs);
     }
 
-    // Restore in-progress laps: single mode shows lap table; master populates lapTimes[]
-    // so _mnMasterEntry() returns the correct history for the race tab grid
-    if (timerRunning && (newMode === 0 || newMode === 1)) {
+    // Restore in-progress laps sequentially BEFORE starting polling.
+    // Master: populates lapTimes[] that _mnMasterEntry() reads on first render.
+    // Single/Client: rebuilds the lap table DOM.
+    if (timerRunning) {
       try {
-        const lr = await fetch('/api/laps/current');
-        if (lr.ok) {
-          const ld = await lr.json();
-          if (ld.laps && ld.laps.length > 0) _restoreInProgressLaps(ld.laps);
-        }
+        const lr = await fetchWithRetry('/api/laps/current', {}, 3, 1500);
+        const ld = await lr.json();
+        if (ld.laps && ld.laps.length > 0) _restoreInProgressLaps(ld.laps);
       } catch (_) {}
+    }
+
+    // Start mode-specific UI and polling.
+    // Use data already fetched above — do NOT call mnInitTab() here because it
+    // re-fetches /api/mode, creating a 4-connection burst that kills the SSE on ESP32.
+    if (modeChanged || newMode === 1) {
+      onRaceTabOpen();
+      if (newMode === 1) {
+        mnStatusSSID = data.ssid || '';
+        if (!mnPollingInterval) mnStartPolling();  // one fetch, not four
+      }
+      if (newMode === 2) {
+        // Fetch master SSID from config (only on first connect or mode change)
+        if (modeChanged) {
+          try {
+            const r2 = await fetch('/config');
+            if (r2.ok) { const cfg = await r2.json(); mnStatusSSID = cfg.masterSSID || ''; }
+          } catch (_) {}
+        }
+        mnStartClientPoll();
+      }
     }
 
     mnUpdateRaceStatusBar();
@@ -2343,8 +2368,7 @@ function _restoreInProgressLaps(laps) {
   lapNo = -1;
   lapTimes = [];
   const table = document.getElementById('lapTable');
-  if (!table) return;
-  while (table.rows.length > 0) table.deleteRow(0);
+  if (table) while (table.rows.length > 0) table.deleteRow(0);
   let cumSec = 0;
   laps.forEach((l, idx) => {
     const lapSec = (l.lapTimeMs / 1000).toFixed(2);
@@ -2352,18 +2376,19 @@ function _restoreInProgressLaps(laps) {
     lapTimes.push(newLap);
     lapNo = idx;
     cumSec += newLap;
-    const row = table.insertRow();
-    row.setAttribute('data-lap-index', idx);
-    const c1 = row.insertCell(0); c1.innerHTML = lapNo + 1;
-    const c2 = row.insertCell(1);
-    c2.innerHTML = lapNo === 0 ? `Gate 1: ${lapSec}s` : `${lapSec}s`;
-    const gap = idx > 0 ? (newLap - lapTimes[idx - 1]).toFixed(2) : null;
-    const c3 = row.insertCell(2);
-    c3.innerHTML = gap !== null ? (parseFloat(gap) > 0 ? '+' + gap : gap) + 's' : '-';
-    const c4 = row.insertCell(3); c4.innerHTML = cumSec.toFixed(2) + 's';
+    if (table) {
+      const row = table.insertRow();
+      row.setAttribute('data-lap-index', idx);
+      const c1 = row.insertCell(0); c1.innerHTML = lapNo + 1;
+      const c2 = row.insertCell(1);
+      c2.innerHTML = lapNo === 0 ? `Gate 1: ${lapSec}s` : `${lapSec}s`;
+      const gap = idx > 0 ? (newLap - lapTimes[idx - 1]).toFixed(2) : null;
+      const c3 = row.insertCell(2);
+      c3.innerHTML = gap !== null ? (parseFloat(gap) > 0 ? '+' + gap : gap) + 's' : '-';
+      const c4 = row.insertCell(3); c4.innerHTML = cumSec.toFixed(2) + 's';
+    }
   });
-  highlightFastestLap();
-  updateLapCounter();
+  if (table) { highlightFastestLap(); updateLapCounter(); }
 }
 
 function addLap(lapStr) {
@@ -6616,7 +6641,7 @@ function mnStartClientPoll() {
       mnMyNodeId        = d.myNodeId        || 0;
       mnUpdateRaceStatusBar();
     } catch (_) {}
-  }, 2000);
+  }, 15000);
 }
 
 function mnStopClientPoll() {
@@ -6807,20 +6832,17 @@ function mnRenderRaceTab(nodes) {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
     const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
     const hostTag  = n.isMaster ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Host</span>' : '';
+    const isRunningEffective = n.isMaster ? mnRaceRunning : n.running;
     let badge = '';
-    if      (n.quitEarly)                           badge = ' <span class="mn-status-dnf">DNF</span>';
-    else if (n.running && mnRaceRunning)             badge = ' <span class="mn-status-racing">Racing</span>';
-    else if (n.running && !mnRaceRunning && !n.isMaster) badge = ' <span class="mn-status-solo">Solo</span>';
+    if      (n.quitEarly)                                    badge = ' <span class="mn-status-dnf">DNF</span>';
+    else if (isRunningEffective && mnRaceRunning)             badge = ' <span class="mn-status-racing">Racing</span>';
+    else if (isRunningEffective && !mnRaceRunning && !n.isMaster) badge = ' <span class="mn-status-solo">Solo</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
     const statusDotColor = n.online !== false ? '#4caf50' : '#f44336';
-    const editBtn = n.isMaster ? '' :
-      `<button class="mn-edit-btn" onclick="mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;">
-        <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
-      </button>`;
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
       <td class="mn-lb-pilot">
-        ${hostTag}${editBtn}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
+        ${hostTag}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
       </td>
       <td class="mn-lb-mono">${n.lapCount}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(n.totalMs)            : '—'}</td>
@@ -6846,7 +6868,7 @@ function mnRenderRaceTab(nodes) {
 
     const devAttr = mnDevMode ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.lapCount+1},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
     const isRacing = n.isMaster ? mnRaceRunning : n.running;
-    const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
+    const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
     html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${mnDevMode ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Solo race in progress (client running outside a master race)
@@ -7189,36 +7211,52 @@ document.addEventListener('DOMContentLoaded', () => {
     if (_pnd) _pnd.style.cursor = 'pointer';
   }
 
-  fetch('/api/mode').then(r => r.ok ? r.json() : null).then(data => {
-    if (!data) return;
-    mnNodeMode        = data.nodeMode       || 0;
-    mnMyNodeId        = data.myNodeId       || 0;
-    mnMasterConnected = data.masterConnected || false;
-    if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
-    if (typeof audioAnnouncer !== 'undefined') audioAnnouncer.sdAvailable = !!data.sdAvailable;
-    // Apply devMode from firmware config so race tab renders correctly on first load.
-    if (data.devMode !== undefined) {
-      mnDevMode = !!data.devMode;
-      const _dt = document.getElementById('devModeToggle');
-      const _dl = document.getElementById('devModeLabel');
-      const _pnd = document.getElementById('pilotNameDisplay');
-      if (_dt) _dt.checked = mnDevMode;
-      if (_dl) _dl.textContent = mnDevMode ? 'On' : 'Off';
-      if (_pnd) _pnd.style.cursor = mnDevMode ? 'pointer' : 'default';
-      localStorage.setItem('mnDevMode', mnDevMode ? '1' : '0');
-    }
-    onRaceTabOpen();
-    // Client mode: start the connection-state poll (mnInitTab is only called for master)
-    if (data.nodeMode === 2) {
-      if (!mnStatusSSID) {
-        fetch('/config').then(r2 => r2.ok ? r2.json() : null).then(cfg => {
-          if (cfg) mnStatusSSID = cfg.masterSSID || '';
-          mnUpdateRaceStatusBar();
-        }).catch(() => {});
+  (async () => {
+    try {
+      const r = await fetchWithRetry('/api/mode', {}, 3, 1500);
+      const data = await r.json();
+      mnNodeMode        = data.nodeMode       || 0;
+      mnMyNodeId        = data.myNodeId       || 0;
+      mnMasterConnected = data.masterConnected || false;
+      if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
+      if (typeof audioAnnouncer !== 'undefined') audioAnnouncer.sdAvailable = !!data.sdAvailable;
+      if (data.devMode !== undefined) {
+        mnDevMode = !!data.devMode;
+        const _dt = document.getElementById('devModeToggle');
+        const _dl = document.getElementById('devModeLabel');
+        const _pnd = document.getElementById('pilotNameDisplay');
+        if (_dt) _dt.checked = mnDevMode;
+        if (_dl) _dl.textContent = mnDevMode ? 'On' : 'Off';
+        if (_pnd) _pnd.style.cursor = mnDevMode ? 'pointer' : 'default';
+        localStorage.setItem('mnDevMode', mnDevMode ? '1' : '0');
       }
-      mnStartClientPoll();
-    }
-  }).catch(e => console.warn('[Race] /api/mode fetch failed:', e));
+      // Restore race state before rendering
+      if (data.timerRunning) {
+        if (data.nodeMode === 1) {
+          mnRaceRunning = true;
+          if (!mnRaceTimerIntervalId) _mnStartTimer(data.raceElapsedMs || 0);
+        } else {
+          startRaceDisplayOnly(data.raceElapsedMs || 0);
+        }
+        try {
+          const lr = await fetchWithRetry('/api/laps/current', {}, 3, 1500);
+          const ld = await lr.json();
+          if (ld.laps && ld.laps.length > 0) _restoreInProgressLaps(ld.laps);
+        } catch (_) {}
+      }
+      onRaceTabOpen();
+      if (data.nodeMode === 2) {
+        if (!mnStatusSSID) {
+          try {
+            const r2 = await fetch('/config');
+            if (r2.ok) { const cfg = await r2.json(); mnStatusSSID = cfg.masterSSID || ''; }
+          } catch (_) {}
+          mnUpdateRaceStatusBar();
+        }
+        mnStartClientPoll();
+      }
+    } catch (e) { console.warn('[Race] /api/mode fetch failed:', e); }
+  })();
 
   // Keep paused scanner overlays correct on resize/rotation
   window.addEventListener('resize', () => {
