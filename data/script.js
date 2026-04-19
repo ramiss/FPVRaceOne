@@ -4879,7 +4879,8 @@ function smoothArray(values, windowSize) {
   return out;
 }
 
-// Find up to N prominent peaks that are well separated
+// Find up to N prominent peaks that are well separated.
+// Returns indices into `values` sorted in time order.
 function detectTopPeaks(values, desiredCount = 3) {
   const n = values.length;
   if (n < 20) return [];
@@ -4889,54 +4890,48 @@ function detectTopPeaks(values, desiredCount = 3) {
   const range = maxVal - minVal;
   if (range <= 0) return [];
 
-  // Candidate must be a local maximum and above a prominence threshold
-  const threshold = minVal + range * 0.55; // adjust if needed
-  const candidates = [];
+  // Only consider peaks in the top 30% of the signal range — gate passes
+  // produce strong signals; accepting weaker candidates causes nearby
+  // noise bumps to win over well-separated true laps.
+  const threshold = minVal + range * 0.70;
 
-  // Local maxima check radius
-  const r = 6;
+  // Local-max check radius: wide enough to skip rapid noise spikes
+  const r = 10;
+  const candidates = [];
   for (let i = r; i < n - r; i++) {
     const v = values[i];
     if (v < threshold) continue;
-
     let isMax = true;
     for (let k = 1; k <= r; k++) {
-      if (values[i - k] > v || values[i + k] > v) {
-        isMax = false;
-        break;
-      }
+      if (values[i - k] > v || values[i + k] > v) { isMax = false; break; }
     }
-    if (isMax) {
-      candidates.push({ index: i, value: v });
-    }
+    if (isMax) candidates.push({ index: i, value: v });
   }
 
   if (candidates.length === 0) return [];
 
-  // Sort by peak height desc
+  // Sort tallest first so greedy selection picks the strongest passes
   candidates.sort((a, b) => b.value - a.value);
 
-  // Enforce minimum separation between selected peaks
-  const minSep = Math.max(40, Math.floor(n * 0.12)); // 12% of series or 40 samples
+  // Minimum separation: 20% of recording length.  Gate passes for a 3-lap
+  // calibration run are roughly evenly spaced, so this keeps us from picking
+  // three nearby spikes within one pass.
+  const minSep = Math.max(80, Math.floor(n * 0.20));
   const chosen = [];
-
   for (const c of candidates) {
     if (chosen.length >= desiredCount) break;
-    const tooClose = chosen.some(p => Math.abs(p.index - c.index) < minSep);
-    if (!tooClose) chosen.push(c);
+    if (!chosen.some(p => Math.abs(p.index - c.index) < minSep)) chosen.push(c);
   }
 
-  // If we still don't have enough, relax separation a bit and try again
+  // Relax once if we didn't find enough
   if (chosen.length < desiredCount) {
-    const relaxedSep = Math.max(25, Math.floor(n * 0.08));
+    const relaxedSep = Math.max(40, Math.floor(n * 0.12));
     for (const c of candidates) {
       if (chosen.length >= desiredCount) break;
-      const tooClose = chosen.some(p => Math.abs(p.index - c.index) < relaxedSep);
-      if (!tooClose) chosen.push(c);
+      if (!chosen.some(p => Math.abs(p.index - c.index) < relaxedSep)) chosen.push(c);
     }
   }
 
-  // Return indices sorted in time order
   return chosen
     .slice(0, desiredCount)
     .sort((a, b) => a.index - b.index)
@@ -4944,24 +4939,29 @@ function detectTopPeaks(values, desiredCount = 3) {
 }
 
 function autoPopulateWizardPeaksIfEmpty(rawRssi, smoothedRssi) {
-  // Only run once per wizard run (only when no markers exist)
   if (wizardState.markers.length !== 0) return;
 
-  // We use smoothed data to pick visually obvious peaks, but markers refer to raw indexes
-  const peakIdx = detectTopPeaks(smoothedRssi, 3);
+  // Detect on smoothed data (avoids noise spikes), then snap each index to the
+  // true raw-data maximum nearby so the dot sits on the visible waveform peak.
+  const SNAP_WINDOW = 20;
+  const peakIdx = detectTopPeaks(smoothedRssi, 3).map(idx => {
+    const lo = Math.max(0, idx - SNAP_WINDOW);
+    const hi = Math.min(rawRssi.length - 1, idx + SNAP_WINDOW);
+    let bestIdx = idx, bestVal = -Infinity;
+    for (let i = lo; i <= hi; i++) {
+      if (rawRssi[i] > bestVal) { bestVal = rawRssi[i]; bestIdx = i; }
+    }
+    return bestIdx;
+  });
 
   if (peakIdx.length === 3) {
     wizardState.markers = peakIdx.map((idx, i) => ({ index: idx, lap: i + 1 }));
-    wizardState.currentLap = 4; // done
-    updateWizardStatus('Auto-detected 3 peaks. Undo or click to adjust, then "Calculate Thresholds".');
-
-    // Enable buttons
+    wizardState.currentLap = 4;
+    updateWizardStatus('Auto-detected 3 peaks. Tap a dot to move it, then "Calculate Thresholds".');
     document.getElementById('wizardUndoButton').disabled = false;
     document.getElementById('wizardCalculateButton').disabled = false;
-
     console.log('[Wizard] Auto-peaks:', wizardState.markers.map(m => ({ lap: m.lap, index: m.index, rssi: rawRssi[m.index] })));
   } else {
-    // If we couldn't confidently find 3 peaks, keep manual workflow
     updateWizardStatus(`Mark Peak ${wizardState.currentLap}`);
     console.log('[Wizard] Auto-peak detection found', peakIdx.length, 'peaks; leaving manual.');
   }
@@ -5058,22 +5058,23 @@ function drawWizardChart() {
   }
   ctx.stroke();
   
-  // Draw peak markers
+  // Draw peak markers — Y uses the smoothed value so the dot sits on the
+  // visible waveform; label shows the raw RSSI value for calibration reference.
   wizardState.markers.forEach(marker => {
     const x = padding + (marker.index / (wizardState.data.length - 1)) * chartWidth;
-    const rssi = wizardState.data[marker.index].rssi;
-    const y = height - padding - ((rssi - minRssi) / rssiRange) * chartHeight;
-    
+    const rawRssiVal   = wizardState.data[marker.index].rssi;
+    const smoothedVal  = smoothedRssi[marker.index];
+    const y = height - padding - ((smoothedVal - minRssi) / rssiRange) * chartHeight;
+
     ctx.fillStyle = '#ff5555';
     ctx.beginPath();
     ctx.arc(x, y, 8, 0, 2 * Math.PI);
     ctx.fill();
-    
-    // Draw label
+
     ctx.fillStyle = '#ffffff';
-    ctx.font = '14px Arial';
+    ctx.font = 'bold 13px Arial';
     ctx.textAlign = 'center';
-    ctx.fillText(`Peak ${marker.lap}`, x, y - 12);
+    ctx.fillText(`P${marker.lap}: ${rawRssiVal}`, x, y - 13);
   });
   
   // Add click/tap listener
@@ -5159,15 +5160,6 @@ function calculateThresholds() {
 
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
-  function windowMin(a, b) {
-    a = Math.max(0, Math.min(a, wizardState.data.length - 1));
-    b = Math.max(0, Math.min(b, wizardState.data.length - 1));
-    if (b < a) [a, b] = [b, a];
-    let m = Infinity;
-    for (let i = a; i <= b; i++) m = Math.min(m, wizardState.data[i].rssi);
-    return m;
-  }
-
   function windowMax(a, b) {
     a = Math.max(0, Math.min(a, wizardState.data.length - 1));
     b = Math.max(0, Math.min(b, wizardState.data.length - 1));
@@ -5177,123 +5169,42 @@ function calculateThresholds() {
     return m;
   }
 
-  // Markers in time order
   const markers = [...wizardState.markers].sort((a, b) => a.index - b.index);
-
   const allRssiValues = wizardState.data.map(d => d.rssi);
-  const globalBaseline = Math.min(...allRssiValues);
 
-  // --- Tunables aligned to your goals ---
-  const PEAK_HALF_WINDOW = 20;      // re-find true peak near click
-  const EDGE_GUARD = 10;            // exclude immediate peak area
-  const VALLEY_SEARCH_SPAN = 180;   // valley window between peaks
-  const MIN_AMPLITUDE = 15;         // if peak-valley too small, fall back
+  // Re-find the true raw peak near each marker (handles smoothing offset).
+  const PEAK_WINDOW = 20;
+  const peakRssis = markers.map(m =>
+    windowMax(m.index - PEAK_WINDOW, m.index + PEAK_WINDOW)
+  );
 
-  // Enter near peak: 0.75..0.90 is typical. Higher = closer to peak.
-  const ENTER_FRAC_HIGH = 0.90;
+  // Enter must be crossed by every gate pass, so it's keyed to the WEAKEST
+  // peak.  Place it at 93 % of that peak — ~7 % headroom for lap-to-lap
+  // variation, which maps to ~4–6 RSSI units on typical indoor setups.
+  const minPeak = Math.min(...peakRssis);
+  let calculatedEnter = Math.round(minPeak * 0.93);
 
-  // Exit close to enter: fraction of amplitude below enter.
-  // Smaller = closer (less hysteresis), but risk chatter/false exit.
-  const EXIT_DELTA_FRAC = 0.08;
+  // Exit is deliberately tight (4 units) for close-range detection.
+  // Real-world testing shows ~4 units works well for 5-foot gate detection.
+  const EXIT_GAP = 4;
+  let calculatedExit = calculatedEnter - EXIT_GAP;
 
-  // Minimum absolute gap between enter and exit (in RSSI units)
-  const MIN_GAP = 10;
+  // Noise floor: 35th-percentile of the recording keeps exit above ambient.
+  const sorted = [...allRssiValues].sort((a, b) => a - b);
+  const noiseFloor = sorted[Math.floor(sorted.length * 0.35)];
+  calculatedExit = Math.max(noiseFloor + 3, calculatedExit);
 
-  // Keep exit above valley by at least this margin to avoid dip/noise chatter
-  const VALLEY_MARGIN = 4;
-
-  // Clamp thresholds into UI range
-  const MIN_RSSI = 50;
+  // Final clamp
+  const MIN_RSSI = 30;
   const MAX_RSSI = 255;
-
-  // 1) Recompute peaks near each marker
-  const peakInfo = markers.map(m => {
-    const idx = m.index;
-    const peak = windowMax(idx - PEAK_HALF_WINDOW, idx + PEAK_HALF_WINDOW);
-    return { idx, peak };
-  });
-
-  // 2) Valleys between peaks (and pre/post)
-  function valleyBetween(i, j) {
-    const left = peakInfo[i].idx;
-    const right = peakInfo[j].idx;
-    const start = left + EDGE_GUARD;
-    const end = right - EDGE_GUARD;
-    if (end <= start) return globalBaseline;
-
-    const mid = Math.floor((left + right) / 2);
-    const a = Math.max(start, mid - Math.floor(VALLEY_SEARCH_SPAN / 2));
-    const b = Math.min(end, mid + Math.floor(VALLEY_SEARCH_SPAN / 2));
-    return windowMin(a, b);
-  }
-
-  const preValley = windowMin(0, Math.max(0, peakInfo[0].idx - EDGE_GUARD));
-  const postValley = windowMin(Math.min(wizardState.data.length - 1, peakInfo[2].idx + EDGE_GUARD), wizardState.data.length - 1);
-  const v01 = valleyBetween(0, 1);
-  const v12 = valleyBetween(1, 2);
-
-  const localValleys = [
-    Math.min(preValley, v01),
-    Math.min(v01, v12),
-    Math.min(v12, postValley)
-  ].map(v => Math.max(v, globalBaseline));
-
-  // 3) Compute per-pass enter/exit candidates
-  const enterCandidates = [];
-  const exitCandidates = [];
-
-  for (let i = 0; i < 3; i++) {
-    const peak = peakInfo[i].peak;
-    const valley = localValleys[i];
-    const amp = peak - valley;
-
-    if (amp < MIN_AMPLITUDE) {
-      // Fallback: use global range but still keep "enter high" and "exit close"
-      const globalRange = (Math.max(...allRssiValues) - globalBaseline) || 1;
-      const enter = Math.round(globalBaseline + globalRange * 0.80);
-      const exit = Math.max(globalBaseline + VALLEY_MARGIN, enter - Math.max(MIN_GAP, Math.round(globalRange * 0.10)));
-      enterCandidates.push(enter);
-      exitCandidates.push(exit);
-      continue;
-    }
-
-    // Enter near peak but still tied to local valley+amplitude
-    const enter = Math.round(valley + amp * ENTER_FRAC_HIGH);
-
-    // Exit close to enter (small hysteresis), but not allowed to drop into valley noise
-    const delta = Math.max(MIN_GAP, Math.round(amp * EXIT_DELTA_FRAC));
-    const exit = Math.max(valley + VALLEY_MARGIN, enter - delta);
-
-    enterCandidates.push(enter);
-    exitCandidates.push(exit);
-  }
-
-  // 4) Choose final thresholds for consistency across all 3 passes
-  // Enter: pick the LOWEST of the "high" enters so all three passes can hit it.
-  let calculatedEnter = Math.min(...enterCandidates);
-
-  // Exit: keep it as CLOSE as possible to enter, but ensure it will still be hit reliably.
-  // Using min(exitCandidates) makes it easiest to drop below on all 3 passes.
-  let calculatedExit = Math.min(...exitCandidates);
-
-  // Ensure exit is close to enter (but still below)
-  calculatedExit = Math.min(calculatedExit, calculatedEnter - MIN_GAP);
-
-  // Guardrails
-  calculatedExit = Math.max(globalBaseline + VALLEY_MARGIN, calculatedExit);
-  calculatedEnter = Math.max(calculatedExit + MIN_GAP, calculatedEnter);
-
-  // Clamp
   calculatedEnter = clamp(calculatedEnter, MIN_RSSI, MAX_RSSI);
-  calculatedExit = clamp(calculatedExit, MIN_RSSI, MAX_RSSI);
+  calculatedExit  = clamp(calculatedExit,  MIN_RSSI, calculatedEnter - 2);
 
   wizardState.calculatedEnter = calculatedEnter;
-  wizardState.calculatedExit = calculatedExit;
+  wizardState.calculatedExit  = calculatedExit;
 
-  console.log('[Wizard] peaks:', peakInfo.map(p => p.peak));
-  console.log('[Wizard] valleys:', localValleys);
-  console.log('[Wizard] enterCandidates:', enterCandidates, 'exitCandidates:', exitCandidates);
-  console.log('[Wizard] final:', { enter: calculatedEnter, exit: calculatedExit, globalBaseline });
+  console.log('[Wizard] peaks:', peakRssis, 'minPeak:', minPeak, 'noiseFloor:', noiseFloor);
+  console.log('[Wizard] final:', { enter: calculatedEnter, exit: calculatedExit });
 
   // Show results
   document.getElementById('wizardMarking').style.display = 'none';
