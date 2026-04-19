@@ -79,3 +79,7 @@ tools/apply_frontend_defaults.html
 
 # Desktop app builds (too large for git, use GitHub releases)
 *.zip
+/To Do.txt
+/.claude/settings.local.json
+/docs/FLASHING_OPTIONAL-Prev.md
+/docs/FLASHING_OPTIONAL.md

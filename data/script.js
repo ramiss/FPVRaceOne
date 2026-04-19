@@ -106,6 +106,40 @@ var lapNo = -1;
 var lapTimes = [];
 var maxLaps = 0;
 
+// ── Splash screen ────────────────────────────────────────────────────────────
+let _splashHidden = false;
+function setSplashStatus(text) {
+  const el = document.getElementById('splash-status');
+  if (el) el.textContent = text;
+}
+function hideSplash() {
+  if (_splashHidden) return;
+  _splashHidden = true;
+  const el = document.getElementById('splash');
+  if (!el) return;
+  setSplashStatus('Connected');
+  el.classList.add('out');
+  setTimeout(() => el.remove(), 500);
+}
+// Fallback — remove splash after 12 s even if every fetch fails
+setTimeout(hideSplash, 12000);
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Dynamically inject a <script> tag and return a Promise that resolves when loaded.
+// Subsequent calls for the same URL resolve immediately (idempotent).
+const _loadedScripts = {};
+function loadScript(src) {
+  if (_loadedScripts[src]) return _loadedScripts[src];
+  _loadedScripts[src] = new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = src;
+    s.onload  = resolve;
+    s.onerror = () => reject(new Error('Failed to load ' + src));
+    document.head.appendChild(s);
+  });
+  return _loadedScripts[src];
+}
+
 // Fetch with automatic retry — returns the Response or throws after maxAttempts failures.
 async function fetchWithRetry(url, options, maxAttempts = 3, delayMs = 1000) {
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -113,7 +147,10 @@ async function fetchWithRetry(url, options, maxAttempts = 3, delayMs = 1000) {
       const r = await fetch(url, options);
       if (r.ok) return r;
     } catch (_) {}
-    if (attempt < maxAttempts) await new Promise(res => setTimeout(res, delayMs));
+    if (attempt < maxAttempts) {
+      setSplashStatus(`Retrying\u2026 (${attempt}/${maxAttempts})`);
+      await new Promise(res => setTimeout(res, delayMs));
+    }
   }
   throw new Error(`fetchWithRetry: ${url} failed after ${maxAttempts} attempts`);
 }
@@ -150,8 +187,8 @@ let keepaliveWatchdogTimer = null;
 const KEEPALIVE_TIMEOUT_MS = 12000; // flag stale connection after 2+ missed keepalives (server sends every 5s)
 var rssiChart;
 var crossing = false;
-var rssiSeries = new TimeSeries();
-var rssiCrossingSeries = new TimeSeries();
+var rssiSeries = null;          // initialised inside createRssiChart() after smoothie.js loads
+var rssiCrossingSeries = null;
 var maxRssiValue = enterRssi + 10;
 var minRssiValue = exitRssi - 10;
 
@@ -181,8 +218,14 @@ async function initializeTransport() {
     return;
   }
   
-  // Try USB first in auto/usb mode
+  // Try USB first in auto/usb mode — lazy-load the USB transport library now
+  // (not needed for WiFi-only browsers, saving one script fetch on every page load)
   if (currentConnectionMode === 'auto' || currentConnectionMode === 'usb') {
+    try { await loadScript('usb-transport.js'); } catch (_) {
+      console.warn('[Init] usb-transport.js failed to load, falling back to WiFi');
+      setTimeout(() => { setupWiFiEvents(); updateConnectionStatus('WiFi', true); }, 400);
+      return;
+    }
     try {
       console.log('[Init] Creating USBTransport...');
       transportManager = new USBTransport();
@@ -369,8 +412,10 @@ async function onWiFiReconnect() {
     }
 
     mnUpdateRaceStatusBar();
+    hideSplash();
   } catch (err) {
     console.warn('[Reconnect] /api/mode fetch failed:', err);
+    hideSplash();
   }
 }
 
@@ -864,13 +909,17 @@ onload = async function (e) {
     updateChannelOptionsForBand();
     populateFreqOutput();
 
-    stopRaceButton.disabled = true;
-    startRaceButton.disabled = false;
-    addLapButton.disabled = true;
-
-    clearInterval(timerInterval);
-    timer.innerHTML = "00:00:00s";
-    clearLaps();
+    // Only reset timer and laps when race is not already running.
+    // DOMContentLoaded restores an in-progress race before onload's config block runs;
+    // clearing here would wipe the restored laps.
+    if (stopRaceButton.disabled) {
+      stopRaceButton.disabled = true;
+      startRaceButton.disabled = false;
+      addLapButton.disabled = true;
+      clearInterval(timerInterval);
+      timer.innerHTML = "00:00:00s";
+      clearLaps();
+    }
 
     // Apply voice enabled state from device config (DO NOT auto-save here)
     audioEnabled = !!Number(configData.voiceEnabled);
@@ -1613,7 +1662,10 @@ function exitCalibrationOverviewMode() {
 
 setInterval(addRssiPoint, 200);
 
-function createRssiChart() {
+async function createRssiChart() {
+  await loadScript('smoothie.js');
+  rssiSeries         = new TimeSeries();
+  rssiCrossingSeries = new TimeSeries();
   rssiChart = new SmoothieChart({
     responsive: true,
     millisPerPixel: 50,
@@ -1672,9 +1724,10 @@ function openTab(evt, tabName) {
       btn.addEventListener('click', toggleRssiPaused);
       btn.textContent = rssiPaused ? 'Resume' : 'Pause';
     }
-    // Create the chart now that the canvas is visible and has real dimensions
+    // Create the chart now that the canvas is visible and has real dimensions.
+    // createRssiChart() is async — it lazy-loads smoothie.js on first call.
     if (!rssiChart) {
-      createRssiChart();
+      createRssiChart();  // intentionally not awaited; addRssiPoint guards with if(!rssiChart)
     }
   }
 
@@ -2284,45 +2337,25 @@ if (batteryToggle) {
 
 function updateAnnouncerRate(obj, value) {
   announcerRate = parseFloat(value);
-  $(obj).parent().find("span").text(announcerRate.toFixed(1));
+  obj.parentElement.querySelector('span').textContent = announcerRate.toFixed(1);
   audioAnnouncer.setRate(announcerRate);
-  // Auto-save when changed
   autoSaveConfig();
 }
 
 function updateMinLap(obj, value) {
-  $(obj)
-    .parent()
-    .find("span")
-    .text(parseFloat(value).toFixed(1) + "s");
-  // Auto-save when changed
+  obj.parentElement.querySelector('span').textContent = parseFloat(value).toFixed(1) + 's';
   autoSaveConfig();
 }
 
 function updateAlarmThreshold(obj, value) {
-  $(obj)
-    .parent()
-    .find("span")
-    .text(parseFloat(value).toFixed(1) + "v");
-  // Auto-save when changed
+  obj.parentElement.querySelector('span').textContent = parseFloat(value).toFixed(1) + 'v';
   autoSaveConfig();
 }
 
 function updateMaxLaps(obj, value) {
   maxLaps = parseInt(value);
-  let displayText;
-  if (maxLaps === 0) {
-    displayText = "Inf.";
-  } else if (maxLaps === 1) {
-    displayText = "1";
-  } else {
-    displayText = maxLaps;
-  }
-  $(obj)
-    .parent()
-    .find("span")
-    .text(displayText);
-  // Auto-save when changed
+  const displayText = maxLaps === 0 ? 'Inf.' : String(maxLaps);
+  obj.parentElement.querySelector('span').textContent = displayText;
   autoSaveConfig();
 }
 
@@ -2855,7 +2888,7 @@ function setStrobeColor() {
 
 function updateLedBrightness(obj, value) {
   const brightness = parseInt(value, 10);
-  $(obj).parent().find('span').text(brightness);
+  obj.parentElement.querySelector('span').textContent = brightness;
 
   // Keep existing live behavior
   sendLedCommand('brightness', { brightness })
@@ -2869,7 +2902,7 @@ function updateLedBrightness(obj, value) {
 
 function updateLedSpeed(obj, value) {
   const speed = parseInt(value, 10);
-  $(obj).parent().find('span').text(speed);
+  obj.parentElement.querySelector('span').textContent = speed;
 
   // Keep existing live behavior
   sendLedCommand('speed', { speed })
@@ -6256,7 +6289,7 @@ function openSettingsModal() {
         const ledBrightnessInput = document.getElementById('ledBrightness');
         if (config.ledBrightness !== undefined && ledBrightnessInput) {
           ledBrightnessInput.value = config.ledBrightness;
-          $(ledBrightnessInput).parent().find('span').text(config.ledBrightness);
+          ledBrightnessInput.parentElement.querySelector('span').textContent = config.ledBrightness;
         }
         
         // Pilot settings
@@ -7213,6 +7246,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   (async () => {
     try {
+      setSplashStatus('Connecting to timer\u2026');
       const r = await fetchWithRetry('/api/mode', {}, 3, 1500);
       const data = await r.json();
       mnNodeMode        = data.nodeMode       || 0;
@@ -7255,7 +7289,11 @@ document.addEventListener('DOMContentLoaded', () => {
         }
         mnStartClientPoll();
       }
-    } catch (e) { console.warn('[Race] /api/mode fetch failed:', e); }
+      hideSplash();
+    } catch (e) {
+      console.warn('[Race] /api/mode fetch failed:', e);
+      hideSplash();
+    }
   })();
 
   // Keep paused scanner overlays correct on resize/rotation

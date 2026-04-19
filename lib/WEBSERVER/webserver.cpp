@@ -130,7 +130,9 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     } else {
         changeMode = WIFI_STA;
     }
-    changeTimeMs = millis();
+    // Pre-expire the delay so the first handleWebUpdate() starts WiFi immediately
+    // without waiting WIFI_RECONNECT_TIMEOUT_MS on every boot.
+    changeTimeMs = millis() - WIFI_RECONNECT_TIMEOUT_MS;
     lastStatus = WL_DISCONNECTED;
 }
 
@@ -276,6 +278,10 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 uint8_t maxConn = (conf->getNodeMode() == 1) ? 8 : 4;
                 WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
 
+                // Disable modem power save — without this the AP sleeps between beacons
+                // and clients drop ~50% of the time on ESP32C6.
+                esp_wifi_set_ps(WIFI_PS_NONE);
+
                 // Force HT20 (20 MHz) to reduce adjacent-channel interference
                 esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
                 // Standard 802.11 b/g/n — no proprietary LR (LR only works between ESP32 devices)
@@ -300,12 +306,16 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
                 WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, 0, 0, 4);
 
+                // Disable modem power save on both interfaces for AP+STA stability
+                esp_wifi_set_ps(WIFI_PS_NONE);
+
                 esp_wifi_set_bandwidth(WIFI_IF_AP,  WIFI_BW_HT20);
                 esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
                 esp_wifi_set_protocol(WIFI_IF_AP,  WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
                 esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 
                 changeTimeMs = currentTimeMs;
+                WiFi.setAutoReconnect(true);
                 WiFi.begin(conf->getMasterSSID(), conf->getMasterPassword());
                 startServices();
                 buz->beep(500);
@@ -322,6 +332,7 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
                 esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
                 changeTimeMs = currentTimeMs;
+                WiFi.setAutoReconnect(true);
                 WiFi.begin(conf->getSsid(), conf->getPassword());
                 startServices();
                 led->blink(200);
@@ -825,9 +836,12 @@ EEPROM:\n\
     // index.html: no-cache so OTA updates are reflected immediately.
     // script.js / style.css: 5-minute TTL so the browser reuses them within a session
     // without burning a fresh TCP connection on every SSE reconnect.
-    server.serveStatic("/index.html", LittleFS, "/index.html").setCacheControl("no-cache, no-store, must-revalidate");
-    server.serveStatic("/script.js",  LittleFS, "/script.js") .setCacheControl("max-age=300");
-    server.serveStatic("/style.css",  LittleFS, "/style.css") .setCacheControl("max-age=300");
+    server.serveStatic("/index.html",       LittleFS, "/index.html")      .setCacheControl("no-cache, no-store, must-revalidate");
+    server.serveStatic("/script.js",        LittleFS, "/script.js")       .setCacheControl("max-age=300");
+    server.serveStatic("/style.css",        LittleFS, "/style.css")       .setCacheControl("max-age=300");
+    server.serveStatic("/audio-announcer.js", LittleFS, "/audio-announcer.js").setCacheControl("max-age=300");
+    server.serveStatic("/smoothie.js",      LittleFS, "/smoothie.js")     .setCacheControl("max-age=300");
+    server.serveStatic("/usb-transport.js", LittleFS, "/usb-transport.js").setCacheControl("max-age=300");
     server.serveStatic("/", LittleFS, "/").setCacheControl("no-cache, no-store, must-revalidate");
 
     events.onConnect([this](AsyncEventSourceClient *client) {
