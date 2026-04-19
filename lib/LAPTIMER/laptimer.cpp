@@ -502,6 +502,7 @@ void LapTimer::finishLap() {
     } else {
         lapTimes[lapCount] = rssiPeakTimeMs - startTimeMs;
     }
+    lastLapPeakRssi = rssiPeak;
     DEBUG("Lap finished, lap time = %u\n", lapTimes[lapCount]);
 
 #if RSSI_LOGGING_ENABLED
@@ -560,6 +561,10 @@ uint32_t LapTimer::getLapTime() {
         lapTime = lapTimes[lapCount - 1];
     }
     return lapTime;
+}
+
+uint8_t LapTimer::getLastLapPeakRssi() const {
+    return lastLapPeakRssi;
 }
 
 bool LapTimer::isLapAvailable() {

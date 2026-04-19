@@ -23,7 +23,7 @@ class Webserver : public TransportInterface {
     void handleWebUpdate(uint32_t currentTimeMs);
     
     // TransportInterface implementation
-    void sendLapEvent(uint32_t lapTimeMs) override;
+    void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) override;
     void sendRssiEvent(uint8_t rssi) override;
     void sendRaceStateEvent(const char* state) override;
     bool isConnected() override;

@@ -189,6 +189,7 @@ var rssiChart;
 var crossing = false;
 var rssiSeries = null;          // initialised inside createRssiChart() after smoothie.js loads
 var rssiCrossingSeries = null;
+var rssiLapMarkerSeries = null; // brief full-height spike at each lap detection
 var maxRssiValue = enterRssi + 10;
 var minRssiValue = exitRssi - 10;
 
@@ -482,9 +483,23 @@ function setupWiFiEvents() {
   }, false);
 
   eventSource.addEventListener("lap", function (e) {
-    var lap = (parseFloat(e.data) / 1000).toFixed(2);
+    // Format: "lapTimeMs,peakRssi"  (peakRssi may be absent on older firmware)
+    const parts   = e.data.split(',');
+    const lapMs   = parseFloat(parts[0]);
+    const peakRssi = parts.length > 1 ? parseInt(parts[1], 10) : 0;
+    var lap = (lapMs / 1000).toFixed(2);
     addLap(lap);
-    console.log("lap:", lap + "s");
+    console.log("lap:", lap + "s", "peakRssi:", peakRssi);
+    // Paint a brief marker spike on the live RSSI chart at the exact peak RSSI
+    // value confirmed by the firmware. The spike height reflects the actual
+    // detected peak — useful for calibrating the enter/exit thresholds.
+    if (rssiLapMarkerSeries && peakRssi > 0) {
+      const t = Date.now();
+      rssiLapMarkerSeries.append(t - 50,  0);        // sharp leading edge
+      rssiLapMarkerSeries.append(t,        peakRssi); // true peak height
+      rssiLapMarkerSeries.append(t + 500,  peakRssi); // hold briefly so it's readable
+      rssiLapMarkerSeries.append(t + 600,  0);        // drop back to baseline
+    }
   }, false);
 
   // Sync race button state when the server starts or stops a race
@@ -1666,6 +1681,7 @@ async function createRssiChart() {
   await loadScript('smoothie.js');
   rssiSeries         = new TimeSeries();
   rssiCrossingSeries = new TimeSeries();
+  rssiLapMarkerSeries = new TimeSeries();
   rssiChart = new SmoothieChart({
     responsive: true,
     millisPerPixel: 50,
@@ -1690,6 +1706,11 @@ async function createRssiChart() {
     lineWidth: 1.7,
     strokeStyle: "none",
     fillStyle: "hsla(136, 71%, 70%, 0.3)",
+  });
+  rssiChart.addTimeSeries(rssiLapMarkerSeries, {
+    lineWidth: 0,
+    strokeStyle: "none",
+    fillStyle: "hsla(45, 100%, 60%, 0.55)",
   });
   rssiChart.streamTo(document.getElementById("rssiChart"), 200);
 }
@@ -5055,15 +5076,26 @@ function drawWizardChart() {
     ctx.fillText(`Peak ${marker.lap}`, x, y - 12);
   });
   
-  // Add click listener
+  // Add click/tap listener
   canvas.onclick = function(event) {
     const rect = canvas.getBoundingClientRect();
     const clickX = event.clientX - rect.left;
-    
-    // Convert click position to data index
+
     const dataIndex = Math.round(((clickX - padding) / chartWidth) * (wizardState.data.length - 1));
-    
-    if (dataIndex >= 0 && dataIndex < wizardState.data.length) {
+    if (dataIndex < 0 || dataIndex >= wizardState.data.length) return;
+
+    if (wizardState.currentLap > 3 && wizardState.markers.length === 3) {
+      // All peaks already placed (including auto-detected). Move the nearest
+      // marker to where the user tapped so they can fine-tune the positions.
+      let nearestMarkerIdx = 0;
+      let nearestDist = Infinity;
+      wizardState.markers.forEach((m, i) => {
+        const dist = Math.abs(m.index - dataIndex);
+        if (dist < nearestDist) { nearestDist = dist; nearestMarkerIdx = i; }
+      });
+      wizardState.markers[nearestMarkerIdx].index = dataIndex;
+      drawWizardChart();
+    } else {
       addWizardMarker(dataIndex);
     }
   };

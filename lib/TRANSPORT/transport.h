@@ -10,7 +10,7 @@ class TransportInterface {
     virtual ~TransportInterface() {}
     
     // Send lap time event to all connected clients
-    virtual void sendLapEvent(uint32_t lapTimeMs) = 0;
+    virtual void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) = 0;
     
     // Send RSSI value to all connected clients (if streaming enabled)
     virtual void sendRssiEvent(uint8_t rssi) = 0;
@@ -38,10 +38,10 @@ class TransportManager {
     }
     
     // Broadcast lap event to all transports
-    void broadcastLapEvent(uint32_t lapTimeMs) {
+    void broadcastLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) {
         for (uint8_t i = 0; i < transportCount; i++) {
             if (transports[i] && transports[i]->isConnected()) {
-                transports[i]->sendLapEvent(lapTimeMs);
+                transports[i]->sendLapEvent(lapTimeMs, peakRssi);
             }
         }
     }

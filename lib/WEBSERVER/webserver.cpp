@@ -141,10 +141,10 @@ void Webserver::setTransportManager(TransportManager *tm) {
 }
 
 // TransportInterface implementation
-void Webserver::sendLapEvent(uint32_t lapTimeMs) {
+void Webserver::sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi) {
     if (!servicesStarted) return;
-    char buf[16];
-    snprintf(buf, sizeof(buf), "%u", lapTimeMs);
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%u,%u", lapTimeMs, peakRssi);
     events.send(buf, "lap");
 }
 

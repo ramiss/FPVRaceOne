@@ -42,6 +42,7 @@ class LapTimer {
 #endif
     uint8_t getRssi();
     uint32_t getLapTime();
+    uint8_t  getLastLapPeakRssi() const;
     bool isLapAvailable();
     
     // Calibration wizard methods
@@ -88,6 +89,7 @@ class LapTimer {
 
     uint8_t rssiPeak;
     uint32_t rssiPeakTimeMs;
+    uint8_t lastLapPeakRssi = 0;  // peak RSSI of the most recently completed lap
 
     // Gate state tracking / debounce helpers
     bool gateExited;          // True when we're confidently outside the gate region

@@ -310,8 +310,9 @@ void loop() {
     
     // Broadcast lap events to all transports (WiFi + USB)
     if (timer.isLapAvailable()) {
-        uint32_t lapTime = timer.getLapTime();
-        transportManager.broadcastLapEvent(lapTime);
+        uint32_t lapTime   = timer.getLapTime();
+        uint8_t  peakRssi  = timer.getLastLapPeakRssi();
+        transportManager.broadcastLapEvent(lapTime, peakRssi);
         // In client mode, also queue the lap to be forwarded to the master node
         multiNodeManager.queueLap(lapTime);
     }
