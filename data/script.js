@@ -7296,6 +7296,15 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   })();
 
+  // Close the SSE connection explicitly before page reload/navigation.
+  // Windows OS buffers SSE data at the TCP layer after the tab is gone, so the
+  // server's keepalive-based dead-connection detection never fires. Sending a
+  // TCP FIN here lets the ESP32 reclaim the socket immediately instead of after
+  // a 30–120 s TCP timeout, preventing socket exhaustion on repeated reloads.
+  window.addEventListener('pagehide', () => {
+    if (eventSource) { eventSource.close(); eventSource = null; }
+  });
+
   // Keep paused scanner overlays correct on resize/rotation
   window.addEventListener('resize', () => {
     clearTimeout(window.__rssiResizeT);

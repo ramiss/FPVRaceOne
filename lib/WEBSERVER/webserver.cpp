@@ -185,6 +185,17 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         sseKeepaliveMs = currentTimeMs;
     }
 
+    // Evict zombie SSE connections left by browser page reloads on Windows.
+    // Windows OS ACKs incoming SSE data at the TCP level even after the tab is gone,
+    // so the keepalive ping never triggers AsyncTCP's ACK timeout for these sockets.
+    // When count > 1 we have at least one stale connection; close all so the live
+    // browser reconnects cleanly. Cooldown prevents thrashing during the reconnect.
+    if (servicesStarted && events.count() > 1 &&
+        (currentTimeMs - sseCleanupMs) > 5000) {
+        sseCleanupMs = currentTimeMs;
+        events.close();
+    }
+
     // Push multiNodeClientState SSE to client browser when connection state changes
     if (servicesStarted && multiNode && multiNode->isClientMode() &&
         multiNode->consumeClientStateChanged()) {
