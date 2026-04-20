@@ -555,6 +555,20 @@ button.active {
   }
 }
 
+.mn-race-buttons {
+  display: flex;
+  justify-content: space-between;
+  max-width: 480px;
+  margin: 0 auto;
+  grid-template-columns: unset;
+}
+
+.mn-race-buttons button {
+  width: auto;
+  min-width: 110px;
+  flex: 0 0 auto;
+}
+
 table {
   width: 100%;
   border-collapse: collapse;
