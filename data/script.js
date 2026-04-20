@@ -7,6 +7,7 @@ let eventSourceReconnectTimer = null;
 let eventSourceReconnectAttempts = 0;
 const MAX_RECONNECT_ATTEMPTS = 10;
 const RECONNECT_DELAY_MS = 2000;
+const RECONNECT_DELAY_FIRST_MS = 500;
 let connectionStatusUpdateInterval = null;
 let stagedConfig = {};      
 let stagedDirty = false;    
@@ -121,8 +122,8 @@ function hideSplash() {
   el.classList.add('out');
   setTimeout(() => el.remove(), 500);
 }
-// Fallback — remove splash after 12 s even if every fetch fails
-setTimeout(hideSplash, 12000);
+// Fallback — remove splash after 6 s even if every fetch fails
+setTimeout(hideSplash, 6000);
 // ─────────────────────────────────────────────────────────────────────────────
 
 // Dynamically inject a <script> tag and return a Promise that resolves when loaded.
@@ -460,10 +461,11 @@ function setupWiFiEvents() {
         console.log(msg);
         showDisconnectedBanner(msg);
 
+        const delay = eventSourceReconnectAttempts === 1 ? RECONNECT_DELAY_FIRST_MS : RECONNECT_DELAY_MS;
         eventSourceReconnectTimer = setTimeout(() => {
           console.log('Attempting EventSource reconnect...');
           setupWiFiEvents();
-        }, RECONNECT_DELAY_MS);
+        }, delay);
       } else {
         showDisconnectedBanner('Connection lost. Please refresh the page.');
         console.error('Max reconnect attempts reached.');

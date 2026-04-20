@@ -48,7 +48,7 @@ class USBTransport : public TransportInterface {
               Led *led, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr);
     
     // TransportInterface implementation
-    void sendLapEvent(uint32_t lapTimeMs) override;
+    void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) override;
     void sendRssiEvent(uint8_t rssi) override;
     void sendRaceStateEvent(const char* state) override;
     bool isConnected() override;

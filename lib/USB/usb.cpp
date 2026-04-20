@@ -33,12 +33,13 @@ void USBTransport::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batM
     DEBUG("USB Transport initialized\n");
 }
 
-void USBTransport::sendLapEvent(uint32_t lapTimeMs) {
+void USBTransport::sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi) {
     if (!isConnected()) return;
-    
+
     DynamicJsonDocument doc(128);
     doc["event"] = "lap";
     doc["data"] = lapTimeMs;
+    if (peakRssi > 0) doc["peakRssi"] = peakRssi;
     
     serializeJson(doc, Serial);
     Serial.println();
