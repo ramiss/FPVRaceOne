@@ -1,3 +1,4 @@
+console.log('[FPV] js');
 // Transport manager for WiFi/USB connectivity
 let transportManager = null;
 let currentConnectionMode = 'auto'; // 'auto', 'wifi', 'usb'
@@ -435,6 +436,8 @@ function setupWiFiEvents() {
   if (!window.EventSource) return;
 
   lastKeepaliveMs = Date.now(); // reset watchdog baseline for this new connection attempt
+  console.log('[FPV] sse attempt=' + eventSourceReconnectAttempts);
+  document.getElementById('splash-status') && (document.getElementById('splash-status').textContent = 'Connecting\u2026');
   eventSource = new EventSource("/events");
 
   eventSource.addEventListener("open", function () {

@@ -50,6 +50,7 @@ static AsyncEventSource events("/events");
 // Randomised at boot — changes on every reboot so the browser always fetches
 // fresh JS/CSS after a filesystem or firmware upload (both require a reboot).
 static String _bootToken;
+static String _cachedHtml;  // index.html pre-built with %BUILD_TIME% substituted at startup
 
 static const char *wifi_hostname = "FPVRaceOne";
 static const char *wifi_ap_ssid_prefix = "FPVRaceOne";
@@ -189,13 +190,14 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     // Windows OS ACKs incoming SSE data at the TCP level even after the tab is gone,
     // so the keepalive ping never triggers AsyncTCP's ACK timeout for these sockets.
     // Strategy: track when count *first* exceeds 1. Only close if it stays > 1 for
-    // 3 seconds — a normal refresh drops back to 1 within ~100 ms via pagehide, so
-    // closing immediately would kill the new legitimate connection.
+    // 500 ms — a normal refresh drops back to 1 within ~100 ms via pagehide, so
+    // closing at 500 ms still gives pagehide time to fire without waiting so long
+    // that events.close() kills the new connection while the page is still loading.
     if (servicesStarted) {
         if (events.count() > 1) {
             if (sseCleanupMs == 0) {
                 sseCleanupMs = currentTimeMs;          // record when overflow first seen
-            } else if (currentTimeMs - sseCleanupMs > 3000) {
+            } else if (currentTimeMs - sseCleanupMs > 500) {
                 sseCleanupMs = 0;                      // reset so we re-arm after close
                 events.close();
             }
@@ -416,17 +418,16 @@ static void handleRoot(AsyncWebServerRequest *request) {
     if (g_rgbLed) g_rgbLed->flashGreen();
 #endif
 
-    if (!LittleFS.begin(false) || !LittleFS.exists("/index.html")) {
+    if (_cachedHtml.isEmpty()) {
         request->send(500, "text/plain",
             "Web UI not found. LittleFS not mounted or /index.html missing.\n"
             "Did you add a LittleFS partition + run uploadfs?");
         return;
     }
 
-    request->send(LittleFS, "/index.html", "text/html", false, [](const String& var) -> String {
-        if (var == "BUILD_TIME") return _bootToken;
-        return String();
-    });
+    AsyncWebServerResponse *response = request->beginResponse(200, "text/html", _cachedHtml);
+    response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+    request->send(response);
 }
 
 static void handleNotFound(AsyncWebServerRequest *request) {
@@ -520,8 +521,36 @@ void Webserver::startServices() {
         return;
     }
 
+    // Force a fresh TCP connection for every HTTP response. Without this Chrome reuses
+    // keep-alive connections; ESPAsyncWebServer stalls mid-stream on reused connections
+    // when serving large files (the 69kB index.html), so Chrome never receives the
+    // <script src="script.js"> tag near the end of the document and the page never loads.
+    // With JS/CSS served via immutable cache, only HTML + logo + SSE make new TCP
+    // connections per reload, so TIME_WAIT accumulation is no longer a problem.
+    DefaultHeaders::Instance().addHeader("Connection", "close");
+
     startLittleFS();
     _bootToken = String(esp_random(), HEX);  // unique per boot → cache-busts JS/CSS on every reboot
+
+    // Pre-build index.html once with %BUILD_TIME% substituted so handleRoot can serve
+    // it directly from RAM. This avoids per-request LittleFS reads + template scanning
+    // (which was misinterpreting CSS keyframe % characters as template delimiters and
+    // causing the 69kB HTML stream to stall partway through on Chrome reloads).
+    {
+        File f = LittleFS.open("/index.html", "r");
+        if (f) {
+            _cachedHtml = "";
+            _cachedHtml.reserve(f.size() + 32);  // one allocation avoids incremental realloc
+            uint8_t chunk[512];
+            size_t n;
+            while ((n = f.read(chunk, sizeof(chunk))) > 0) {
+                _cachedHtml.concat((const char*)chunk, n);
+            }
+            f.close();
+            _cachedHtml.replace("%BUILD_TIME%", _bootToken);
+            DEBUG("HTML cache built: %u bytes\n", _cachedHtml.length());
+        }
+    }
 
     // Initialize storage (SD card or LittleFS fallback)
     storage->init();
@@ -852,15 +881,17 @@ EEPROM:\n\
         led->on(200);
     });
     
-    // index.html: no-cache so OTA updates are reflected immediately.
-    // script.js / style.css: 5-minute TTL so the browser reuses them within a session
-    // without burning a fresh TCP connection on every SSE reconnect.
+    // index.html: no-cache so firmware updates are always reflected.
+    // JS/CSS: immutable + 24h TTL. Chrome won't re-request these on F5 within the same
+    // boot session. The ?v=<bootToken> query string in the HTML busts the cache on every
+    // device restart, so fresh files are always fetched after a reboot.
     server.serveStatic("/index.html",       LittleFS, "/index.html")      .setCacheControl("no-cache, no-store, must-revalidate");
-    server.serveStatic("/script.js",        LittleFS, "/script.js")       .setCacheControl("max-age=300");
-    server.serveStatic("/style.css",        LittleFS, "/style.css")       .setCacheControl("max-age=300");
-    server.serveStatic("/audio-announcer.js", LittleFS, "/audio-announcer.js").setCacheControl("max-age=300");
-    server.serveStatic("/smoothie.js",      LittleFS, "/smoothie.js")     .setCacheControl("max-age=300");
-    server.serveStatic("/usb-transport.js", LittleFS, "/usb-transport.js").setCacheControl("max-age=300");
+    server.serveStatic("/script.js",        LittleFS, "/script.js")       .setCacheControl("max-age=86400, immutable");
+    server.serveStatic("/style.css",        LittleFS, "/style.css")       .setCacheControl("max-age=86400, immutable");
+    server.serveStatic("/audio-announcer.js", LittleFS, "/audio-announcer.js").setCacheControl("max-age=86400, immutable");
+    server.serveStatic("/smoothie.js",      LittleFS, "/smoothie.js")     .setCacheControl("max-age=86400, immutable");
+    server.serveStatic("/usb-transport.js", LittleFS, "/usb-transport.js").setCacheControl("max-age=86400, immutable");
+    server.serveStatic("/logo-white.svg",   LittleFS, "/logo-white.svg")  .setCacheControl("max-age=86400, immutable");
     server.serveStatic("/", LittleFS, "/").setCacheControl("no-cache, no-store, must-revalidate");
 
     events.onConnect([this](AsyncEventSourceClient *client) {

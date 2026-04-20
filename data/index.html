@@ -6,7 +6,9 @@
     <title>FPVRaceOne Lap Timer</title>
     <link rel="icon" type="image/svg+xml" href="logo-white.svg" id="favicon" />
     <link rel="stylesheet" type="text/css" href="style.css?v=%BUILD_TIME%" />
-    <script src="audio-announcer.js" defer></script>
+    <script src="audio-announcer.js?v=%BUILD_TIME%" defer></script>
+    <script src="script.js?v=%BUILD_TIME%" defer></script>
+    <script defer>console.log('[FPV] announcer');</script>
     <style>
       #splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#1a1d2e;transition:opacity .45s ease}
       #splash.out{opacity:0;pointer-events:none}
@@ -29,6 +31,7 @@
       <div id="splash-status">Loading&hellip;</div>
       <div class="sp-dots"><span></span><span></span><span></span></div>
     </div>
+    <script>console.log('[FPV] html');document.getElementById('splash-status').textContent='Loading scripts\u2026';</script>
     <header>
       <nav>
         <div class="logo">
@@ -1281,7 +1284,6 @@
         </div>
       </div>
     </div>
-    <script src="script.js?v=%BUILD_TIME%" defer></script>
   </body>
 </html>
 
