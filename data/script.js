@@ -6649,14 +6649,22 @@ function mnStopClientPoll() {
 }
 
 async function mnRefreshNodes() {
+  console.log('[MN] mnRefreshNodes called');
   try {
     const r = await fetch('/api/multinode/nodes');
+    console.log('[MN] /api/multinode/nodes HTTP', r.status);
     if (!r.ok) return;
-    const data = await r.json();
+    const text = await r.text();
+    console.log('[MN] /api/multinode/nodes raw:', text.substring(0, 300));
+    const data = JSON.parse(text);
+    const masterNode = (data.nodes || []).find(n => n.nodeId === 0);
+    console.log('[MN] master entry:', JSON.stringify(masterNode));
     const nodes = data.nodes || [];
     mnRenderNodes(nodes);
     mnRenderRaceTab(nodes);
-  } catch (_) {}
+  } catch (err) {
+    console.warn('[MN] mnRefreshNodes error:', err);
+  }
 }
 
 // Format milliseconds as a TTS-friendly string ("3 minutes 49 point 4 6" or "49 point 5 0").
@@ -6754,7 +6762,8 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ lapTime: lapMs }),
-    }).catch(() => {});
+    }).then(r => console.log('[MN] persistLap status:', r.status))
+      .catch(err => console.warn('[MN] persistLap failed:', err));
   } else {
     try {
       await fetch('/api/multinode/lap', {

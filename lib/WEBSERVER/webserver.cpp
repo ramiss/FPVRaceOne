@@ -1924,11 +1924,14 @@ EEPROM:\n\
         String clientsJson = multiNode->getNodesToJson();  // {"nodes":[...]}
         String out;
         out.reserve(masterStr.length() + clientsJson.length() + 4);
-        if (clientsJson.length() <= 11) {   // empty: {"nodes":[]}
+        // clientsJson is either {"nodes":[]} (12 chars, no clients) or {"nodes":[{...},...]}
+        // substring(10) strips the leading '{"nodes":[', leaving "]}" or "{node},...]}"
+        String clientsTail = clientsJson.substring(10);  // "]}" when empty
+        if (clientsTail == "]}") {
             out = "{\"nodes\":[" + masterStr + "]}";
         } else {
-            // substring(10) strips the leading '{"nodes":['
-            out = "{\"nodes\":[" + masterStr + "," + clientsJson.substring(10);
+            // clientsTail starts with the first client object: "{nodeId...},...]}"
+            out = "{\"nodes\":[" + masterStr + "," + clientsTail;
         }
         request->send(200, "application/json", out);
     });
