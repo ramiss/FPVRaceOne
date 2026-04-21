@@ -30,10 +30,11 @@ struct NodeInfo {
     String   macAddress; // client's WiFi MAC — primary unique key
     uint32_t lastSeen;
     bool     online;
-    bool     running     = false;  // true while client's race timer is active
-    bool     quitEarly   = false;  // true if pilot stopped during a master-initiated race
-    bool     independent = false;  // true when pilot is solo-racing with skip flag enabled
-    bool     skipEnabled = false;  // true when pilot has "ignore race director" config enabled
+    bool     running                = false;  // true while client's race timer is active
+    bool     quitEarly              = false;  // true if pilot stopped during a master-initiated race
+    bool     independent            = false;  // true when pilot is solo-racing with skip flag enabled
+    bool     skipEnabled            = false;  // true when pilot has "ignore race director" config enabled
+    bool     excludedFromCurrentRace = false; // true when master chose "ignore solo racers" for this node
     uint8_t  lapCount;
     std::vector<MultiNodeLap> laps;
 };

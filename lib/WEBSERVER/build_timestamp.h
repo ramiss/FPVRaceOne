@@ -1,0 +1,2 @@
+#pragma once
+#define BUILD_TIMESTAMP_STR "20260421-161224"

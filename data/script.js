@@ -2067,9 +2067,12 @@ function buildConfigSnapshotFromUI() {
 
 
 function autoSaveConfig() {
-  // Stage ONLY: compute snapshot and stage each key vs baseline
+  // Stage ONLY: compute snapshot and stage each key vs baseline.
+  // Skip keys that require a reboot — those have their own save path
+  // (applyMultiNodeSettings) and must not light up the Save button here.
+  const REBOOT_ONLY_KEYS = new Set(['nodeMode', 'masterSSID']);
   const snap = buildConfigSnapshotFromUI();
-  Object.keys(snap).forEach(k => stageConfig(k, snap[k]));
+  Object.keys(snap).forEach(k => { if (!REBOOT_ONLY_KEYS.has(k)) stageConfig(k, snap[k]); });
 }
 
 function saveRSSIThresholds() {
@@ -2167,9 +2170,6 @@ function attachConfigStagingListeners() {
   // WiFi credentials
   wire('ssid', 'input');
   wire('pwd', 'input');
-
-  // Multi-node
-  wire('masterSSIDInput', 'input');
 
   // NOTE:
   // Your minLap/alarm/maxLaps/announcerRate/etc already call autoSaveConfig()
@@ -2281,15 +2281,24 @@ function updateChannelOptionsForBand(bandIndex = bandSelect.selectedIndex) {
 
 async function loadFirmwareVersion() {
   try {
-    const r = await fetch('/api/version');
-    if (!r.ok) return;
-    const data = await r.json();
+    const [versionR, biR] = await Promise.all([
+      fetch('/api/version'),
+      fetch('/buildinfo.json').catch(() => null),
+    ]);
+    if (!versionR.ok) return;
+    const data = await versionR.json();
     if (data && data.firmwareVersion) {
       const v = data.firmwareVersion;
       const footer = document.getElementById('firmwareVersion');
       if (footer) {
-        const built = footer.textContent.match(/Boot ID:\s+\S+/);
-        footer.textContent = `FPVRaceOne Personal Lap Timer v${v}` + (built ? `  \u2022  ${built[0]}` : '');
+        const fwTs = data.buildTimestamp || '';
+        let fsTs = '';
+        try { if (biR && biR.ok) { const bi = await biR.json(); fsTs = bi.fsTimestamp || ''; } } catch (_) {}
+        // Show whichever timestamp is more recent (YYYYMMDD-HHMMSS sorts lexicographically)
+        const ts = fwTs || fsTs
+          ? `  •  FW: ${fwTs || '?'}  FS: ${fsTs || '?'}`
+          : '';
+        footer.textContent = `FPVRaceOne Personal Lap Timer v${v}${ts}`;
       }
       const badge = document.getElementById('updateVersionDisplay');
       if (badge) badge.textContent = `v${v}`;
@@ -5579,7 +5588,25 @@ function startDebugListener(rateMs = 3000) {
   // Clear any existing interval before starting a new one
   stopDebugListener();
   serialMonitorPollInterval = setInterval(pollDebugLogs, rateMs);
-  pollDebugLogs();
+  // On the very first call, consume existing log entries to advance the timestamp
+  // cursor WITHOUT triggering the calibration banner — those entries are from boot
+  // and are no longer actionable. Only new entries (after this point) matter.
+  _pollDebugLogsInitial();
+}
+
+// Fetch existing log entries once to advance the timestamp cursor without
+// showing the calibration banner. Called once at page load so stale boot-time
+// "Setting frequency to" entries don't trigger the banner spuriously.
+function _pollDebugLogsInitial() {
+  fetch('/api/debuglog')
+    .then(r => r.json())
+    .then(data => {
+      if (data.logs && data.logs.length > 0) {
+        const latest = data.logs[data.logs.length - 1].timestamp;
+        if (latest > lastSeenTimestampBanner) lastSeenTimestampBanner = latest;
+      }
+    })
+    .catch(() => {});
 }
 
 function stopDebugListener() {
@@ -6900,8 +6927,8 @@ function mnRenderRaceTab(nodes) {
   const activeSlots = allSlots.filter(n => !n.empty);
 
   // Rank active pilots for summary table: most laps first, then fastest total.
-  // Exclude pilots who are solo-racing with the skip flag during a master race.
-  const ranked = [...activeSlots].filter(n => !(mnRaceRunning && n.independent)).sort((a, b) => {
+  // Exclude pilots ignoring the race director (skipEnabled) or excluded from the current race.
+  const ranked = [...activeSlots].filter(n => !n.skipEnabled && !n.excludedFromCurrentRace).sort((a, b) => {
     if (b.lapCount !== a.lapCount) return b.lapCount - a.lapCount;
     if (a.lapCount === 0) return 0;
     return a.totalMs - b.totalMs;
@@ -7255,8 +7282,13 @@ async function mnStartRace() {
   // Disable button immediately and lock out double-presses
   ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) { b.disabled = true; b.classList.add('active'); } });
 
-  // Signal clients to flash their Start button during countdown
-  try { await fetch('/api/multinode/race/prearm', { method: 'POST' }); } catch (_) {}
+  // Signal clients to flash their Start button during countdown (excluding solo racers being ignored)
+  try {
+    const prearmExclude = (window._mnExcludeNodes && window._mnExcludeNodes.length > 0)
+      ? '?exclude=' + window._mnExcludeNodes.join(',')
+      : '';
+    await fetch('/api/multinode/race/prearm' + prearmExclude, { method: 'POST' });
+  } catch (_) {}
 
   // Unlock AudioContext (iOS/Safari)
   if (typeof beepAudioContext !== 'undefined' && beepAudioContext && beepAudioContext.state === 'suspended') {

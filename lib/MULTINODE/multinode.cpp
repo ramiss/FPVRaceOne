@@ -413,10 +413,11 @@ String MultiNodeManager::getNodesToJson() const {
         o["channelIndex"]   = n.channelIndex;
         o["frequency"]      = n.frequency;
         o["online"]         = n.online;
-        o["running"]        = n.running;
-        o["quitEarly"]      = n.quitEarly;
-        o["independent"]    = n.independent;
-        o["skipEnabled"]    = n.skipEnabled;
+        o["running"]                 = n.running;
+        o["quitEarly"]               = n.quitEarly;
+        o["independent"]             = n.independent;
+        o["skipEnabled"]             = n.skipEnabled;
+        o["excludedFromCurrentRace"] = n.excludedFromCurrentRace;
         o["lapCount"]       = n.lapCount;
         o["clientIP"]       = n.clientIP;
         o["mac"]            = n.macAddress;
@@ -436,6 +437,12 @@ String MultiNodeManager::getNodesToJson() const {
 void MultiNodeManager::_broadcastRacePreArm() {
     for (const auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
+        bool excluded = false;
+        for (uint8_t id : _excludeNodes) { if (id == n.nodeId) { excluded = true; break; } }
+        if (excluded) {
+            DEBUG("[MULTINODE] Race pre-arm → node %u (%s): SKIPPED (excluded)\n", n.nodeId, n.staIP.c_str());
+            continue;
+        }
         HTTPClient http;
         String url = "http://" + n.staIP + "/timer/masterPreArm";
         if (http.begin(url)) {
@@ -453,11 +460,12 @@ void MultiNodeManager::setExcludeNodes(const std::vector<uint8_t>& ids) {
 }
 
 void MultiNodeManager::_broadcastRaceStart() {
-    for (const auto& n : _nodes) {
+    for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
         // Skip excluded nodes (e.g., solo racers the director chose to leave running)
         bool excluded = false;
         for (uint8_t id : _excludeNodes) { if (id == n.nodeId) { excluded = true; break; } }
+        n.excludedFromCurrentRace = excluded;
         if (excluded) {
             DEBUG("[MULTINODE] Race start → node %u (%s): SKIPPED (excluded)\n", n.nodeId, n.staIP.c_str());
             continue;
@@ -476,8 +484,13 @@ void MultiNodeManager::_broadcastRaceStart() {
 }
 
 void MultiNodeManager::_broadcastRaceStop() {
-    for (const auto& n : _nodes) {
-        if (!n.online || n.staIP.isEmpty()) continue;
+    for (auto& n : _nodes) {
+        if (!n.online || n.staIP.isEmpty()) { n.excludedFromCurrentRace = false; continue; }
+        if (n.excludedFromCurrentRace) {
+            DEBUG("[MULTINODE] Race stop → node %u (%s): SKIPPED (was excluded)\n", n.nodeId, n.staIP.c_str());
+            n.excludedFromCurrentRace = false;
+            continue;
+        }
         HTTPClient http;
         String url = "http://" + n.staIP + "/timer/masterStop";
         if (http.begin(url)) {

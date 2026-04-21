@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FPVRaceOne Lap Timer</title>
     <link rel="icon" type="image/svg+xml" href="logo-white.svg" id="favicon" />
-    <link rel="stylesheet" type="text/css" href="style.css?v=%BUILD_TIME%" />
-    <script src="audio-announcer.js?v=%BUILD_TIME%" defer></script>
-    <script src="script.js?v=%BUILD_TIME%" defer></script>
+    <link rel="stylesheet" type="text/css" href="style.css" />
+    <script src="audio-announcer.js" defer></script>
+    <script src="script.js" defer></script>
     <script defer>console.log('[FPV] announcer');</script>
     <style>
       #splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#1a1d2e;transition:opacity .45s ease}
@@ -313,7 +313,7 @@
     <footer>
       <div class="footer-bar" style="display:flex; align-items:center; justify-content:center; padding: 4px 12px;">
         <span id="firmwareVersion" style="font-size: 12px; color: rgba(255,255,255,0.9);">
-          FPVRaceOne Personal Lap Timer v — &nbsp;&#x2022;&nbsp; Boot ID: %BUILD_TIME%
+          FPVRaceOne Personal Lap Timer
         </span>
       </div>
     </footer>
@@ -948,7 +948,7 @@
               </div>
               <div class="config-item">
                   <label for="mnSkipMasterStartToggle">Ignore Race Director Start/Stop if already racing: </label>
-                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="mnClientSkipEnabled = this.checked; autoSaveConfig(); saveConfig()" />
+                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="mnClientSkipEnabled = this.checked; autoSaveConfig();" />
                 </div>
               <div style="margin-top: 20px;">
                 <button onclick="applyMultiNodeSettings()" style="background-color: var(--primary-color); color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Apply Multi-Node &amp; Reboot</button>

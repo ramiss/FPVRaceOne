@@ -2,6 +2,21 @@ Import("env")
 import subprocess
 import os
 from pathlib import Path
+from datetime import datetime
+
+# Write the build timestamp two ways so both firmware and filesystem carry it:
+#   1. lib/WEBSERVER/build_timestamp.h  — included by webserver.cpp (same dir = no path issues)
+#   2. data/buildinfo.json              — embedded in LittleFS image; JS reads FS build time
+# Both files change on every build, so SCons always recompiles the affected TU.
+_ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+_root = Path(env.subst("$PROJECT_DIR"))
+(_root / "lib" / "WEBSERVER" / "build_timestamp.h").write_text(
+    f'#pragma once\n#define BUILD_TIMESTAMP_STR "{_ts}"\n'
+)
+(_root / "data" / "buildinfo.json").write_text(
+    f'{{"fsTimestamp":"{_ts}"}}\n'
+)
+print(f"[Build] Timestamp: {_ts}")
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -225,7 +240,9 @@ def deploy_all(source, target, env):
         return
 
     print("\n" + "="*50)
-    print("Deploy complete.")
+    print(f"Deploy complete.")
+    print(f"  FW: {_ts}  (baked into firmware)")
+    print(f"  FS: {_ts}  (written to buildinfo.json)")
     print("="*50 + "\n")
 
 env.AddCustomTarget(
