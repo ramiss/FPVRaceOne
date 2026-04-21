@@ -2428,7 +2428,7 @@ function _restoreInProgressLaps(laps) {
   lapNo = -1;
   lapTimes = [];
   const table = document.getElementById('lapTable');
-  if (table) while (table.rows.length > 0) table.deleteRow(0);
+  if (table) while (table.rows.length > 1) table.deleteRow(1);
   let cumSec = 0;
   laps.forEach((l, idx) => {
     const lapSec = (l.lapTimeMs / 1000).toFixed(2);
@@ -2441,11 +2441,12 @@ function _restoreInProgressLaps(laps) {
       row.setAttribute('data-lap-index', idx);
       const c1 = row.insertCell(0); c1.innerHTML = lapNo + 1;
       const c2 = row.insertCell(1);
-      c2.innerHTML = lapNo === 0 ? `Gate 1: ${lapSec}s` : `${lapSec}s`;
+      c2.innerHTML = lapNo === 0 ? '-' : `${lapSec}s`;
       const gap = idx > 0 ? (newLap - lapTimes[idx - 1]).toFixed(2) : null;
       const c3 = row.insertCell(2);
-      c3.innerHTML = gap !== null ? (parseFloat(gap) > 0 ? '+' + gap : gap) + 's' : '-';
-      const c4 = row.insertCell(3); c4.innerHTML = cumSec.toFixed(2) + 's';
+      c3.innerHTML = (lapNo === 0 || gap === null) ? '-' : (parseFloat(gap) > 0 ? '+' + gap : gap) + 's';
+      const c4 = row.insertCell(3);
+      c4.innerHTML = lapNo === 0 ? '-' : cumSec.toFixed(2) + 's';
     }
   });
   if (table) { highlightFastestLap(); updateLapCounter(); }
@@ -2487,14 +2488,14 @@ function addLap(lapStr) {
   cell1.innerHTML = lapNo;
   
   if (lapNo == 0) {
-    cell2.innerHTML = "Gate 1: " + lapStr + "s";
+    cell2.innerHTML = "-";
     cell3.innerHTML = "-";
+    cell4.innerHTML = "-";
   } else {
     cell2.innerHTML = lapStr + "s";
     cell3.innerHTML = gap ? gap + "s" : "-";
+    cell4.innerHTML = totalTime + "s";
   }
-  
-  cell4.innerHTML = totalTime + "s";
   
   // Highlight fastest lap
   highlightFastestLap();
@@ -3401,7 +3402,7 @@ function switchAnalysisMode(mode) {
 
 function updateAnalysisView() {
   if (lapTimes.length === 0) {
-    document.getElementById('analysisContent').innerHTML = 
+    document.getElementById('analysisContent').innerHTML =
       '<p class="no-data">Complete at least 1 lap to see analysis</p>';
     return;
   }
@@ -6788,13 +6789,16 @@ function _mnMasterEntry() {
   const polledLaps = (polled && Array.isArray(polled.laps)) ? polled.laps : [];
   const laps = localLaps.length >= polledLaps.length ? localLaps : polledLaps;
 
-  const lapCount  = laps.length;
-  const totalMs   = laps.reduce((s, l) => s + l.lapTimeMs, 0);
+  // Gate 1 (lapNumber 0) is not a real lap — exclude from count and stats.
+  const realLaps  = laps.filter(l => l.lapNumber > 0);
+  const lapCount  = realLaps.length;
+  const allLapsMs = laps.reduce((s, l) => s + l.lapTimeMs, 0);       // for cumul display
+  const totalMs   = realLaps.reduce((s, l) => s + l.lapTimeMs, 0);   // for stats
   const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
-  const fastestMs = lapCount > 0 ? Math.min(...laps.map(l => l.lapTimeMs)) : Infinity;
+  const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs)) : Infinity;
   return { nodeId: 0, pilotName: name, pilotColor: colorInt,
            online: true, running: false, quitEarly: false, isMaster: true,
-           laps, lapCount, totalMs, avgMs, fastestMs };
+           laps, lapCount, allLapsMs, totalMs, avgMs, fastestMs };
 }
 
 // Render the master race tab: RotorHazard-style summary table + per-pilot lap columns.
@@ -6818,13 +6822,15 @@ function mnRenderRaceTab(nodes) {
     const found  = nodes.find(n => n.nodeId === nodeId);
     if (found) {
       const laps      = Array.isArray(found.laps) ? found.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
-      const lapCount  = laps.length;
-      const totalMs   = laps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+      const realLaps  = laps.filter(l => l.lapNumber > 0);
+      const lapCount  = realLaps.length;
+      const allLapsMs = laps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+      const totalMs   = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
       const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
-      const fastestMs = lapCount > 0 ? Math.min(...laps.map(l => l.lapTimeMs || Infinity)) : Infinity;
-      return { ...found, laps, lapCount, totalMs, avgMs, fastestMs };
+      const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
+      return { ...found, laps, lapCount, allLapsMs, totalMs, avgMs, fastestMs };
     }
-    return { nodeId, pilotName: null, online: false, empty: true, lapCount: 0, laps: [], totalMs: 0, avgMs: 0, fastestMs: Infinity };
+    return { nodeId, pilotName: null, online: false, empty: true, lapCount: 0, laps: [], allLapsMs: 0, totalMs: 0, avgMs: 0, fastestMs: Infinity };
   });
 
   const allSlots    = [master, ...clients];
@@ -6891,17 +6897,18 @@ function mnRenderRaceTab(nodes) {
     // Solo race in progress (client running outside a master race)
     if (n.running && !mnRaceRunning && !n.isMaster) {
       html += `<div class="mn-card-solo-label">Solo race in progress</div>`;
-    } else if (n.lapCount === 0) {
+    } else if (n.laps.length === 0) {
       html += `<div class="mn-card-lap" style="justify-content:center;color:var(--secondary-color);padding:10px;">—</div>`;
     } else {
-      let cumMs = n.totalMs;
+      let cumMs = n.allLapsMs;
       for (let i = n.laps.length - 1; i >= 0; i--) {
         const l      = n.laps[i];
-        const isBest = l.lapTimeMs === n.fastestMs;
+        const isGate = l.lapNumber === 0;
+        const isBest = !isGate && l.lapTimeMs === n.fastestMs;
         html += `<div class="mn-card-lap${isBest ? ' mn-card-lap-best' : ''}">
           <span class="mn-card-lap-num">${l.lapNumber}</span>
           <div class="mn-card-lap-times">
-            <span class="mn-card-lap-time">${formatMsRace(l.lapTimeMs)}${isBest ? ' ★' : ''}</span>
+            <span class="mn-card-lap-time">${isGate ? '—' : formatMsRace(l.lapTimeMs)}${isBest ? ' ★' : ''}</span>
             <span class="mn-card-lap-cumul">${formatMsRace(cumMs)}</span>
           </div>
         </div>`;

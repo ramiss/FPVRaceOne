@@ -572,6 +572,12 @@ uint8_t LapTimer::getLastLapPeakRssi() const {
     return lastLapPeakRssi;
 }
 
+void LapTimer::clearLapData() {
+    lapCount = 0;
+    lapCountWraparound = false;
+    memset(lapTimes, 0, sizeof(lapTimes));
+}
+
 void LapTimer::recordManualLap(uint32_t lapTimeMs) {
     lapTimes[lapCount] = lapTimeMs;
     if ((lapCount + 1) % LAPTIMER_LAP_HISTORY == 0) lapCountWraparound = true;

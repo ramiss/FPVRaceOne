@@ -323,6 +323,15 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
             led->blink(200);
         }
     }
+    // Client mode: probe the master's AP every 5 s when STA is down.
+    // WiFi.reconnect() targets only the last known channel (no full scan),
+    // so the radio is off-channel for just a few ms — AP clients stay connected.
+    if (wifiMode == WIFI_AP_STA && status != WL_CONNECTED &&
+        (currentTimeMs - changeTimeMs) > 5000) {
+        changeTimeMs = currentTimeMs;
+        DEBUG("[MULTINODE] STA reconnecting to master...\n");
+        WiFi.reconnect();
+    }
     if (changeMode != wifiMode && changeMode != WIFI_OFF && (currentTimeMs - changeTimeMs) > WIFI_RECONNECT_TIMEOUT_MS) {
         switch (changeMode) {
             case WIFI_AP: {
@@ -391,7 +400,9 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 
                 changeTimeMs = currentTimeMs;
-                WiFi.setAutoReconnect(true);
+                // Manual reconnect only — auto-reconnect triggers full channel scans that
+                // briefly pull the radio off the AP channel, dropping pilot phones.
+                WiFi.setAutoReconnect(false);
                 WiFi.begin(conf->getMasterSSID(), conf->getMasterPassword());
                 startServices();
                 buz->beep(500);
@@ -1887,7 +1898,7 @@ EEPROM:\n\
         JsonArray arr = doc.createNestedArray("laps");
         for (uint8_t i = 0; i < count; i++) {
             JsonObject lap = arr.createNestedObject();
-            lap["lapNumber"] = i + 1;
+            lap["lapNumber"] = i;
             lap["lapTimeMs"] = timer->getLapTimeAt(i);
         }
         String out; serializeJson(doc, out);
@@ -1913,7 +1924,7 @@ EEPROM:\n\
         for (uint8_t i = 0; i < masterCnt; i++) {
             if (i > 0) masterStr += ',';
             masterStr += "{\"lapNumber\":";
-            masterStr += (int)(i + 1);
+            masterStr += (int)(i);
             masterStr += ",\"lapTimeMs\":";
             masterStr += (int)timer->getLapTimeAt(i);
             masterStr += '}';
@@ -1943,6 +1954,7 @@ EEPROM:\n\
             return;
         }
         multiNode->clearAllLaps();
+        if (timer) timer->clearLapData();  // also clear master host laps
         // Push updated (empty) node state to all SSE clients
         String nodesJson = multiNode->getNodesToJson();
         char buf[64];

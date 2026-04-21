@@ -602,7 +602,12 @@ table tr.fastest-lap td {
 }
 
 #lapTable {
-  min-height: 140px;
+  margin-top: 8px;
+}
+
+#lapTable tbody {
+  min-height: 100px;
+  display: table-row-group;
 }
 
 #timer {
