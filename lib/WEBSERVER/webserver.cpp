@@ -735,6 +735,11 @@ EEPROM:\n\
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
+    server.on("/timer/clearLaps", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (timer) timer->clearLapData();
+        request->send(200, "application/json", "{\"status\": \"OK\"}");
+    });
+
     // /timer/masterPreArm — called by master before countdown; clients flash Start button
     server.on("/timer/masterPreArm", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (multiNode && multiNode->isClientMode()) {
@@ -763,6 +768,11 @@ EEPROM:\n\
 
     // /timer/masterStop — called by master broadcast; clears masterRaceActive (no quit)
     server.on("/timer/masterStop", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (multiNode && multiNode->isClientMode() &&
+            conf->getMnSkipMasterStart() && timer->isRunning()) {
+            request->send(200, "application/json", "{\"status\": \"SKIPPED\"}");
+            return;
+        }
         timer->stop();
         if (transportMgr) transportMgr->broadcastRaceStateEvent("stopped");
         if (multiNode && multiNode->isClientMode()) {
@@ -2047,10 +2057,11 @@ EEPROM:\n\
                 return;
             }
             JsonObject obj    = json.as<JsonObject>();
-            uint8_t nodeId    = obj["nodeId"] | 0;
-            bool running      = obj["running"] | false;
+            uint8_t nodeId    = obj["nodeId"]      | 0;
+            bool running      = obj["running"]      | false;
+            bool independent  = obj["independent"]  | false;
             bool stateChanged = false;
-            bool ok = multiNode->handleHeartbeat(nodeId, running, stateChanged);
+            bool ok = multiNode->handleHeartbeat(nodeId, running, independent, stateChanged);
             if (ok && stateChanged) {
                 // Push updated node list to master browser
                 String nodesJson = multiNode->getNodesToJson();

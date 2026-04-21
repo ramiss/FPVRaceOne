@@ -2429,24 +2429,23 @@ function _restoreInProgressLaps(laps) {
   lapTimes = [];
   const table = document.getElementById('lapTable');
   if (table) while (table.rows.length > 1) table.deleteRow(1);
-  let cumSec = 0;
+  let cumMs = 0;
   laps.forEach((l, idx) => {
-    const lapSec = (l.lapTimeMs / 1000).toFixed(2);
-    const newLap = parseFloat(lapSec);
+    const newLap = l.lapTimeMs / 1000;
     lapTimes.push(newLap);
     lapNo = idx;
-    cumSec += newLap;
+    cumMs += l.lapTimeMs;
     if (table) {
       const row = table.insertRow();
       row.setAttribute('data-lap-index', idx);
-      const c1 = row.insertCell(0); c1.innerHTML = lapNo + 1;
+      const c1 = row.insertCell(0); c1.innerHTML = lapNo;
       const c2 = row.insertCell(1);
-      c2.innerHTML = lapNo === 0 ? '-' : `${lapSec}s`;
-      const gap = idx > 0 ? (newLap - lapTimes[idx - 1]).toFixed(2) : null;
+      c2.innerHTML = lapNo === 0 ? '-' : formatMsDisplay(l.lapTimeMs);
+      const gapMs = idx > 0 ? Math.round((newLap - lapTimes[idx - 1]) * 1000) : null;
       const c3 = row.insertCell(2);
-      c3.innerHTML = (lapNo === 0 || gap === null) ? '-' : (parseFloat(gap) > 0 ? '+' + gap : gap) + 's';
+      c3.innerHTML = (lapNo === 0 || gapMs === null) ? '-' : formatMsGap(gapMs);
       const c4 = row.insertCell(3);
-      c4.innerHTML = lapNo === 0 ? '-' : cumSec.toFixed(2) + 's';
+      c4.innerHTML = lapNo === 0 ? '-' : formatMsDisplay(cumMs);
     }
   });
   if (table) { highlightFastestLap(); updateLapCounter(); }
@@ -2467,13 +2466,12 @@ function addLap(lapStr) {
   currentLapDistance = 0.0;             // Reset distance counter
   
   // Calculate total time so far
-  const totalTime = lapTimes.reduce((sum, time) => sum + time, 0).toFixed(2);
-  
+  const totalMs = Math.round(lapTimes.reduce((sum, time) => sum + time, 0) * 1000);
+
   // Calculate gap from previous lap (for regular laps only, not gate 1)
-  let gap = "";
+  let gapMs = null;
   if (lapNo > 1) {
-    gap = (newLap - lapTimes[lapTimes.length - 2]).toFixed(2);
-    if (gap > 0) gap = "+" + gap;
+    gapMs = Math.round((newLap - lapTimes[lapTimes.length - 2]) * 1000);
   }
   
   const table = document.getElementById("lapTable");
@@ -2492,9 +2490,9 @@ function addLap(lapStr) {
     cell3.innerHTML = "-";
     cell4.innerHTML = "-";
   } else {
-    cell2.innerHTML = lapStr + "s";
-    cell3.innerHTML = gap ? gap + "s" : "-";
-    cell4.innerHTML = totalTime + "s";
+    cell2.innerHTML = formatMsDisplay(Math.round(newLap * 1000));
+    cell3.innerHTML = gapMs !== null ? formatMsGap(gapMs) : "-";
+    cell4.innerHTML = formatMsDisplay(totalMs);
   }
   
   // Highlight fastest lap
@@ -3153,6 +3151,12 @@ function clearLaps() {
   // Note: Race data is NOT automatically saved to Race History.
   // If you want to save before clearing, use "Transfer to Race History" button first.
 
+  // Clear server-side lap storage so a page reload doesn't re-populate the table.
+  // Master mode uses /api/multinode/clearLaps which already handles this; skip for master.
+  if (mnNodeMode !== 1) {
+    fetch('/timer/clearLaps', { method: 'POST' }).catch(() => {});
+  }
+
   var tableHeaderRowCount = 1;
   var rowCount = lapTable.rows.length;
   for (var i = tableHeaderRowCount; i < rowCount; i++) {
@@ -3441,7 +3445,7 @@ function updateStatsBoxes() {
   } else {
     const fastest = Math.min(...validLaps);
     const fastestIndex = validLaps.indexOf(fastest) + 1; // +1 to account for skipped Gate 1
-    document.getElementById('statFastest').textContent = `${fastest.toFixed(2)}s`;
+    document.getElementById('statFastest').textContent = formatMsDisplay(Math.round(fastest * 1000));
     document.getElementById('statFastestLapNo').textContent = `Lap ${fastestIndex}`;
   }
   
@@ -3459,7 +3463,7 @@ function updateStatsBoxes() {
       }
     }
     
-    document.getElementById('statFastest3Consec').textContent = `${fastestConsecTime.toFixed(2)}s`;
+    document.getElementById('statFastest3Consec').textContent = formatMsDisplay(Math.round(fastestConsecTime * 1000));
     const lapNums = `L${fastestConsecStart}-L${fastestConsecStart + 1}-L${fastestConsecStart + 2}`;
     document.getElementById('statFastest3ConsecLaps').textContent = lapNums;
   } else {
@@ -3476,7 +3480,7 @@ function updateStatsBoxes() {
     const median = sorted.length % 2 === 0 ? 
       (sorted[mid - 1] + sorted[mid]) / 2 : 
       sorted[mid];
-    document.getElementById('statMedian').textContent = `${median.toFixed(2)}s`;
+    document.getElementById('statMedian').textContent = formatMsDisplay(Math.round(median * 1000));
   }
   
   // Best 3 Laps (sum of 3 fastest individual laps) - skip Gate 1
@@ -3486,7 +3490,7 @@ function updateStatsBoxes() {
     const best3 = lapsWithIndex.slice(0, 3);
     const totalTime = best3.reduce((sum, l) => sum + l.time, 0);
     const lapNumbers = best3.map(l => `L${l.index}`).sort().join(', ');
-    document.getElementById('statBest3').textContent = `${totalTime.toFixed(2)}s`;
+    document.getElementById('statBest3').textContent = formatMsDisplay(Math.round(totalTime * 1000));
     document.getElementById('statBest3Laps').textContent = lapNumbers;
   } else {
     document.getElementById('statBest3').textContent = '--';
@@ -3505,10 +3509,9 @@ function renderLapHistory() {
     const lapNumber = startIndex + index;
     const colorIndex = (startIndex + index) % barColors.length;
     if (lapNumber === 0) {
-      // Special label for Gate 1
-      html += createBarItemWithColor(`Gate 1`, time, maxTime, `${time.toFixed(2)}s`, colorIndex);
+      html += createBarItemWithColor(`Gate 1`, time, maxTime, formatMsDisplay(Math.round(time * 1000)), colorIndex);
     } else {
-      html += createBarItemWithColor(`Lap ${lapNumber}`, time, maxTime, `${time.toFixed(2)}s`, colorIndex);
+      html += createBarItemWithColor(`Lap ${lapNumber}`, time, maxTime, formatMsDisplay(Math.round(time * 1000)), colorIndex);
     }
     
   });
@@ -3546,11 +3549,11 @@ function renderFastestRound() {
   const maxTime = Math.max(lap1, lap2, lap3);
   
   let html = '<div class="analysis-bars">';
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 1}`, lap1, maxTime, `${lap1.toFixed(2)}s`, 0);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 2}`, lap2, maxTime, `${lap2.toFixed(2)}s`, 1);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 3}`, lap3, maxTime, `${lap3.toFixed(2)}s`, 2);
+  html += createBarItemWithColor(`Lap ${bestStartIndex + 1}`, lap1, maxTime, formatMsDisplay(Math.round(lap1 * 1000)), 0);
+  html += createBarItemWithColor(`Lap ${bestStartIndex + 2}`, lap2, maxTime, formatMsDisplay(Math.round(lap2 * 1000)), 1);
+  html += createBarItemWithColor(`Lap ${bestStartIndex + 3}`, lap3, maxTime, formatMsDisplay(Math.round(lap3 * 1000)), 2);
   html += '</div>';
-  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total: ${bestTime.toFixed(2)}s</p>`;
+  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total: ${formatMsDisplay(Math.round(bestTime * 1000))}</p>`;
   
   document.getElementById('analysisContent').innerHTML = html;
 }
@@ -4153,11 +4156,11 @@ function renderDetailFastestRound() {
   const maxTime = Math.max(lap1, lap2, lap3);
   
   let html = '<div class="analysis-bars">';
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 1}`, lap1, maxTime, `${lap1.toFixed(2)}s`, 0);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 2}`, lap2, maxTime, `${lap2.toFixed(2)}s`, 1);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 3}`, lap3, maxTime, `${lap3.toFixed(2)}s`, 2);
+  html += createBarItemWithColor(`Lap ${bestStartIndex + 1}`, lap1, maxTime, formatMsDisplay(Math.round(lap1 * 1000)), 0);
+  html += createBarItemWithColor(`Lap ${bestStartIndex + 2}`, lap2, maxTime, formatMsDisplay(Math.round(lap2 * 1000)), 1);
+  html += createBarItemWithColor(`Lap ${bestStartIndex + 3}`, lap3, maxTime, formatMsDisplay(Math.round(lap3 * 1000)), 2);
   html += '</div>';
-  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total: ${bestTime.toFixed(2)}s</p>`;
+  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total: ${formatMsDisplay(Math.round(bestTime * 1000))}</p>`;
   
   document.getElementById('detailContent').innerHTML = html;
 }
@@ -6679,6 +6682,26 @@ function formatMsRace(ms) {
   return m > 0 ? `${m}:${ss}.${cc}` : `${ss}.${cc}`;
 }
 
+// Format milliseconds as MM:SS:CSs (e.g. 01:23:45s). Switches to HH:MM:SS:CSs at 1 hour.
+function formatMsDisplay(ms) {
+  if (!ms || ms <= 0) return '00:00:00s';
+  const h  = Math.floor(ms / 3600000);
+  const m  = Math.floor((ms % 3600000) / 60000);
+  const s  = Math.floor((ms % 60000) / 1000);
+  const cs = Math.floor((ms % 1000) / 10);
+  const mm = m.toString().padStart(2, '0');
+  const ss = s.toString().padStart(2, '0');
+  const cc = cs.toString().padStart(2, '0');
+  if (h > 0) return `${h.toString().padStart(2, '0')}:${mm}:${ss}:${cc}s`;
+  return `${mm}:${ss}:${cc}s`;
+}
+
+// Format a signed gap in ms as e.g. +00:01:23s or -00:01:23s.
+function formatMsGap(ms) {
+  if (ms === 0) return '00:00:00s';
+  return (ms > 0 ? '+' : '-') + formatMsDisplay(Math.abs(ms));
+}
+
 // Update the status bar above the race clock based on current multi-node mode.
 function mnUpdateRaceStatusBar() {
   const bar  = document.getElementById('mn-race-status-bar');
@@ -6836,8 +6859,9 @@ function mnRenderRaceTab(nodes) {
   const allSlots    = [master, ...clients];
   const activeSlots = allSlots.filter(n => !n.empty);
 
-  // Rank active pilots for summary table: most laps first, then fastest total
-  const ranked = [...activeSlots].sort((a, b) => {
+  // Rank active pilots for summary table: most laps first, then fastest total.
+  // Exclude pilots who are solo-racing with the skip flag during a master race.
+  const ranked = [...activeSlots].filter(n => !(mnRaceRunning && n.independent)).sort((a, b) => {
     if (b.lapCount !== a.lapCount) return b.lapCount - a.lapCount;
     if (a.lapCount === 0) return 0;
     return a.totalMs - b.totalMs;
@@ -6889,10 +6913,11 @@ function mnRenderRaceTab(nodes) {
       return;
     }
 
-    const devAttr = mnDevMode ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.lapCount+1},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
+    const canTap  = mnDevMode && !n.independent;
+    const devAttr = canTap ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.lapCount+1},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
     const isRacing = n.isMaster ? mnRaceRunning : n.running;
     const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${mnDevMode ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Solo race in progress (client running outside a master race)
     if (n.running && !mnRaceRunning && !n.isMaster) {

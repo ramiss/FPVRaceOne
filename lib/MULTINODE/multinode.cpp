@@ -150,9 +150,10 @@ void MultiNodeManager::_sendRegistration() {
 }
 
 void MultiNodeManager::_sendHeartbeat() {
-    DynamicJsonDocument doc(96);
-    doc["nodeId"]  = _myNodeId;
-    doc["running"] = _timerRunning;
+    DynamicJsonDocument doc(128);
+    doc["nodeId"]      = _myNodeId;
+    doc["running"]     = _timerRunning;
+    doc["independent"] = _conf->getMnSkipMasterStart() && _timerRunning && !_masterRaceActive;
     String body;
     serializeJson(doc, body);
 
@@ -312,13 +313,14 @@ bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lap
     return false;
 }
 
-bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool& stateChanged) {
+bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool& stateChanged) {
     for (auto& n : _nodes) {
         if (n.nodeId == nodeId) {
-            stateChanged = (n.running != running);
-            n.running  = running;
-            n.lastSeen = millis();
-            n.online   = true;
+            stateChanged = (n.running != running || n.independent != independent);
+            n.running     = running;
+            n.independent = independent;
+            n.lastSeen    = millis();
+            n.online      = true;
             return true;
         }
     }
@@ -408,6 +410,7 @@ String MultiNodeManager::getNodesToJson() const {
         o["online"]         = n.online;
         o["running"]        = n.running;
         o["quitEarly"]      = n.quitEarly;
+        o["independent"]    = n.independent;
         o["lapCount"]       = n.lapCount;
         o["clientIP"]       = n.clientIP;
         o["mac"]            = n.macAddress;

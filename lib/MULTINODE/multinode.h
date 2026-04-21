@@ -30,8 +30,9 @@ struct NodeInfo {
     String   macAddress; // client's WiFi MAC — primary unique key
     uint32_t lastSeen;
     bool     online;
-    bool     running   = false;  // true while client's race timer is active
-    bool     quitEarly = false;  // true if pilot stopped during a master-initiated race
+    bool     running     = false;  // true while client's race timer is active
+    bool     quitEarly   = false;  // true if pilot stopped during a master-initiated race
+    bool     independent = false;  // true when pilot is solo-racing with skip flag enabled
     uint8_t  lapCount;
     std::vector<MultiNodeLap> laps;
 };
@@ -60,7 +61,7 @@ public:
                           const String& macAddress,
                           uint8_t& assignedNodeId);
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
-    bool   handleHeartbeat(uint8_t nodeId, bool running, bool& stateChanged);
+    bool   handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
     bool   removeNode(uint8_t nodeId);     // master: manually remove a node slot
     bool   updateNodePilot(uint8_t nodeId, const String& name, uint32_t color);
