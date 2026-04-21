@@ -562,6 +562,14 @@ function setupWiFiEvents() {
       if (mnClientSkipEnabled) return;
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.add('active');
+      // Reset the display immediately so pilot sees a clean slate during countdown.
+      // Firmware clears the actual lap data when masterStart fires.
+      clearInterval(timerInterval);
+      if (timer) timer.innerHTML = '00:00:00s';
+      const hdr = lapTable ? lapTable.rows.length : 0;
+      for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
+      lapNo = -1; lapTimes = [];
+      updateLapCounter();
     } else if (e.data === "started") {
       if (mnClientSkipEnabled) return;
       mnMasterRaceActive = true;
@@ -6927,8 +6935,14 @@ function mnRenderRaceTab(nodes) {
   const activeSlots = allSlots.filter(n => !n.empty);
 
   // Rank active pilots for summary table: most laps first, then fastest total.
-  // Exclude pilots ignoring the race director (skipEnabled) or excluded from the current race.
-  const ranked = [...activeSlots].filter(n => !n.skipEnabled && !n.excludedFromCurrentRace).sort((a, b) => {
+  // Exclude: skipEnabled pilots (always independent), excluded nodes, and solo-racers
+  // (running while no master race is active — they rejoin the leaderboard once Start All fires).
+  // _mnExcludeNodes provides client-side pre-exclusion during the countdown before the server's
+  // excludedFromCurrentRace flag arrives via SSE.
+  const _pendingExcludes = new Set(window._mnExcludeNodes || []);
+  const ranked = [...activeSlots].filter(n =>
+    !n.skipEnabled && !n.excludedFromCurrentRace && !_pendingExcludes.has(n.nodeId) && !(n.running && !n.isMaster && !mnRaceRunning)
+  ).sort((a, b) => {
     if (b.lapCount !== a.lapCount) return b.lapCount - a.lapCount;
     if (a.lapCount === 0) return 0;
     return a.totalMs - b.totalMs;
@@ -6980,11 +6994,13 @@ function mnRenderRaceTab(nodes) {
       return;
     }
 
-    const canTap  = mnDevMode && !n.independent;
+    const isSoloRacing = n.running && !n.isMaster && !mnRaceRunning;
+    const canTap  = mnDevMode && !n.independent && !isSoloRacing;
     const devAttr = canTap ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.lapCount+1},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
     const isRacing = n.isMaster ? mnRaceRunning : n.running;
+    const racingBadgeColor = isSoloRacing ? 'rgba(255,140,0,0.75)' : 'rgba(0,160,0,0.5)';
     const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {

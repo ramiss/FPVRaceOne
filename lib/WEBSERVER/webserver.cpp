@@ -737,6 +737,7 @@ EEPROM:\n\
             request->send(200, "application/json", "{\"status\": \"SKIPPED\"}");
             return;
         }
+        timer->clearLapData();  // wipe any solo-race data before master race begins
         timer->start();
         if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
         if (multiNode && multiNode->isClientMode()) {
