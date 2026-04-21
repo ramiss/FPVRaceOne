@@ -33,6 +33,7 @@ struct NodeInfo {
     bool     running     = false;  // true while client's race timer is active
     bool     quitEarly   = false;  // true if pilot stopped during a master-initiated race
     bool     independent = false;  // true when pilot is solo-racing with skip flag enabled
+    bool     skipEnabled = false;  // true when pilot has "ignore race director" config enabled
     uint8_t  lapCount;
     std::vector<MultiNodeLap> laps;
 };
@@ -61,12 +62,13 @@ public:
                           const String& macAddress,
                           uint8_t& assignedNodeId);
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
-    bool   handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool& stateChanged);
+    bool   handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
     bool   removeNode(uint8_t nodeId);     // master: manually remove a node slot
     bool   updateNodePilot(uint8_t nodeId, const String& name, uint32_t color);
     bool   updateNodeChannel(uint8_t nodeId, uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency);
     void   clearAllLaps();                 // master: wipe all stored laps for all nodes
+    void   setExcludeNodes(const std::vector<uint8_t>& ids);  // master: exclude specific nodes from next broadcast
 
     // ── Client-side state setters (called from webserver handlers) ──
     void   setTimerRunning(bool running);
@@ -89,6 +91,7 @@ public:
 private:
     Config* _conf = nullptr;
     std::vector<NodeInfo> _nodes;  // master: list of registered clients
+    std::vector<uint8_t>  _excludeNodes;  // node IDs to skip in next _broadcastRaceStart()
 
     // Client state
     bool     _masterConnected    = false;
@@ -104,6 +107,7 @@ private:
     bool     _timerRunning       = false;
 
     // Thread-safe flags (set by async handler on Core 0, consumed by process() on Core 0)
+    volatile bool     _heartbeatForcePending    = false;  // set by setTimerRunning(); consumed by process()
     volatile bool     _lapPending              = false;
     volatile uint32_t _pendingLapTime          = 0;
     volatile bool     _racePreArmPending       = false;

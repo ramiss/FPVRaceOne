@@ -723,6 +723,13 @@ EEPROM:\n\
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
+    // Called by the client browser at the start of its local countdown so the master
+    // sees running=true immediately (before /timer/start fires after the countdown).
+    server.on("/timer/prearm", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (multiNode && multiNode->isClientMode()) multiNode->setTimerRunning(true);
+        request->send(200, "application/json", "{\"status\": \"OK\"}");
+    });
+
     server.on("/timer/stop", HTTP_POST, [this](AsyncWebServerRequest *request) {
         timer->stop();
         if (transportMgr) transportMgr->broadcastRaceStateEvent("stopped");
@@ -742,7 +749,8 @@ EEPROM:\n\
 
     // /timer/masterPreArm — called by master before countdown; clients flash Start button
     server.on("/timer/masterPreArm", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        if (multiNode && multiNode->isClientMode()) {
+        // Only flash if this client honours master race commands (toggle not set to ignore)
+        if (multiNode && multiNode->isClientMode() && !conf->getMnSkipMasterStart()) {
             events.send("prearming", "masterRaceState");
         }
         request->send(200, "application/json", "{\"status\": \"OK\"}");
@@ -750,9 +758,7 @@ EEPROM:\n\
 
     // /timer/masterStart — called by master broadcast; respects client skip toggle
     server.on("/timer/masterStart", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        if (multiNode && multiNode->isClientMode() &&
-            conf->getMnSkipMasterStart() && timer->isRunning()) {
-            // Client opted to skip master start when already running
+        if (multiNode && multiNode->isClientMode() && conf->getMnSkipMasterStart()) {
             request->send(200, "application/json", "{\"status\": \"SKIPPED\"}");
             return;
         }
@@ -768,8 +774,7 @@ EEPROM:\n\
 
     // /timer/masterStop — called by master broadcast; clears masterRaceActive (no quit)
     server.on("/timer/masterStop", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        if (multiNode && multiNode->isClientMode() &&
-            conf->getMnSkipMasterStart() && timer->isRunning()) {
+        if (multiNode && multiNode->isClientMode() && conf->getMnSkipMasterStart()) {
             request->send(200, "application/json", "{\"status\": \"SKIPPED\"}");
             return;
         }
@@ -2060,8 +2065,9 @@ EEPROM:\n\
             uint8_t nodeId    = obj["nodeId"]      | 0;
             bool running      = obj["running"]      | false;
             bool independent  = obj["independent"]  | false;
+            bool skipEnabled  = obj["skipEnabled"]  | false;
             bool stateChanged = false;
-            bool ok = multiNode->handleHeartbeat(nodeId, running, independent, stateChanged);
+            bool ok = multiNode->handleHeartbeat(nodeId, running, independent, skipEnabled, stateChanged);
             if (ok && stateChanged) {
                 // Push updated node list to master browser
                 String nodesJson = multiNode->getNodesToJson();
@@ -2271,6 +2277,21 @@ EEPROM:\n\
         if (!multiNode) {
             request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
             return;
+        }
+        // Optional ?exclude=3,5 — node IDs to skip in the broadcast
+        if (request->hasParam("exclude")) {
+            std::vector<uint8_t> excludeIds;
+            String raw = request->getParam("exclude")->value();
+            int start = 0;
+            while (start < (int)raw.length()) {
+                int comma = raw.indexOf(',', start);
+                String tok = (comma < 0) ? raw.substring(start) : raw.substring(start, comma);
+                tok.trim();
+                if (tok.length() > 0) excludeIds.push_back((uint8_t)tok.toInt());
+                if (comma < 0) break;
+                start = comma + 1;
+            }
+            multiNode->setExcludeNodes(excludeIds);
         }
         if (timer) timer->start();
         if (transportMgr) transportMgr->broadcastRaceStateEvent("started");

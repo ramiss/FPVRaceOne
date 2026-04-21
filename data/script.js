@@ -16,6 +16,8 @@ let settingsLoading = false;         // true while we are populating UI from dev
 let baselineConfig = {};             // last config loaded from device (for "same value" comparisons)
 let scannerPaused = false;
 const SCANNER_BUFFER_WHILE_PAUSED = false;
+let mnClientSkipEnabled   = false; // mirrors config.mnSkipMasterStart — set at page load and on toggle change
+let _raceCountdownAborted = false; // set by stopRace/mnStopRace to cancel in-progress countdown
 
 // --- Wizard loop control (prevents stale timers/fetches blocking restart) ---
 let wizardRecordingTimerId = null;
@@ -557,15 +559,17 @@ function setupWiFiEvents() {
   // Master pushed race start/stop to this client node
   eventSource.addEventListener("masterRaceState", function (e) {
     if (e.data === "prearming") {
-      // Master countdown in progress — flash Start button yellow but don't start timer
+      if (mnClientSkipEnabled) return;
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.add('active');
     } else if (e.data === "started") {
+      if (mnClientSkipEnabled) return;
       mnMasterRaceActive = true;
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.remove('active');
       startRaceDisplayOnly();
     } else if (e.data === "stopped") {
+      if (mnClientSkipEnabled) return;
       mnMasterRaceActive = false;
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.remove('active');
@@ -1073,6 +1077,11 @@ onload = async function (e) {
     const masterSSIDEarly = document.getElementById('masterSSIDInput');
     if (masterSSIDEarly && configData.masterSSID !== undefined) {
       masterSSIDEarly.value = configData.masterSSID;
+    }
+    if (configData.mnSkipMasterStart !== undefined) {
+      mnClientSkipEnabled = !!configData.mnSkipMasterStart;
+      const mnSkipToggleEarly = document.getElementById('mnSkipMasterStartToggle');
+      if (mnSkipToggleEarly) mnSkipToggleEarly.checked = mnClientSkipEnabled;
     }
 
     // Populate antenna and TX power so buildConfigSnapshotFromUI() gets correct values
@@ -3042,31 +3051,53 @@ function highlightFastestLap() {
 
 // Shared pre-race countdown used by all modes (single, master, client).
 // Speaks armPhrase → "Starting in" → 5 … 4 … 3 … 2 … 1, each count ~1 s apart.
+// Returns true if countdown completed, false if aborted via _raceCountdownAborted.
 async function _raceCountdown(armPhrase) {
   const _wait = () => new Promise(r => setTimeout(r, 50));
   const _speechDone = async () => {
-    while (audioAnnouncer.isSpeaking() || audioAnnouncer.audioQueue.length > 0) await _wait();
+    while (audioAnnouncer.isSpeaking() || audioAnnouncer.audioQueue.length > 0) {
+      if (_raceCountdownAborted) return;
+      await _wait();
+    }
   };
 
   queueSpeak(`<p>${armPhrase}</p>`);
   await _speechDone();
+  if (_raceCountdownAborted) return false;
   queueSpeak("<p>Starting in</p>");
   await _speechDone();
+  if (_raceCountdownAborted) return false;
 
   for (let i = 5; i >= 1; i--) {
+    if (_raceCountdownAborted) return false;
     const t0 = Date.now();
     queueSpeak(`<p>${i}</p>`);
     await _speechDone();
+    if (_raceCountdownAborted) return false;
     const pad = 1000 - (Date.now() - t0);
     if (pad > 0) await new Promise(r => setTimeout(r, pad));
+    if (_raceCountdownAborted) return false;
   }
+  return true;
 }
 
 async function startRace() {
+  // Warn client pilots who start solo while not connected to master
+  if (mnNodeMode === 2 && !mnMasterConnected) {
+    if (!confirm('Due to additional overhead, it is not recommended to run solo races in client mode while not connected to a master node. Continue?')) {
+      return;
+    }
+  }
+
   updateLapCounter();
+  _raceCountdownAborted = false;
   startRaceButton.disabled = true;
   startRaceButton.classList.add('active');
-  
+  stopRaceButton.disabled = false;  // allow cancelling during countdown
+
+  // Notify master immediately so the solo-race label appears during countdown
+  if (mnNodeMode === 2) fetch('/timer/prearm', { method: 'POST' }).catch(() => {});
+
   // iOS/Safari: unlock AudioContext for beeps during user interaction
   if (beepAudioContext && beepAudioContext.state === 'suspended') {
     try {
@@ -3076,34 +3107,42 @@ async function startRace() {
       console.warn('[Race] AudioContext resume failed:', err);
     }
   }
-  
-  await _raceCountdown("Arm your quad");
-  
+
+  const completed = await _raceCountdown("Arm your quad");
+  if (!completed) {
+    // Countdown was aborted — reset button state without starting
+    startRaceButton.disabled = false;
+    startRaceButton.classList.remove('active');
+    stopRaceButton.disabled = true;
+    return;
+  }
+
   // Play start beep and begin race
   beep(1, 1, "square"); // needed for some reason to make sure we fire the first beep
   beep(500, 880, "square");
-  
+
   // Vibrate for mobile devices (works even in silent mode on iOS)
   if (navigator.vibrate) {
     navigator.vibrate(500); // 500ms vibration
   }
-  
+
   startTimer();
   startRaceButton.classList.remove('active');
   stopRaceButton.disabled = false;
   addLapButton.disabled = false;
-  
+
   // Initialize lap timing for distance estimation
   currentLapStartTime = Date.now();
   lapTimerStartMs = Date.now();
   lastCompletedLapTime = 0;
   currentLapDistance = 0.0;
-  
+
   // Start polling distance if tracks enabled
   startDistancePolling();
 }
 
 function stopRace() {
+  _raceCountdownAborted = true;
   // Clear any queued audio to prevent race start sounds
   if (audioAnnouncer) {
     audioAnnouncer.clearQueue();
@@ -6386,6 +6425,7 @@ function openSettingsModal() {
         const mnSkipToggle = document.getElementById('mnSkipMasterStartToggle');
         if (mnSkipToggle && config.mnSkipMasterStart !== undefined) {
           mnSkipToggle.checked = !!config.mnSkipMasterStart;
+          mnClientSkipEnabled = !!config.mnSkipMasterStart;
         }
 
         const devModeToggle = document.getElementById('devModeToggle');
@@ -6919,9 +6959,17 @@ function mnRenderRaceTab(nodes) {
     const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
     html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ' <span class="mn-card-badge" style="background:rgba(0,160,0,0.5);">Racing</span>' : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
-    // Solo race in progress (client running outside a master race)
-    if (n.running && !mnRaceRunning && !n.isMaster) {
-      html += `<div class="mn-card-solo-label">Solo race in progress</div>`;
+    // Not racing but has skip-master-start enabled
+    if (!n.running && !n.isMaster && n.skipEnabled) {
+      html += `<div class="mn-card-solo-label mn-card-solo-label-idle">Not racing<br>(ignoring race director)</div>`;
+    }
+
+    // Solo race in progress: always show for skip-enabled pilots; only show for others when no master race is active
+    if (n.running && !n.isMaster && (n.skipEnabled || !mnRaceRunning)) {
+      const soloLabel = n.skipEnabled
+        ? 'Solo race in progress<br>(ignoring race director)'
+        : 'Solo race in progress<br>(race director will override)';
+      html += `<div class="mn-card-solo-label">${soloLabel}</div>`;
     } else if (n.laps.length === 0) {
       html += `<div class="mn-card-lap" style="justify-content:center;color:var(--secondary-color);padding:10px;">—</div>`;
     } else {
@@ -7161,7 +7209,49 @@ function _mnStopTimer() {
   mnRaceTimerIntervalId = null;
 }
 
+// Shows a modal with three labelled buttons. Returns 0, 1, or 2.
+function _showThreeOptionModal(message, btn1Text, btn2Text, btn3Text) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#1e1e1e);color:var(--text-color,#eee);padding:24px 28px;border-radius:12px;max-width:400px;text-align:center;box-shadow:0 6px 28px rgba(0,0,0,0.6);';
+    box.innerHTML = `<p style="margin:0 0 20px;font-size:0.95rem;line-height:1.5;">${message}</p>`;
+    const btnStyles = ['background:#4caf50;color:#fff;', 'background:#ff9800;color:#fff;', 'background:#555;color:#eee;'];
+    [btn1Text, btn2Text, btn3Text].forEach((text, i) => {
+      const btn = document.createElement('button');
+      btn.textContent = text;
+      btn.style.cssText = `${btnStyles[i]}margin:5px;padding:9px 16px;border:none;border-radius:7px;cursor:pointer;font-size:0.9rem;`;
+      btn.onclick = () => { document.body.removeChild(overlay); resolve(i); };
+      box.appendChild(btn);
+    });
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  });
+}
+
 async function mnStartRace() {
+  // Check for non-independent pilots solo racing — they'd be overridden by Start All
+  const nonIndSolo = (mnCurrentNodes || []).filter(n => n.running && !n.isMaster && !n.independent && !mnRaceRunning);
+  if (nonIndSolo.length > 0) {
+    const names = nonIndSolo.map(n => n.pilotName || `Node ${n.nodeId}`).join(', ');
+    const choice = await _showThreeOptionModal(
+      `<strong>Start All</strong> will restart ${nonIndSolo.length} pilot(s) currently in a solo race:<br><em>${names}</em>`,
+      'Start All',
+      'Start All (Ignore Solo Racers)',
+      'Cancel'
+    );
+    if (choice === 2) return;  // Cancel — leave buttons in their current state
+    if (choice === 1) {
+      // Ignore solo racers — pass excluded node IDs to the broadcast
+      window._mnExcludeNodes = nonIndSolo.map(n => n.nodeId);
+    } else {
+      window._mnExcludeNodes = [];
+    }
+  } else {
+    window._mnExcludeNodes = [];
+  }
+
   // Disable button immediately and lock out double-presses
   ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) { b.disabled = true; b.classList.add('active'); } });
 
@@ -7173,12 +7263,24 @@ async function mnStartRace() {
     await beepAudioContext.resume().catch(() => {});
   }
 
+  // Enable stop buttons before countdown so the director can cancel
+  ['mnStopRaceBtn', 'mnStopRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
+
   // Set race-running flag before the countdown so heartbeats arriving during
   // the countdown don't trigger the "solo race in progress" label.
   mnRaceRunning = true;
+  _raceCountdownAborted = false;
 
   // Countdown announcement — identical sequence to single-pilot startRace()
-  await _raceCountdown("Arm your quads");
+  const completed = await _raceCountdown("Arm your quads");
+  if (!completed) {
+    // Director cancelled during countdown — restore button states
+    mnRaceRunning = false;
+    ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) { b.disabled = false; b.classList.remove('active'); } });
+    ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+    mnRenderRaceTab(mnCurrentNodes);
+    return;
+  }
 
   // Beep, start master timer, then broadcast GO to clients — all at the same moment.
   beep(1, 1, "square");
@@ -7186,7 +7288,12 @@ async function mnStartRace() {
   if (navigator.vibrate) navigator.vibrate(500);
 
   _mnStartTimer();
-  try { await fetch('/api/multinode/race/start', { method: 'POST' }); }
+  try {
+    const excludeParam = (window._mnExcludeNodes && window._mnExcludeNodes.length > 0)
+      ? '?exclude=' + window._mnExcludeNodes.join(',')
+      : '';
+    await fetch('/api/multinode/race/start' + excludeParam, { method: 'POST' });
+  }
   catch (e) { console.error('[MULTINODE] Start race failed:', e); }
   ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.classList.remove('active'); });
   ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
@@ -7194,6 +7301,7 @@ async function mnStartRace() {
 }
 
 async function mnStopRace() {
+  _raceCountdownAborted = true;
   try {
     await fetch('/api/multinode/race/stop', { method: 'POST' });
     mnRaceRunning = false;

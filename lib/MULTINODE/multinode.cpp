@@ -44,11 +44,14 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
                 _lastRegistrationMs = currentTimeMs;
             }
 
-            // 1-second heartbeat (only when connected)
-            if (_masterConnected &&
-                (currentTimeMs - _lastHeartbeatMs) > MULTINODE_HEARTBEAT_INTERVAL_MS) {
-                _sendHeartbeat();
-                _lastHeartbeatMs = currentTimeMs;
+            // Heartbeat — on the normal interval, or immediately when forced by setTimerRunning()
+            if (_masterConnected) {
+                bool force = _heartbeatForcePending;
+                if (force) _heartbeatForcePending = false;
+                if (force || (currentTimeMs - _lastHeartbeatMs) > MULTINODE_HEARTBEAT_INTERVAL_MS) {
+                    _sendHeartbeat();
+                    _lastHeartbeatMs = currentTimeMs;
+                }
             }
         }
 
@@ -94,7 +97,7 @@ void MultiNodeManager::queueRaceStop()   { _raceStopPending   = true; }
 
 void MultiNodeManager::setTimerRunning(bool running) {
     _timerRunning = running;
-    _lastHeartbeatMs = 0;  // force immediate heartbeat so master learns the new state within one process() tick
+    _heartbeatForcePending = true;  // volatile — visible to Core 0 on its next process() tick
 }
 void MultiNodeManager::setMasterRaceActive(bool active)  { _masterRaceActive = active; }
 void MultiNodeManager::setQuitPending()                  { _quitPending = true; }
@@ -153,7 +156,8 @@ void MultiNodeManager::_sendHeartbeat() {
     DynamicJsonDocument doc(128);
     doc["nodeId"]      = _myNodeId;
     doc["running"]     = _timerRunning;
-    doc["independent"] = _conf->getMnSkipMasterStart() && _timerRunning && !_masterRaceActive;
+    doc["independent"]  = _conf->getMnSkipMasterStart() && _timerRunning && !_masterRaceActive;
+    doc["skipEnabled"]  = _conf->getMnSkipMasterStart();
     String body;
     serializeJson(doc, body);
 
@@ -313,12 +317,13 @@ bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lap
     return false;
 }
 
-bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool& stateChanged) {
+bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged) {
     for (auto& n : _nodes) {
         if (n.nodeId == nodeId) {
-            stateChanged = (n.running != running || n.independent != independent);
+            stateChanged  = (n.running != running || n.independent != independent || n.skipEnabled != skipEnabled);
             n.running     = running;
             n.independent = independent;
+            n.skipEnabled = skipEnabled;
             n.lastSeen    = millis();
             n.online      = true;
             return true;
@@ -411,6 +416,7 @@ String MultiNodeManager::getNodesToJson() const {
         o["running"]        = n.running;
         o["quitEarly"]      = n.quitEarly;
         o["independent"]    = n.independent;
+        o["skipEnabled"]    = n.skipEnabled;
         o["lapCount"]       = n.lapCount;
         o["clientIP"]       = n.clientIP;
         o["mac"]            = n.macAddress;
@@ -442,9 +448,20 @@ void MultiNodeManager::_broadcastRacePreArm() {
     }
 }
 
+void MultiNodeManager::setExcludeNodes(const std::vector<uint8_t>& ids) {
+    _excludeNodes = ids;
+}
+
 void MultiNodeManager::_broadcastRaceStart() {
     for (const auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
+        // Skip excluded nodes (e.g., solo racers the director chose to leave running)
+        bool excluded = false;
+        for (uint8_t id : _excludeNodes) { if (id == n.nodeId) { excluded = true; break; } }
+        if (excluded) {
+            DEBUG("[MULTINODE] Race start → node %u (%s): SKIPPED (excluded)\n", n.nodeId, n.staIP.c_str());
+            continue;
+        }
         HTTPClient http;
         String url = "http://" + n.staIP + "/timer/masterStart";
         if (http.begin(url)) {
@@ -455,6 +472,7 @@ void MultiNodeManager::_broadcastRaceStart() {
         }
         vTaskDelay(1);  // yield between nodes so async_tcp stays fed
     }
+    _excludeNodes.clear();  // consumed — reset for next race
 }
 
 void MultiNodeManager::_broadcastRaceStop() {

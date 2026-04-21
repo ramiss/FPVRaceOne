@@ -948,7 +948,7 @@
               </div>
               <div class="config-item">
                   <label for="mnSkipMasterStartToggle">Ignore Race Director Start/Stop if already racing: </label>
-                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="autoSaveConfig()" />
+                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="mnClientSkipEnabled = this.checked; autoSaveConfig(); saveConfig()" />
                 </div>
               <div style="margin-top: 20px;">
                 <button onclick="applyMultiNodeSettings()" style="background-color: var(--primary-color); color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Apply Multi-Node &amp; Reboot</button>
