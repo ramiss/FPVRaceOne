@@ -356,6 +356,11 @@ async function onWiFiReconnect() {
     }
   }
 
+  // On initial page load the DOMContentLoaded IIFE already ran the full init. The
+  // SSE onopen fires shortly after and would duplicate every fetch. Skip it: polling
+  // keeps node/lap state fresh and the clock is already running.
+  if (_pageInitDone) return;
+
   // Re-fetch mode and race state to restore everything after a page reload or reconnect.
   try {
     const r = await fetchWithRetry('/api/mode', {}, 3, 1500);
@@ -382,10 +387,10 @@ async function onWiFiReconnect() {
       startRaceDisplayOnly(raceElapsedMs);
     }
 
-    // Restore in-progress laps sequentially BEFORE starting polling.
-    // Master: populates lapTimes[] that _mnMasterEntry() reads on first render.
-    // Single/Client: rebuilds the lap table DOM.
-    if (timerRunning) {
+    // Always restore lap data regardless of run state — laps persist after race stop.
+    if (newMode === 1) {
+      try { await mnRefreshNodes(); } catch (_) {}
+    } else {
       try {
         const lr = await fetchWithRetry('/api/laps/current', {}, 3, 1500);
         const ld = await lr.json();
@@ -394,8 +399,6 @@ async function onWiFiReconnect() {
     }
 
     // Start mode-specific UI and polling.
-    // Use data already fetched above — do NOT call mnInitTab() here because it
-    // re-fetches /api/mode, creating a 4-connection burst that kills the SSE on ESP32.
     if (modeChanged || newMode === 1) {
       onRaceTabOpen();
       if (newMode === 1) {
@@ -929,10 +932,11 @@ onload = async function (e) {
     updateChannelOptionsForBand();
     populateFreqOutput();
 
-    // Only reset timer and laps when race is not already running.
-    // DOMContentLoaded restores an in-progress race before onload's config block runs;
-    // clearing here would wipe the restored laps.
-    if (stopRaceButton.disabled) {
+    // Only reset timer and laps when race is not already running AND no laps have been
+    // restored yet. clearLaps() skips row[0] (treating it as a header), so if
+    // _restoreInProgressLaps already populated the table it would silently delete all but
+    // the first (Gate 1) row. Guard with lapTimes.length === 0 to avoid this.
+    if (stopRaceButton.disabled && lapTimes.length === 0) {
       stopRaceButton.disabled = true;
       startRaceButton.disabled = false;
       addLapButton.disabled = true;
@@ -2448,6 +2452,7 @@ function _restoreInProgressLaps(laps) {
     }
   });
   if (table) { highlightFastestLap(); updateLapCounter(); }
+  updateAnalysisView();
 }
 
 function addLap(lapStr) {
@@ -6419,6 +6424,7 @@ let mnMyNodeId           = 0;      // this client's assigned node ID
 let mnNodeMode           = 0;      // 0=standalone, 1=master, 2=client (cached from /api/mode)
 let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE / polling
 let mnRaceTimerIntervalId = null;
+let _pageInitDone        = false;  // true once DOMContentLoaded IIFE completes successfully
 let mnRaceStartMs         = 0;
 let mnMasterConnected     = false; // client: true when registered with master
 let mnClientPollInterval  = null;  // client: timer for periodic /api/mode polls
@@ -6551,7 +6557,16 @@ async function applyMultiNodeSettings() {
     try {
       await fetch(targetURL, { method: 'GET', mode: 'no-cors', cache: 'no-store' });
       statusLine.textContent = 'Device online — redirecting!';
-      await new Promise(r => setTimeout(r, 300));
+      // Stop all polling so in-flight requests don't compete with the new page's
+      // static-file loads for TCP slots on the ESP32.
+      mnStopPolling();
+      mnStopClientPoll();
+      if (connectionStatusUpdateInterval) { clearInterval(connectionStatusUpdateInterval); connectionStatusUpdateInterval = null; }
+      if (keepaliveWatchdogTimer) { clearInterval(keepaliveWatchdogTimer); keepaliveWatchdogTimer = null; }
+      if (eventSource) { eventSource.close(); eventSource = null; }
+      // Give the device 1.5 s to drain any lingering TCP connections before
+      // the browser opens fresh ones for the redirected page's assets.
+      await new Promise(r => setTimeout(r, 1500));
       window.location.href = targetURL;
       return;
     } catch (_) {
@@ -6561,6 +6576,10 @@ async function applyMultiNodeSettings() {
     }
   }
   // Hard cap — redirect anyway
+  mnStopPolling();
+  mnStopClientPoll();
+  if (connectionStatusUpdateInterval) { clearInterval(connectionStatusUpdateInterval); connectionStatusUpdateInterval = null; }
+  if (eventSource) { eventSource.close(); eventSource = null; }
   window.location.href = targetURL;
 }
 
@@ -6693,8 +6712,11 @@ function onRaceTabOpen() {
     singleView.style.display = 'none';
     masterView.style.display  = '';
     mnRenderRaceTab(mnCurrentNodes);
-    // Start polling so node data loads immediately without visiting Multi-Node tab first
-    if (!mnPollingInterval) mnInitTab();
+    // Start polling so node data loads immediately without visiting Multi-Node tab first.
+    // Use mnStartPolling() directly — mnNodeMode is already set by the caller so we don't
+    // need mnInitTab()'s extra /api/mode fetch, which would add to the TCP connection burst
+    // on page load and could kill the SSE or cause /api/laps/current to fail silently.
+    if (!mnPollingInterval) mnStartPolling();
   } else {
     singleView.style.display  = '';
     masterView.style.display  = 'none';
@@ -6723,10 +6745,16 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
     lapMs = Math.round((Math.random() * 65000) + 25000);  // fallback if race not started
   }
   if (nodeId === 0) {
-    // Master's own timer — inject into local lapTimes and update display
+    // Update local state immediately for instant display.
     const lapSec = lapMs / 1000;
     if (typeof addLap === 'function') addLap(lapSec.toFixed(2));
     mnRenderRaceTab(mnCurrentNodes);
+    // Persist server-side without SSE broadcast (avoids double-adding via the 'lap' event).
+    fetch('/timer/persistLap', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lapTime: lapMs }),
+    }).catch(() => {});
   } else {
     try {
       await fetch('/api/multinode/lap', {
@@ -6737,21 +6765,32 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
       setTimeout(() => mnRefreshNodes(), 200);
     } catch (e) { console.warn('[DEV] lap inject failed:', e); }
   }
-  // For nodeId === 0, addLap() handles TTS.
-  // For nodeId !== 0, the multiNodeLap SSE listener handles TTS (avoids double-speak).
+  // TTS/display: SSE 'lap' → addLap() for nodeId 0; SSE 'multiNodeLap' for nodeId 1-7.
 }
 
-// Build the master's own pilot entry from local lap data so it appears in the grid.
+// Build the master's own pilot entry. Prefers the nodeId:0 entry from the polling
+// response (authoritative, includes server-persisted laps). Falls back to the
+// window.lapTimes JS global for the brief window before the first poll completes.
 function _mnMasterEntry() {
-  const nameEl      = document.getElementById('pname');
-  const colorEl     = document.getElementById('pilotColor');
-  const name        = nameEl ? nameEl.value : 'Master';
-  const colorHex    = colorEl ? colorEl.value : '#0080FF';
-  const colorInt    = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
-  // lapTimes is seconds (float); convert to the same shape as client laps
-  // index 0 = gate 1 (lapNumber 0), index 1 = lap 1 (lapNumber 1), etc.
-  const laps = (Array.isArray(window.lapTimes) ? window.lapTimes : [])
+  const nameEl   = document.getElementById('pname');
+  const colorEl  = document.getElementById('pilotColor');
+  const name     = nameEl ? nameEl.value : 'Master';
+  const colorHex = colorEl ? colorEl.value : '#0080FF';
+  const colorInt = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
+
+  // Try polling data first (authoritative after first poll).
+  const polled = Array.isArray(mnCurrentNodes)
+    ? mnCurrentNodes.find(n => n.nodeId === 0 && n.isMaster)
+    : null;
+
+  // Build laps from whichever source is more up to date.
+  // window.lapTimes grows immediately when a lap is tapped; polled data trails by up to 2s.
+  // After a page refresh lapTimes is empty and polled data (from the pre-fetch) is used.
+  const localLaps = (Array.isArray(window.lapTimes) ? window.lapTimes : [])
     .map((t, i) => ({ lapNumber: i, lapTimeMs: Math.round(t * 1000) }));
+  const polledLaps = (polled && Array.isArray(polled.laps)) ? polled.laps : [];
+  const laps = localLaps.length >= polledLaps.length ? localLaps : polledLaps;
+
   const lapCount  = laps.length;
   const totalMs   = laps.reduce((s, l) => s + l.lapTimeMs, 0);
   const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
@@ -7220,6 +7259,12 @@ document.addEventListener('DOMContentLoaded', () => {
         } else {
           startRaceDisplayOnly(data.raceElapsedMs || 0);
         }
+      }
+      // Always restore lap data regardless of run state — laps persist after race stop.
+      if (data.nodeMode === 1) {
+        // Master: pre-fetch all node+lap data before first render.
+        try { await mnRefreshNodes(); } catch (_) {}
+      } else {
         try {
           const lr = await fetchWithRetry('/api/laps/current', {}, 3, 1500);
           const ld = await lr.json();
@@ -7227,6 +7272,7 @@ document.addEventListener('DOMContentLoaded', () => {
         } catch (_) {}
       }
       onRaceTabOpen();
+      _pageInitDone = true;
       if (data.nodeMode === 2) {
         if (!mnStatusSSID) {
           try {

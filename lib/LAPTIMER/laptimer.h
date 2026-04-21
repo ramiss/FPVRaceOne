@@ -44,6 +44,7 @@ class LapTimer {
     uint32_t getLapTime();
     uint8_t  getLastLapPeakRssi() const;
     bool isLapAvailable();
+    void recordManualLap(uint32_t lapTimeMs);
     
     // Calibration wizard methods
     void startCalibrationWizard();

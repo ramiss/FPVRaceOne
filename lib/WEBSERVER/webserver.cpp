@@ -50,7 +50,11 @@ static AsyncEventSource events("/events");
 // Randomised at boot — changes on every reboot so the browser always fetches
 // fresh JS/CSS after a filesystem or firmware upload (both require a reboot).
 static String _bootToken;
-static String _cachedHtml;  // index.html pre-built with %BUILD_TIME% substituted at startup
+// index.html pre-built with %BUILD_TIME% substituted.
+// malloc'd explicitly so we get a hard failure (not silent String truncation)
+// if the heap can't provide the contiguous block we need.
+static uint8_t* _htmlBuf = nullptr;
+static size_t   _htmlLen = 0;
 
 static const char *wifi_hostname = "FPVRaceOne";
 static const char *wifi_ap_ssid_prefix = "FPVRaceOne";
@@ -135,6 +139,57 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     // without waiting WIFI_RECONNECT_TIMEOUT_MS on every boot.
     changeTimeMs = millis() - WIFI_RECONNECT_TIMEOUT_MS;
     lastStatus = WL_DISCONNECTED;
+
+    // Build HTML cache HERE, before WiFi starts.  LittleFS is already mounted by
+    // storage.init() in main.cpp.  By the time startServices() runs, WiFi+LwIP have
+    // consumed ~100 kB of heap and a single 71 kB malloc fails (silently truncating
+    // the string).  Building it now gives us a clean heap.
+    _bootToken = String(esp_random(), HEX);
+    {
+        File f = LittleFS.open("/index.html", "r");
+        if (f) {
+            size_t fileSize = f.size();
+            // Explicit malloc — failure is a hard NULL, not silent truncation.
+            _htmlBuf = (uint8_t*)malloc(fileSize + 1);
+            if (_htmlBuf) {
+                size_t totalRead = 0;
+                uint8_t chunk[512];
+                size_t n;
+                while ((n = f.read(chunk, sizeof(chunk))) > 0 && totalRead + n <= fileSize) {
+                    memcpy(_htmlBuf + totalRead, chunk, n);
+                    totalRead += n;
+                }
+                _htmlBuf[totalRead] = 0;
+
+                // Replace %BUILD_TIME% in-place (replacement is shorter, so no realloc needed)
+                const char* token    = "%BUILD_TIME%";
+                const size_t tokLen  = 12;
+                const char* rep      = _bootToken.c_str();
+                const size_t repLen  = _bootToken.length();
+                uint8_t* rp = _htmlBuf;
+                uint8_t* wp = _htmlBuf;
+                uint8_t* end = _htmlBuf + totalRead;
+                while (rp < end) {
+                    if (rp + tokLen <= end && memcmp(rp, token, tokLen) == 0) {
+                        memcpy(wp, rep, repLen);
+                        wp += repLen;
+                        rp += tokLen;
+                    } else {
+                        *wp++ = *rp++;
+                    }
+                }
+                _htmlLen = wp - _htmlBuf;
+                DEBUG("HTML cache built in init(): %u bytes (heap free: %u)\n",
+                      _htmlLen, ESP.getFreeHeap());
+            } else {
+                DEBUG("HTML cache: malloc(%u) failed (heap free: %u, max block: %u)\n",
+                      fileSize + 1, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+            }
+            f.close();
+        } else {
+            DEBUG("HTML cache: /index.html not found in init()\n");
+        }
+    }
 }
 
 void Webserver::setTransportManager(TransportManager *tm) {
@@ -418,14 +473,31 @@ static void handleRoot(AsyncWebServerRequest *request) {
     if (g_rgbLed) g_rgbLed->flashGreen();
 #endif
 
-    if (_cachedHtml.isEmpty()) {
-        request->send(500, "text/plain",
-            "Web UI not found. LittleFS not mounted or /index.html missing.\n"
-            "Did you add a LittleFS partition + run uploadfs?");
+    if (!_htmlBuf || _htmlLen == 0) {
+        // malloc failed at boot — serve the raw file from LittleFS.
+        // %BUILD_TIME% won't be substituted (query strings are ignored by
+        // serveStatic so assets still load; only cache-busting is affected).
+        if (LittleFS.exists("/index.html")) {
+            request->send(LittleFS, "/index.html", "text/html", false);
+        } else {
+            request->send(500, "text/plain",
+                "Web UI not found. LittleFS not mounted or /index.html missing.\n"
+                "Did you add a LittleFS partition + run uploadfs?");
+        }
         return;
     }
 
-    AsyncWebServerResponse *response = request->beginResponse(200, "text/html", _cachedHtml);
+    // Stream directly from the malloc'd buffer — no extra copy needed.
+    const char* htmlData = (const char*)_htmlBuf;
+    const size_t htmlLen  = _htmlLen;
+    AsyncWebServerResponse *response = request->beginChunkedResponse("text/html",
+        [htmlData, htmlLen](uint8_t *buf, size_t maxLen, size_t offset) -> size_t {
+            if (offset >= htmlLen) return 0;
+            size_t toSend = min(maxLen, htmlLen - offset);
+            memcpy(buf, htmlData + offset, toSend);
+            return toSend;
+        }
+    );
     response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     request->send(response);
 }
@@ -530,25 +602,41 @@ void Webserver::startServices() {
     DefaultHeaders::Instance().addHeader("Connection", "close");
 
     startLittleFS();
-    _bootToken = String(esp_random(), HEX);  // unique per boot → cache-busts JS/CSS on every reboot
 
-    // Pre-build index.html once with %BUILD_TIME% substituted so handleRoot can serve
-    // it directly from RAM. This avoids per-request LittleFS reads + template scanning
-    // (which was misinterpreting CSS keyframe % characters as template delimiters and
-    // causing the 69kB HTML stream to stall partway through on Chrome reloads).
-    {
+    // HTML cache is normally built in init() before WiFi starts (clean heap).
+    // Fall back to building it here only if init() didn't run or LittleFS wasn't
+    // ready at that time.
+    if (!_htmlBuf) {
+        if (_bootToken.isEmpty()) _bootToken = String(esp_random(), HEX);
         File f = LittleFS.open("/index.html", "r");
         if (f) {
-            _cachedHtml = "";
-            _cachedHtml.reserve(f.size() + 32);  // one allocation avoids incremental realloc
-            uint8_t chunk[512];
-            size_t n;
-            while ((n = f.read(chunk, sizeof(chunk))) > 0) {
-                _cachedHtml.concat((const char*)chunk, n);
+            size_t fileSize = f.size();
+            _htmlBuf = (uint8_t*)malloc(fileSize + 1);
+            if (_htmlBuf) {
+                size_t totalRead = 0;
+                uint8_t chunk[512];
+                size_t n;
+                while ((n = f.read(chunk, sizeof(chunk))) > 0 && totalRead + n <= fileSize) {
+                    memcpy(_htmlBuf + totalRead, chunk, n);
+                    totalRead += n;
+                }
+                _htmlBuf[totalRead] = 0;
+                const char* token   = "%BUILD_TIME%";
+                const size_t tokLen = 12;
+                const char* rep     = _bootToken.c_str();
+                const size_t repLen = _bootToken.length();
+                uint8_t* rp = _htmlBuf, *wp = _htmlBuf, *end = _htmlBuf + totalRead;
+                while (rp < end) {
+                    if (rp + tokLen <= end && memcmp(rp, token, tokLen) == 0) {
+                        memcpy(wp, rep, repLen); wp += repLen; rp += tokLen;
+                    } else { *wp++ = *rp++; }
+                }
+                _htmlLen = wp - _htmlBuf;
+                DEBUG("HTML cache fallback: %u bytes\n", _htmlLen);
+            } else {
+                DEBUG("HTML cache fallback: malloc(%u) failed\n", fileSize + 1);
             }
             f.close();
-            _cachedHtml.replace("%BUILD_TIME%", _bootToken);
-            DEBUG("HTML cache built: %u bytes\n", _cachedHtml.length());
         }
     }
 
@@ -688,6 +776,7 @@ EEPROM:\n\
         JsonObject jsonObj = json.as<JsonObject>();
         if (jsonObj.containsKey("lapTime")) {
             uint32_t lapTimeMs = jsonObj["lapTime"].as<uint32_t>();
+            if (timer) timer->recordManualLap(lapTimeMs);
             if (transportMgr) {
                 transportMgr->broadcastLapEvent(lapTimeMs);
             }
@@ -717,6 +806,19 @@ EEPROM:\n\
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
     server.addHandler(playbackStartHandler);
+
+    // /timer/persistLap — stores a lap server-side without SSE broadcast.
+    // Used by the master dev-mode pilot-card tap so laps survive page refresh
+    // without triggering addLap() a second time via the SSE 'lap' event.
+    AsyncCallbackJsonWebHandler *persistLapHandler = new AsyncCallbackJsonWebHandler("/timer/persistLap", [this](AsyncWebServerRequest *request, JsonVariant &json) {
+        JsonObject jsonObj = json.as<JsonObject>();
+        if (jsonObj.containsKey("lapTime")) {
+            uint32_t lapTimeMs = jsonObj["lapTime"].as<uint32_t>();
+            if (timer) timer->recordManualLap(lapTimeMs);
+        }
+        request->send(200, "application/json", "{\"status\": \"OK\"}");
+    });
+    server.addHandler(persistLapHandler);
 
     AsyncCallbackJsonWebHandler *playbackLapHandler = new AsyncCallbackJsonWebHandler("/timer/playbackLap", [this](AsyncWebServerRequest *request, JsonVariant &json) {
         JsonObject jsonObj = json.as<JsonObject>();
@@ -1776,9 +1878,10 @@ EEPROM:\n\
 
     // /api/laps/current — returns in-progress lap data for page reload restore
     server.on("/api/laps/current", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        DynamicJsonDocument doc(512);
+        // 768 bytes: top-level obj(3) + array(10) + 10×obj(2) — gives ~50 bytes headroom
+        DynamicJsonDocument doc(768);
         bool running   = timer ? timer->isRunning() : false;
-        uint8_t count  = (running && timer) ? timer->getLapCount() : 0;
+        uint8_t count  = timer ? timer->getLapCount() : 0;
         doc["running"]  = running;
         doc["lapCount"] = count;
         JsonArray arr = doc.createNestedArray("laps");
@@ -1791,13 +1894,43 @@ EEPROM:\n\
         request->send(200, "application/json", out);
     });
 
-    // /api/multinode/nodes — master returns all registered client nodes
+    // /api/multinode/nodes — master returns all registered client nodes PLUS the
+    // master's own lap data as nodeId=0.  Including master laps here means the
+    // 2-second polling loop keeps them fresh without a separate /api/laps/current
+    // fetch, so they survive page refresh reliably (same mechanism as client laps).
     server.on("/api/multinode/nodes", HTTP_GET, [this](AsyncWebServerRequest *request) {
         if (!multiNode) {
             request->send(200, "application/json", "{\"nodes\":[]}");
             return;
         }
-        request->send(200, "application/json", multiNode->getNodesToJson());
+        // Build master entry by hand — avoids a JSON-document allocation.
+        bool  masterRunning = timer && timer->isRunning();
+        uint8_t masterCnt  = timer ? timer->getLapCount() : 0;
+        String masterStr   = "{\"nodeId\":0,\"isMaster\":true,\"online\":true";
+        masterStr += ",\"running\":";   masterStr += masterRunning ? "true" : "false";
+        masterStr += ",\"lapCount\":";  masterStr += masterCnt;
+        masterStr += ",\"laps\":[";
+        for (uint8_t i = 0; i < masterCnt; i++) {
+            if (i > 0) masterStr += ',';
+            masterStr += "{\"lapNumber\":";
+            masterStr += (int)(i + 1);
+            masterStr += ",\"lapTimeMs\":";
+            masterStr += (int)timer->getLapTimeAt(i);
+            masterStr += '}';
+        }
+        masterStr += "]}";
+
+        // Splice into clients JSON: {"nodes":[...]} -> {"nodes":[{master},...clients...]}
+        String clientsJson = multiNode->getNodesToJson();  // {"nodes":[...]}
+        String out;
+        out.reserve(masterStr.length() + clientsJson.length() + 4);
+        if (clientsJson.length() <= 11) {   // empty: {"nodes":[]}
+            out = "{\"nodes\":[" + masterStr + "]}";
+        } else {
+            // substring(10) strips the leading '{"nodes":['
+            out = "{\"nodes\":[" + masterStr + "," + clientsJson.substring(10);
+        }
+        request->send(200, "application/json", out);
     });
 
     // /api/multinode/clearLaps — master clears all stored laps for all nodes

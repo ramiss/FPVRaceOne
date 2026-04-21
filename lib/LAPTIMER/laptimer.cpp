@@ -58,6 +58,9 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     distanceRemaining = 0.0f;
 
     stop();
+    lapCount = 0;
+    lapCountWraparound = false;
+    memset(lapTimes, 0, sizeof(lapTimes));
     memset(rssi, 0, sizeof(rssi));
     memset(rssi_window, 0, sizeof(rssi_window));
     rssi_window_index = 0;
@@ -108,6 +111,10 @@ void LapTimer::start() {
     v2Bv[0] = v2Bv[1] = v2Bv[2] = 0.0f;
     v2PeakDurationMs = 0;
 
+    lapCount = 0;
+    lapCountWraparound = false;
+    memset(lapTimes, 0, sizeof(lapTimes));
+
     raceStartTimeMs = millis();
     startTimeMs = raceStartTimeMs;
     state = RUNNING;
@@ -155,8 +162,6 @@ uint32_t LapTimer::getLapTimeAt(uint8_t index) const {
 void LapTimer::stop() {
     DEBUG("LapTimer stopped\n");
     state = STOPPED;
-    lapCountWraparound = false;
-    lapCount = 0;
     rssiCount = 0;
 
     rssiPeak = 0;
@@ -170,8 +175,8 @@ void LapTimer::stop() {
 
     totalDistanceTravelled = 0.0f;
     distanceRemaining = 0.0f;
-
-    memset(lapTimes, 0, sizeof(lapTimes));
+    // lapCount and lapTimes are intentionally preserved so they survive page refresh
+    // after the race ends. They are reset when the next race starts().
     buz->beep(500);
     led->on(500);
 
@@ -565,6 +570,12 @@ uint32_t LapTimer::getLapTime() {
 
 uint8_t LapTimer::getLastLapPeakRssi() const {
     return lastLapPeakRssi;
+}
+
+void LapTimer::recordManualLap(uint32_t lapTimeMs) {
+    lapTimes[lapCount] = lapTimeMs;
+    if ((lapCount + 1) % LAPTIMER_LAP_HISTORY == 0) lapCountWraparound = true;
+    lapCount = (lapCount + 1) % LAPTIMER_LAP_HISTORY;
 }
 
 bool LapTimer::isLapAvailable() {
