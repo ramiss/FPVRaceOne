@@ -1204,10 +1204,10 @@
 
               <h3>Race Tab</h3>
               <div class="config-item">
-                <label for="alwaysHideBannerToggle">Always hide RAM storage banner:</label>
+                <label for="alwaysHideBannerToggle">Always hide download reminder banner:</label>
                 <div style="flex: 1;">
                   <label class="switch">
-                    <input type="checkbox" id="alwaysHideBannerToggle" onchange="localStorage.setItem('alwaysHideRaceBanner', this.checked ? '1' : '0'); applyRaceHistoryModeUI();">
+                    <input type="checkbox" id="alwaysHideBannerToggle" onchange="localStorage.setItem('alwaysHideRaceBanner', this.checked ? '1' : '0'); if (!this.checked) sessionStorage.removeItem('hideRaceDownloadReminder'); applyRaceHistoryModeUI();">
                     <span class="slider"></span>
                   </label>
                   <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="alwaysHideBannerLabel">Off</span>

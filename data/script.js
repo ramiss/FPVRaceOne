@@ -844,15 +844,21 @@ onload = async function (e) {
     });
   }
 
-  // Restore always-hide banner toggle state from localStorage
+  // Restore always-hide banner toggle — default ON (null treated as hidden).
   const alwaysHideBannerToggle = document.getElementById("alwaysHideBannerToggle");
   const alwaysHideBannerLabel  = document.getElementById("alwaysHideBannerLabel");
   if (alwaysHideBannerToggle) {
-    const stored = localStorage.getItem("alwaysHideRaceBanner") === "1";
+    // null = never set → default to ON (hidden); only "0" explicitly opts out
+    const stored = localStorage.getItem("alwaysHideRaceBanner") !== "0";
+    if (localStorage.getItem("alwaysHideRaceBanner") === null) {
+      localStorage.setItem("alwaysHideRaceBanner", "1");
+    }
     alwaysHideBannerToggle.checked = stored;
     if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = stored ? "On" : "Off";
     alwaysHideBannerToggle.addEventListener("change", () => {
       if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = alwaysHideBannerToggle.checked ? "On" : "Off";
+      // When opting back in to seeing the banner, clear the session-level dismiss too
+      if (!alwaysHideBannerToggle.checked) sessionStorage.removeItem("hideRaceDownloadReminder");
     });
   }
 
@@ -3083,10 +3089,14 @@ async function _raceCountdown(armPhrase) {
   queueSpeak(`<p>${armPhrase}</p>`);
   await _speechDone();
   if (_raceCountdownAborted) return false;
-  queueSpeak("<p>Starting in</p>");
+  // "Starting in 5" as one utterance — no inter-utterance gap from Web Speech API
+  queueSpeak("<p>Starting in 5</p>");
+  await _speechDone();
+  if (_raceCountdownAborted) return false;
+  await new Promise(r => setTimeout(r, 1000));
   if (_raceCountdownAborted) return false;
 
-  for (let i = 5; i >= 1; i--) {
+  for (let i = 4; i >= 1; i--) {
     if (_raceCountdownAborted) return false;
     const t0 = Date.now();
     queueSpeak(`<p>${i}</p>`);
@@ -3740,7 +3750,7 @@ function applyRaceHistoryModeUI() {
   // Banner logic (RAM-only reminder), with "hide" persisted for this browser session
   if (raceTabBanner) {
     const userHidden = sessionStorage.getItem("hideRaceDownloadReminder") === "1";
-    const alwaysHidden = localStorage.getItem("alwaysHideRaceBanner") === "1";
+    const alwaysHidden = localStorage.getItem("alwaysHideRaceBanner") !== "0"; // default ON
 
     if (raceHistoryPersistent || userHidden || alwaysHidden) {
       raceTabBanner.style.display = 'none';
@@ -7540,12 +7550,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Close the SSE connection explicitly before page reload/navigation.
   // Windows OS buffers SSE data at the TCP layer after the tab is gone, so the
-  // server's keepalive-based dead-connection detection never fires. Sending a
-  // TCP FIN here lets the ESP32 reclaim the socket immediately instead of after
-  // a 30–120 s TCP timeout, preventing socket exhaustion on repeated reloads.
-  window.addEventListener('pagehide', () => {
-    if (eventSource) { eventSource.close(); eventSource = null; }
-  });
+  // Close SSE as early as possible during navigation so Chrome doesn't abort
+  // the connection mid-flight and log a browser-level network error.
+  // beforeunload fires before Chrome tears down the network layer;
+  // pagehide is a belt-and-suspenders fallback for browsers that skip beforeunload.
+  const _closeSSE = () => { if (eventSource) { eventSource.close(); eventSource = null; } };
+  window.addEventListener('beforeunload', _closeSSE);
+  window.addEventListener('pagehide', _closeSSE);
 
   // Keep paused scanner overlays correct on resize/rotation
   window.addEventListener('resize', () => {
