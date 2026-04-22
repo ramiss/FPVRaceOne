@@ -380,10 +380,16 @@
           <span id="mnPilotModalFreq" style="margin-left:10px;font-size:13px;color:var(--secondary-color);"></span>
         </div>
         <div style="font-size:12px;color:var(--secondary-color);margin-bottom:14px;">Wait ~20 seconds after changing band/channel for the new frequency to calibrate.</div>
-        <div style="display:flex;gap:8px;margin-top:20px;align-items:center;">
-          <button onclick="mnSavePilotModal()">Save</button>
+        <div class="config-item" style="margin-bottom:14px;">
+          <label for="mnPilotModalSkip">Ignore Race Director Start/Stop</label>
+          <input type="checkbox" id="mnPilotModalSkip">
+        </div>
+        <div style="margin-top:6px;">
+          <button onclick="mnRemoveFromModal()" style="width:100%;background:#c0392b!important;color:#fff!important;">Kick From Slot — pauses reconnect for 1 minute</button>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;">
           <button onclick="mnClosePilotModal()" style="background:var(--border-color)!important;color:var(--text-color)!important;">Cancel</button>
-          <button onclick="mnRemoveFromModal()" title="Removes this pilot from their slot. They can rejoin and will be assigned the next available slot." style="margin-left:auto;background:#c0392b!important;color:#fff!important;">Kick From Slot</button>
+          <button onclick="mnSavePilotModal()" style="margin-left:auto;">Save</button>
         </div>
       </div>
     </div>

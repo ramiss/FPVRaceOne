@@ -3106,6 +3106,13 @@ async function startRace() {
     }
   }
 
+  // Offer to clear existing lap data before starting
+  if (lapTimes.length > 0) {
+    if (confirm('You have existing lap data. Clear before starting?')) {
+      clearLaps();
+    }
+  }
+
   updateLapCounter();
   _raceCountdownAborted = false;
   startRaceButton.disabled = true;
@@ -6960,11 +6967,8 @@ function mnRenderRaceTab(nodes) {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
     const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
     const hostTag  = n.isMaster ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Host</span>' : '';
-    const isRunningEffective = n.isMaster ? mnRaceRunning : n.running;
     let badge = '';
-    if      (n.quitEarly)                                    badge = ' <span class="mn-status-dnf">DNF</span>';
-    else if (isRunningEffective && mnRaceRunning)             badge = ' <span class="mn-status-racing">Racing</span>';
-    else if (isRunningEffective && !mnRaceRunning && !n.isMaster) badge = ' <span class="mn-status-solo">Solo</span>';
+    if (n.quitEarly) badge = ' <span class="mn-status-dnf">DNF</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
     const statusDotColor = n.online !== false ? '#4caf50' : '#f44336';
     html += `<tr>
@@ -6994,10 +6998,15 @@ function mnRenderRaceTab(nodes) {
       return;
     }
 
-    const isSoloRacing = n.running && !n.isMaster && !mnRaceRunning;
-    const canTap  = mnDevMode && !n.independent && !isSoloRacing;
-    const devAttr = canTap ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.lapCount+1},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
-    const isRacing = n.isMaster ? mnRaceRunning : n.running;
+    const _isExcludedThisRace = n.excludedFromCurrentRace || _pendingExcludes.has(n.nodeId);
+    const isSoloRacing = n.running && !n.isMaster &&
+      (!mnRaceRunning || _isExcludedThisRace);
+    const canTap  = mnDevMode && mnRaceRunning && !n.independent && !isSoloRacing;
+    const devAttr = canTap ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.laps.length},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
+    // Show Racing badge as soon as mnRaceRunning flips (pre-arm) for non-excluded nodes, matching the master card.
+    const isRacing = n.isMaster
+      ? mnRaceRunning
+      : (n.running || (mnRaceRunning && !_isExcludedThisRace && !n.skipEnabled));
     const racingBadgeColor = isSoloRacing ? 'rgba(255,140,0,0.75)' : 'rgba(0,160,0,0.5)';
     const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
     html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
@@ -7008,10 +7017,12 @@ function mnRenderRaceTab(nodes) {
     }
 
     // Solo race in progress: always show for skip-enabled pilots; only show for others when no master race is active
-    if (n.running && !n.isMaster && (n.skipEnabled || !mnRaceRunning)) {
+    if (n.running && !n.isMaster && (n.skipEnabled || _isExcludedThisRace || !mnRaceRunning)) {
       const soloLabel = n.skipEnabled
         ? 'Solo race in progress<br>(ignoring race director)'
-        : 'Solo race in progress<br>(race director will override)';
+        : _isExcludedThisRace
+          ? 'Solo race in progress<br>(ignoring for this race)'
+          : 'Solo race in progress<br>(race director will override)';
       html += `<div class="mn-card-solo-label">${soloLabel}</div>`;
     } else if (n.laps.length === 0) {
       html += `<div class="mn-card-lap" style="justify-content:center;color:var(--secondary-color);padding:10px;">—</div>`;
@@ -7097,6 +7108,8 @@ function mnOpenPilotModal(nodeId) {
     bandSel.value = String(node.bandIndex || 0);
     mnModalUpdateChannels(node.channelIndex || 0);
   }
+  const skipEl = document.getElementById('mnPilotModalSkip');
+  if (skipEl) skipEl.checked = !!(node && node.skipEnabled);
   document.getElementById('mnPilotModal').style.display = 'flex';
   setTimeout(() => document.getElementById('mnPilotModalName').focus(), 50);
 }
@@ -7118,15 +7131,19 @@ async function mnSavePilotModal() {
   const pilotColor = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
   const bandSel    = document.getElementById('mnPilotModalBand');
   const chanSel    = document.getElementById('mnPilotModalChannel');
-  const bandIndex  = bandSel  ? parseInt(bandSel.value)  : 0;
-  const chanIndex  = chanSel  ? parseInt(chanSel.value) - 1 : 0;  // value is 1-based, store 0-based
-  const freq       = (freqLookup[bandIndex] || [])[chanIndex] || 0;
+  const bandIndex      = bandSel  ? parseInt(bandSel.value)  : 0;
+  const chanIndex      = chanSel  ? parseInt(chanSel.value) - 1 : 0;  // value is 1-based, store 0-based
+  const freq           = (freqLookup[bandIndex] || [])[chanIndex] || 0;
+  const skipEl         = document.getElementById('mnPilotModalSkip');
+  const skipMasterStart = skipEl ? (skipEl.checked ? 1 : 0) : undefined;
   mnClosePilotModal();
   try {
+    const body = { nodeId, pilotName: name, pilotColor, band: bandIndex, chan: chanIndex, freq };
+    if (skipMasterStart !== undefined) body.skipMasterStart = skipMasterStart;
     const r = await fetch('/api/multinode/editPilot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ nodeId, pilotName: name, pilotColor, band: bandIndex, chan: chanIndex, freq })
+      body: JSON.stringify(body)
     });
     if (!r.ok) alert('Update failed \u2014 is the client device reachable?');
     mnRefreshNodes();
@@ -7138,8 +7155,16 @@ async function mnRemoveFromModal() {
   const nodeId   = _mnModalNodeId;
   const node     = mnCurrentNodes.find(n => n.nodeId === nodeId);
   const callsign = node ? (node.pilotName || 'Node ' + nodeId) : 'Node ' + nodeId;
+  if (!confirm(`Kick "${callsign}" from slot ${nodeId}?\n\nTheir device will pause reconnection attempts for 1 minute. After that they can rejoin and will be assigned the next available slot.`)) return;
   mnClosePilotModal();
-  await mnRemoveNode(nodeId, callsign);
+  try {
+    await fetch('/api/multinode/kickNode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ nodeId })
+    });
+    mnRefreshNodes();
+  } catch (e) { console.error('kickNode failed', e); }
 }
 
 async function mnRemoveNode(nodeId, callsign) {
@@ -7274,6 +7299,18 @@ function _showThreeOptionModal(message, btn1Text, btn2Text, btn3Text) {
 }
 
 async function mnStartRace() {
+  // Offer to clear existing lap data before starting
+  const hasMasterLaps = lapTimes.length > 0;
+  const hasClientLaps = (mnCurrentNodes || []).some(n => !n.isMaster && (n.laps || []).length > 0);
+  if (hasMasterLaps || hasClientLaps) {
+    if (confirm('You have existing lap data. Clear before starting?')) {
+      await fetch('/api/multinode/clearLaps', { method: 'POST' }).catch(() => {});
+      clearLaps();
+      const timerEl = document.getElementById('mn-race-timer');
+      if (timerEl) timerEl.textContent = '0:00.0';
+    }
+  }
+
   // Check for non-independent pilots solo racing — they'd be overridden by Start All
   const nonIndSolo = (mnCurrentNodes || []).filter(n => n.running && !n.isMaster && !n.independent && !mnRaceRunning);
   if (nonIndSolo.length > 0) {
@@ -7353,6 +7390,11 @@ async function mnStopRace() {
   try {
     await fetch('/api/multinode/race/stop', { method: 'POST' });
     mnRaceRunning = false;
+    // Optimistically mark non-excluded clients as stopped so the solo-race label doesn't
+    // flash between this render and the next heartbeat confirming running=false.
+    mnCurrentNodes = mnCurrentNodes.map(n =>
+      (n.isMaster || n.excludedFromCurrentRace) ? n : { ...n, running: false }
+    );
     _mnStopTimer();
     ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
     ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true;  });
@@ -7364,8 +7406,15 @@ async function mnClearRace() {
   if (!confirm('Clear all race data for all pilots?')) return;
   try {
     await fetch('/api/multinode/clearLaps', { method: 'POST' });
+    mnRaceRunning = false;
+    window._mnExcludeNodes = [];  // clear pending excludes so previously-ignored pilots reappear
+    _mnStopTimer();
+    const timerEl = document.getElementById('mn-race-timer');
+    if (timerEl) timerEl.textContent = '0:00.0';
+    ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
+    ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true;  });
     clearLaps();           // clear master's own local laps
-    await mnRefreshNodes(); // re-render with empty node data from server
+    await mnRefreshNodes(); // re-render with empty node data from server (excludedFromCurrentRace now false)
   } catch (e) { console.error('[MULTINODE] Clear race failed:', e); }
 }
 

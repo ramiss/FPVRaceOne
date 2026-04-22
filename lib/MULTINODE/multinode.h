@@ -75,6 +75,7 @@ public:
     void   setTimerRunning(bool running);
     void   setMasterRaceActive(bool active);
     void   setQuitPending();       // queue quit notification to master
+    void   pauseReconnect(uint32_t durationMs);  // pause registration for durationMs (client, called on kick)
     bool   isMasterRaceActive() const { return _masterRaceActive; }
     String getNodesToJson() const;
     String scanForNodesJson();   // WiFi scan — call from Core 0 only
@@ -104,8 +105,9 @@ private:
     String   _myMacAddress;              // this device's WiFi MAC (set in init)
 
     // Client-side state
-    bool     _masterRaceActive   = false;
-    bool     _timerRunning       = false;
+    bool     _masterRaceActive        = false;
+    bool     _timerRunning            = false;
+    uint32_t _reconnectPausedUntilMs  = 0;  // millis() deadline set when master kicks this node
 
     // Thread-safe flags (set by async handler on Core 0, consumed by process() on Core 0)
     volatile bool     _heartbeatForcePending    = false;  // set by setTimerRunning(); consumed by process()

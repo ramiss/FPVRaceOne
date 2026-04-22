@@ -722,6 +722,12 @@ EEPROM:\n\
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
+    // /api/multinode/pauseReconnect — client pauses reconnection after being kicked by master
+    server.on("/api/multinode/pauseReconnect", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (multiNode && multiNode->isClientMode()) multiNode->pauseReconnect(60000);
+        request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
+
     // /timer/masterPreArm — called by master before countdown; clients flash Start button
     server.on("/timer/masterPreArm", HTTP_POST, [this](AsyncWebServerRequest *request) {
         // Only flash if this client honours master race commands (toggle not set to ignore)
@@ -2092,6 +2098,38 @@ EEPROM:\n\
         });
     server.addHandler(mnRemoveHandler);
 
+    // /api/multinode/kickNode — like removeNode but first tells the client to pause reconnecting
+    AsyncCallbackJsonWebHandler *mnKickHandler = new AsyncCallbackJsonWebHandler(
+        "/api/multinode/kickNode",
+        [this](AsyncWebServerRequest *request, JsonVariant &json) {
+            if (!multiNode) {
+                request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+                return;
+            }
+            JsonObject obj    = json.as<JsonObject>();
+            uint8_t    nodeId = obj["nodeId"] | 0;
+            // Locate client IP before removing the slot
+            String staIP;
+            for (const auto& n : multiNode->getNodes()) {
+                if (n.nodeId == nodeId) { staIP = n.staIP; break; }
+            }
+            // Tell client to pause reconnecting — best effort, don't fail on timeout
+            if (!staIP.isEmpty()) {
+                HTTPClient http;
+                if (http.begin("http://" + staIP + "/api/multinode/pauseReconnect")) {
+                    http.setTimeout(500);
+                    http.POST("");
+                    http.end();
+                }
+            }
+            bool ok = multiNode->removeNode(nodeId);
+            if (ok) events.send(multiNode->getNodesToJson().c_str(), "multiNodeState");
+            request->send(ok ? 200 : 404, "application/json",
+                          ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
+        });
+    server.addHandler(mnKickHandler);
+
+
     // /api/multinode/editName — master pushes a new pilot name to a client node
     AsyncCallbackJsonWebHandler *mnEditNameHandler = new AsyncCallbackJsonWebHandler(
         "/api/multinode/editName",
@@ -2143,13 +2181,15 @@ EEPROM:\n\
                 return;
             }
             JsonObject obj        = json.as<JsonObject>();
-            uint8_t    nodeId     = obj["nodeId"]     | 0;
-            String     pilotName  = obj["pilotName"]  | "";
-            uint32_t   pilotColor = obj["pilotColor"] | 0x0080FFu;
-            bool       hasBand    = obj.containsKey("band");
-            uint8_t    bandIndex  = obj["band"]        | 0;
-            uint8_t    chanIndex  = obj["chan"]         | 0;
-            uint16_t   freq       = obj["freq"]        | 0;
+            uint8_t    nodeId           = obj["nodeId"]           | 0;
+            String     pilotName        = obj["pilotName"]        | "";
+            uint32_t   pilotColor       = obj["pilotColor"]       | 0x0080FFu;
+            bool       hasBand          = obj.containsKey("band");
+            uint8_t    bandIndex        = obj["band"]             | 0;
+            uint8_t    chanIndex        = obj["chan"]             | 0;
+            uint16_t   freq             = obj["freq"]             | 0;
+            bool       hasSkip          = obj.containsKey("skipMasterStart");
+            uint8_t    skipMasterStart  = obj["skipMasterStart"]  | 0;
 
             String staIP;
             const auto& nodes = multiNode->getNodes();
@@ -2175,6 +2215,7 @@ EEPROM:\n\
                     body["chan"] = chanIndex;
                     body["freq"] = freq;
                 }
+                if (hasSkip) body["mnSkipMasterStart"] = skipMasterStart;
                 String bodyStr;
                 serializeJson(body, bodyStr);
                 sent = (http.POST(bodyStr) == 200);
@@ -2217,11 +2258,12 @@ EEPROM:\n\
             }
             JsonObject obj = json.as<JsonObject>();
             DynamicJsonDocument patch(256);
-            if (obj.containsKey("pilotName"))  patch["name"]       = obj["pilotName"].as<String>();
-            if (obj.containsKey("pilotColor")) patch["pilotColor"] = obj["pilotColor"].as<uint32_t>();
-            if (obj.containsKey("band"))       patch["band"]       = obj["band"].as<int>();
-            if (obj.containsKey("chan"))       patch["chan"]       = obj["chan"].as<int>();
-            if (obj.containsKey("freq"))       patch["freq"]       = obj["freq"].as<int>();
+            if (obj.containsKey("pilotName"))         patch["name"]              = obj["pilotName"].as<String>();
+            if (obj.containsKey("pilotColor"))        patch["pilotColor"]         = obj["pilotColor"].as<uint32_t>();
+            if (obj.containsKey("band"))              patch["band"]              = obj["band"].as<int>();
+            if (obj.containsKey("chan"))              patch["chan"]              = obj["chan"].as<int>();
+            if (obj.containsKey("freq"))              patch["freq"]              = obj["freq"].as<int>();
+            if (obj.containsKey("mnSkipMasterStart")) patch["mnSkipMasterStart"] = obj["mnSkipMasterStart"].as<uint8_t>();
             conf->fromJson(patch.as<JsonObject>());
             conf->write();
             // Push update to this client's browser so name/color reflect immediately

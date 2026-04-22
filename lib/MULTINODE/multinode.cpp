@@ -13,8 +13,9 @@ void MultiNodeManager::init(Config* config) {
     _lastHeartbeatMs     = 0;
     _lastRegistrationMs  = 0;
     _heartbeatFailCount  = 0;
-    _masterRaceActive    = false;
-    _timerRunning        = false;
+    _masterRaceActive         = false;
+    _timerRunning             = false;
+    _reconnectPausedUntilMs   = 0;
     _racePreArmPending   = false;
     _raceStartPending    = false;
     _raceStopPending     = false;
@@ -28,13 +29,14 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
 
     if (isClientMode()) {
         bool prevConnected = _masterConnected;
+        bool pauseActive   = (_reconnectPausedUntilMs > 0 && currentTimeMs < _reconnectPausedUntilMs);
 
-        if (WiFi.status() != WL_CONNECTED) {
+        if (!pauseActive && WiFi.status() != WL_CONNECTED) {
             if (_masterConnected) {
                 _masterConnected = false;
                 DEBUG("[MULTINODE] STA disconnected from master\n");
             }
-        } else {
+        } else if (!pauseActive) {
             // Periodic registration — fast retry when disconnected, slow keep-alive when connected
             uint32_t regInterval = _masterConnected ? MULTINODE_REGISTER_INTERVAL_MS
                                                     : MULTINODE_RECONNECT_INTERVAL_MS;
@@ -101,6 +103,14 @@ void MultiNodeManager::setTimerRunning(bool running) {
 }
 void MultiNodeManager::setMasterRaceActive(bool active)  { _masterRaceActive = active; }
 void MultiNodeManager::setQuitPending()                  { _quitPending = true; }
+
+void MultiNodeManager::pauseReconnect(uint32_t durationMs) {
+    _reconnectPausedUntilMs = millis() + durationMs;
+    if (_masterConnected) {
+        _masterConnected = false;
+        _clientStateChangedFlag = true;  // notify browser immediately
+    }
+}
 
 void MultiNodeManager::queueLap(uint32_t lapTimeMs) {
     // Called from Core 1 — keep this fast
@@ -348,10 +358,12 @@ bool MultiNodeManager::handleQuit(uint8_t nodeId) {
 void MultiNodeManager::clearAllLaps() {
     for (auto& n : _nodes) {
         n.laps.clear();
-        n.lapCount  = 0;
-        n.running   = false;
-        n.quitEarly = false;
+        n.lapCount               = 0;
+        n.running                = false;
+        n.quitEarly              = false;
+        n.excludedFromCurrentRace = false;
     }
+    _excludeNodes.clear();
     DEBUG("[MULTINODE] All laps cleared\n");
 }
 
