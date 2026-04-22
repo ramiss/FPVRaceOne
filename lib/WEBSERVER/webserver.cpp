@@ -349,6 +349,16 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 uint8_t maxConn = (conf->getNodeMode() == 1) ? 8 : 4;
                 WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
 
+                // Master: embed a 6-byte vendor IE in every beacon and probe-response so
+                // scanning clients can identify this node as a master without connecting.
+                // Layout: 0xDD (vendor-specific), length=4, OUI='F','P','V', type=0x01.
+                // Zero ongoing CPU cost — stored in the WiFi driver's beacon template.
+                if (conf->getNodeMode() == 1) {
+                    static const uint8_t kMasterIE[] = { 0xDD, 0x04, 0x46, 0x50, 0x56, 0x01 };
+                    esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON,     WIFI_VND_IE_ID_0, kMasterIE);
+                    esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, kMasterIE);
+                }
+
                 // Disable modem power save — without this the AP sleeps between beacons
                 // and clients drop ~50% of the time on ESP32C6.
                 esp_wifi_set_ps(WIFI_PS_NONE);

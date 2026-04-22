@@ -3,6 +3,7 @@
 #include "debug.h"
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
+#include <esp_wifi.h>
 
 void MultiNodeManager::init(Config* config) {
     _conf                = config;
@@ -525,20 +526,77 @@ String MultiNodeManager::getMasterStatusJson() const {
     return out;
 }
 
+// ── Master-discovery promiscuous sniffer ─────────────────────────────────────
+// Active only during the scanForNodesJson() window (~300 ms).  Captures beacon
+// and probe-response frames and records BSSIDs that carry the FPV master vendor
+// IE (OUI 'F','P','V' = 0x46,0x50,0x56, type 0x01).
+// Storage is a fixed-size array — no heap allocation inside the callback.
+
+static char _masterBssids[8][18]; // "AA:BB:CC:DD:EE:FF\0" × 8 slots
+static int  _masterBssidCount = 0;
+
+static void _scanPromiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
+    if (type != WIFI_PKT_MGMT) return;
+    const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
+    const uint8_t* p = pkt->payload;
+    int len = (int)pkt->rx_ctrl.sig_len - 4; // exclude FCS
+
+    // Beacon = 0x80, Probe Response = 0x50 (frame-control byte masked to type+subtype)
+    uint8_t fc = p[0] & 0xFC;
+    if (len < 37 || (fc != 0x80 && fc != 0x50)) return;
+
+    // 802.11 mgmt header (24 B) + timestamp(8) + beacon-interval(2) + capability(2) = 36 B
+    // BSSID = Address 3, bytes 16-21
+    int off = 36;
+    while (off + 2 <= len) {
+        uint8_t id  = p[off];
+        uint8_t iel = p[off + 1];
+        if (off + 2 + iel > len) break;
+        if (id == 0xDD && iel >= 4 &&
+            p[off+2] == 0x46 && p[off+3] == 0x50 &&
+            p[off+4] == 0x56 && p[off+5] == 0x01) {
+            if (_masterBssidCount < 8) {
+                snprintf(_masterBssids[_masterBssidCount++], 18,
+                         "%02X:%02X:%02X:%02X:%02X:%02X",
+                         p[16], p[17], p[18], p[19], p[20], p[21]);
+            }
+            return;
+        }
+        off += 2 + iel;
+    }
+}
+
+static bool _isMasterBssid(const String& bssid) {
+    for (int i = 0; i < _masterBssidCount; i++) {
+        if (bssid.equalsIgnoreCase(_masterBssids[i])) return true;
+    }
+    return false;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 String MultiNodeManager::scanForNodesJson() {
     // Note: Scanning temporarily interrupts the STA connection; use with care.
     DynamicJsonDocument doc(2048);
     JsonArray arr = doc.createNestedArray("networks");
 
+    // Enable promiscuous mode to sniff vendor IEs during the scan window.
+    _masterBssidCount = 0;
+    esp_wifi_set_promiscuous(true);
+    esp_wifi_set_promiscuous_rx_cb(_scanPromiscuousCb);
+
     int n = WiFi.scanNetworks(false, false, false, 300);
+
+    esp_wifi_set_promiscuous(false);
+    esp_wifi_set_promiscuous_rx_cb(nullptr);
+
     for (int i = 0; i < n; i++) {
         String ssid = WiFi.SSID(i);
-        if (ssid.startsWith("FPVRaceOne_")) {
-            JsonObject o = arr.createNestedObject();
-            o["ssid"]    = ssid;
-            o["rssi"]    = WiFi.RSSI(i);
-            o["channel"] = WiFi.channel(i);
-        }
+        if (!ssid.startsWith("FPVRaceOne_")) continue;
+        JsonObject o = arr.createNestedObject();
+        o["ssid"]     = ssid;
+        o["rssi"]     = WiFi.RSSI(i);
+        o["channel"]  = WiFi.channel(i);
+        o["isMaster"] = _isMasterBssid(WiFi.BSSIDstr(i));
     }
     WiFi.scanDelete();
 

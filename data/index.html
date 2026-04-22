@@ -864,19 +864,19 @@
             <div id="settings-wifi" class="settings-section">
               <h2>WiFi & Connection</h2>
               
+              <!-- USB/Electron connection mode — disabled for now
               <h3 style="margin-top: 0;">Connection Mode</h3>
               <div class="config-item">
                 <label for="connectionMode">Connection Mode:</label>
                 <select id="connectionMode">
                   <option value="auto" selected>Auto (WiFi/USB)</option>
                   <option value="wifi">WiFi Only</option>
-                  <!--<option value="usb">USB Only</option>-->
+                  <option value="usb">USB Only</option>
                 </select>
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
                 Auto mode detects USB connection, falls back to WiFi
               </div>
-
               <div class="config-item" id="comPortSection" style="display: none;">
                 <label for="comPort">COM Port:</label>
                 <select id="comPort" onchange="selectComPort()">
@@ -886,6 +886,7 @@
               <div id="comPortStatus" style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; display: none;">
                 Status: Disconnected
               </div>
+              -->
 
               <h3>WiFi Antenna</h3>
               <div class="config-item">

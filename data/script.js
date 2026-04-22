@@ -1,7 +1,7 @@
 console.log('[FPV] js');
 // Transport manager for WiFi/USB connectivity
 let transportManager = null;
-let currentConnectionMode = 'auto'; // 'auto', 'wifi', 'usb'
+let currentConnectionMode = 'wifi'; // 'auto', 'wifi', 'usb'  — USB/Electron disabled for now
 let usbConnected = false;
 let eventSource = null;
 let eventSourceReconnectTimer = null;
@@ -6686,11 +6686,19 @@ async function mnScanNetworks() {
       resultsEl.textContent = 'No FPVRaceOne devices found nearby.';
       return;
     }
+
+    // Auto-select if exactly one master is detected
+    const masters = nets.filter(n => n.isMaster);
+    if (masters.length === 1) mnSelectSSID(masters[0].ssid);
+
     resultsEl.innerHTML = '';
     nets.forEach(n => {
       const row = document.createElement('div');
-      row.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:4px;';
-      row.innerHTML = `<span style="flex:1;">${n.ssid}</span>
+      row.style.cssText = `display:flex;align-items:center;gap:8px;margin-bottom:4px;${n.isMaster ? '' : 'opacity:0.55;'}`;
+      const badge = n.isMaster
+        ? '<span style="font-size:11px;font-weight:600;background:#2196f3;color:#fff;padding:2px 6px;border-radius:4px;">Master</span>'
+        : '<span style="font-size:11px;color:var(--secondary-color);">Client</span>';
+      row.innerHTML = `${badge}<span style="flex:1;">${n.ssid}</span>
         <span style="color:var(--secondary-color);font-size:12px;">${n.rssi} dBm ch${n.channel}</span>
         <button style="padding:3px 10px;font-size:12px;background:var(--primary-color);color:#fff;border:none;border-radius:4px;cursor:pointer;"
                 onclick="mnSelectSSID('${n.ssid}')">Select</button>`;
