@@ -56,7 +56,7 @@
       <div id="raceTabDownloadReminder" class="banner-warning"
           style="display:none; margin: 10px 0; padding: 6px 10px; border-radius: 8px;">
         <span>Races are lost when unplugged. Download after racing to save.</span>
-        <a href="#" id="raceTabDownloadReminderHide" style="margin-left:auto;">hide</a>
+        <button id="raceTabDownloadReminderHide" onclick="hideRaceDownloadReminder(); applyRaceHistoryModeUI();" style="margin-left:auto; padding:3px 10px; font-size:12px; background:rgba(0,0,0,0.15); border:1px solid rgba(255,200,0,0.4); border-radius:5px; cursor:pointer; color:inherit;">Dismiss</button>
       </div>
       <div id="calibrationBanner" style="
         display: none;
@@ -952,7 +952,7 @@
                 </div>
                 <div id="mnScanResults" style="margin-left: 170px; margin-top: 4px; font-size: 13px;"></div>
               </div>
-              <div class="config-item">
+              <div class="config-item" id="mnSkipMasterStartRow" style="display:none;">
                   <label for="mnSkipMasterStartToggle">Ignore Race Director Start/Stop if already racing: </label>
                   <input type="checkbox" id="mnSkipMasterStartToggle" onchange="mnClientSkipEnabled = this.checked; autoSaveConfig();" />
                 </div>
@@ -1199,6 +1199,21 @@
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
                 Restarts the device immediately. Required for antenna and TX power changes to take effect.
+              </div>
+
+              <h3>Race Tab</h3>
+              <div class="config-item">
+                <label for="alwaysHideBannerToggle">Always hide RAM storage banner:</label>
+                <div style="flex: 1;">
+                  <label class="switch">
+                    <input type="checkbox" id="alwaysHideBannerToggle" onchange="localStorage.setItem('alwaysHideRaceBanner', this.checked ? '1' : '0'); applyRaceHistoryModeUI();">
+                    <span class="slider"></span>
+                  </label>
+                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="alwaysHideBannerLabel">Off</span>
+                </div>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
+                When on, the "Races are lost when unplugged" reminder on the Race tab is permanently hidden.
               </div>
 
               <h3>Developer</h3>

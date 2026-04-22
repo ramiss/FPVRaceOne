@@ -844,13 +844,15 @@ onload = async function (e) {
     });
   }
 
-  // Wire the "hide" link on the Race tab banner
-  const hideLink = document.getElementById("raceTabDownloadReminderHide");
-  if (hideLink) {
-    hideLink.addEventListener("click", (ev) => {
-      ev.preventDefault();
-      hideRaceDownloadReminder();
-      applyRaceHistoryModeUI(); // re-apply to honor the sessionStorage flag immediately
+  // Restore always-hide banner toggle state from localStorage
+  const alwaysHideBannerToggle = document.getElementById("alwaysHideBannerToggle");
+  const alwaysHideBannerLabel  = document.getElementById("alwaysHideBannerLabel");
+  if (alwaysHideBannerToggle) {
+    const stored = localStorage.getItem("alwaysHideRaceBanner") === "1";
+    alwaysHideBannerToggle.checked = stored;
+    if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = stored ? "On" : "Off";
+    alwaysHideBannerToggle.addEventListener("change", () => {
+      if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = alwaysHideBannerToggle.checked ? "On" : "Off";
     });
   }
 
@@ -3082,7 +3084,6 @@ async function _raceCountdown(armPhrase) {
   await _speechDone();
   if (_raceCountdownAborted) return false;
   queueSpeak("<p>Starting in</p>");
-  await _speechDone();
   if (_raceCountdownAborted) return false;
 
   for (let i = 5; i >= 1; i--) {
@@ -3739,8 +3740,9 @@ function applyRaceHistoryModeUI() {
   // Banner logic (RAM-only reminder), with "hide" persisted for this browser session
   if (raceTabBanner) {
     const userHidden = sessionStorage.getItem("hideRaceDownloadReminder") === "1";
+    const alwaysHidden = localStorage.getItem("alwaysHideRaceBanner") === "1";
 
-    if (raceHistoryPersistent || userHidden) {
+    if (raceHistoryPersistent || userHidden || alwaysHidden) {
       raceTabBanner.style.display = 'none';
     } else {
       // Use flex so the "hide" link can be right-justified
@@ -6526,14 +6528,18 @@ function onNodeModeChange() {
   const warningText   = document.getElementById('mn-ip-warning-text');
   const ssidInput     = document.getElementById('masterSSIDInput');
 
+  const skipRow = document.getElementById('mnSkipMasterStartRow');
+
   if (mode === 2) {
     // Switching TO client — restore any previously entered SSID
     if (clientFields) clientFields.style.display = '';
     if (ssidInput && _savedMasterSSID) ssidInput.value = _savedMasterSSID;
+    if (skipRow) skipRow.style.display = '';
   } else {
     // Switching AWAY from client — save the current SSID value before hiding
     if (ssidInput && ssidInput.value.trim()) _savedMasterSSID = ssidInput.value.trim();
     if (clientFields) clientFields.style.display = 'none';
+    if (skipRow) skipRow.style.display = 'none';
   }
 
   // Show IP-change warning when selected mode has a different IP than the live firmware mode
