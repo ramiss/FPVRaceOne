@@ -4442,6 +4442,12 @@ async function importRaces(input) {
     return;
   }
 
+  // Reject multi-pilot race files
+  if (json?.type === 'MultiRace') {
+    alert('This is a multi-pilot race file. Use the Import Race button on the Race tab in master mode.');
+    return;
+  }
+
   // Normalize expected shape: { races:[...] } or [...] (array)
   const racesArray = Array.isArray(json) ? json : (Array.isArray(json?.races) ? json.races : null);
   if (!racesArray) {
@@ -7033,7 +7039,7 @@ function mnRenderRaceTab(nodes) {
       : (n.running || (mnRaceRunning && !_isExcludedThisRace && !n.skipEnabled));
     const racingBadgeColor = isSoloRacing ? 'rgba(255,140,0,0.75)' : 'rgba(0,160,0,0.5)';
     const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {
@@ -7071,6 +7077,7 @@ function mnRenderRaceTab(nodes) {
   html += '</div>';
 
   container.innerHTML = html;
+  mnUpdateRaceDataButtons();
 }
 
 // ── Node pilot edit modal ─────────────────────────────────────────────────
@@ -7423,6 +7430,7 @@ async function mnStopRace() {
     ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
     ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true;  });
     mnRenderRaceTab(mnCurrentNodes);
+    mnUpdateRaceDataButtons();
   } catch (e) { console.error('[MULTINODE] Stop race failed:', e); }
 }
 
@@ -7439,7 +7447,121 @@ async function mnClearRace() {
     ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true;  });
     clearLaps();           // clear master's own local laps
     await mnRefreshNodes(); // re-render with empty node data from server (excludedFromCurrentRace now false)
+    mnUpdateRaceDataButtons();
   } catch (e) { console.error('[MULTINODE] Clear race failed:', e); }
+}
+
+// ── Master race download / import ────────────────────────────────────────────
+
+function mnUpdateRaceDataButtons() {
+  const div = document.getElementById('mn-race-data-buttons');
+  if (!div) return;
+  const hasData = (mnCurrentNodes || []).some(n => (n.laps || []).length > 0)
+               || (window.lapTimes || []).length > 0;
+  div.style.display = (!mnRaceRunning && hasData) ? 'block' : 'none';
+}
+
+function downloadMnRaceData() {
+  const master = _mnMasterEntry();
+  const allNodes = [];
+
+  // Master node — convert laps to consistent { lapNumber, lapTimeMs } shape
+  if ((master.laps || []).length > 0) {
+    allNodes.push({
+      nodeId:     0,
+      isMaster:   true,
+      pilotName:  master.pilotName || 'Master',
+      pilotColor: master.pilotColor || 0x0080FF,
+      laps:       master.laps.map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
+    });
+  }
+
+  // Client nodes
+  (mnCurrentNodes || []).filter(n => !n.isMaster && (n.laps || []).length > 0).forEach(n => {
+    allNodes.push({
+      nodeId:     n.nodeId,
+      isMaster:   false,
+      pilotName:  n.pilotName || ('Node ' + n.nodeId),
+      pilotColor: n.pilotColor || 0x0080FF,
+      quitEarly:  n.quitEarly || false,
+      laps:       (n.laps || []).map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
+    });
+  });
+
+  if (allNodes.length === 0) {
+    alert('No race data to download.');
+    return;
+  }
+
+  const ts = Math.floor(Date.now() / 1000);
+  const blob = new Blob([JSON.stringify({ type: 'MultiRace', timestamp: ts, nodes: allNodes }, null, 2)],
+                        { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `MultiRace-${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function importMnRace(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  input.value = '';
+
+  let json;
+  try {
+    json = JSON.parse(await file.text());
+  } catch (e) {
+    alert('Invalid JSON file — could not parse.');
+    return;
+  }
+
+  // Detect wrong file type
+  if (Array.isArray(json?.races) || (Array.isArray(json) && json[0]?.lapTimes !== undefined)) {
+    alert('This is a single-pilot race file. Import it from the Race History tab instead.');
+    return;
+  }
+  if (json?.type !== 'MultiRace' || !Array.isArray(json?.nodes)) {
+    alert('File format not recognised. Expected a MultiRace file downloaded from master mode.');
+    return;
+  }
+
+  const nodes = json.nodes;
+
+  // Restore master's own laps into window.lapTimes (stored in seconds)
+  const masterNode = nodes.find(n => n.isMaster || n.nodeId === 0);
+  window.lapTimes = masterNode ? (masterNode.laps || []).map(l => (l.lapTimeMs || 0) / 1000) : [];
+
+  // Build mnCurrentNodes with computed stats so the leaderboard renders correctly
+  mnCurrentNodes = nodes.map(n => {
+    const laps     = n.laps || [];
+    const realLaps = laps.filter(l => l.lapNumber > 0);
+    const lapCount = realLaps.length;
+    const totalMs  = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+    const avgMs    = lapCount > 0 ? Math.round(totalMs / lapCount) : 0;
+    const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
+    return {
+      ...n,
+      online:                  true,
+      running:                 false,
+      independent:             false,
+      skipEnabled:             n.skipEnabled || false,
+      excludedFromCurrentRace: false,
+      lapCount, totalMs, avgMs, fastestMs,
+    };
+  });
+
+  mnRaceRunning = false;
+  _mnStopTimer();
+  const timerEl = document.getElementById('mn-race-timer');
+  if (timerEl) timerEl.textContent = '0:00.0';
+
+  mnRenderRaceTab(mnCurrentNodes);
+  mnUpdateRaceDataButtons();
+  alert(`Race imported: ${nodes.length} pilot${nodes.length !== 1 ? 's' : ''}.`);
 }
 
 // Stop polling whenever the user navigates away from the Race tab

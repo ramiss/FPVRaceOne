@@ -2239,7 +2239,7 @@ footer {
 .mn-pilot-card-header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 7px 10px;
   font-weight: 700;
   font-size: 13px;

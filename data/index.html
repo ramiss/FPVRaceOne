@@ -165,6 +165,11 @@
 
         <!-- ── Master multi-node race view ── -->
         <div id="master-race-view" style="display:none;">
+          <div id="mn-race-data-buttons" style="display:none; margin-bottom:12px; text-align:center;">
+            <button onclick="downloadMnRaceData()" style="padding:8px 16px; margin-right:8px;">Download Race</button>
+            <button onclick="document.getElementById('mnImportFile').click()" style="padding:8px 16px;">Import Race</button>
+            <input type="file" id="mnImportFile" accept=".json" style="display:none;" onclick="this.value='';" onchange="importMnRace(this)">
+          </div>
           <div id="mn-race-timer" class="mn-race-timer-display">0:00.0</div>
           <div class="racebuttons mn-race-buttons">
             <button id="mnStartRaceBtnMain" onclick="mnStartRace()">Start All</button>
