@@ -17,7 +17,12 @@
 // SCK           →   GPIO 14
 // MOSI          →   GPIO 13
 // MISO          →   GPIO 25   ← must be 25, NOT 12 (GPIO12 is a boot-strapping pin)
-#define RSSI_LOGGING_ENABLED 0
+#define RSSI_LOGGING_ENABLED 1
+
+// USB Serial RSSI stream for diagnostics.
+// Set to 1 to compile in the stream feature; toggle at runtime via POST /api/rssistream.
+// Set to 0 to compile it out entirely for production builds.
+#define RSSI_STREAM_ENABLED 0
 
 //ESP23-C3
 #if defined(ESP32C3)

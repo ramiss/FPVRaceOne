@@ -1355,6 +1355,17 @@ EEPROM:\n\
         led->on(200);
     });
     
+#if RSSI_STREAM_ENABLED
+    // RSSI stream toggle — enables lightweight Serial output for diagnosis
+    server.on("/api/rssistream", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        bool enabled = !timer->isRssiStreamEnabled();
+        timer->setRssiStream(enabled);
+        char buf[40];
+        snprintf(buf, sizeof(buf), "{\"streaming\":%s}", enabled ? "true" : "false");
+        request->send(200, "application/json", buf);
+    });
+#endif
+
     // Reboot endpoint
     server.on("/reboot", HTTP_POST, [this](AsyncWebServerRequest *request) {
         request->send(200, "application/json", "{\"status\": \"OK\", \"message\": \"Rebooting...\"}");

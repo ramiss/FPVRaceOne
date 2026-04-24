@@ -94,10 +94,25 @@ class LapTimer {
     uint8_t lastLapPeakRssi = 0;  // peak RSSI of the most recently completed lap
 
     // Gate state tracking / debounce helpers
-    bool gateExited;          // True when we're confidently outside the gate region
+    bool gateExited;          // True when gate has re-armed (sustained below exit after last lap)
     bool enteredGate;         // True once we have crossed the enter threshold
     uint8_t enterHoldSamples; // Number of consecutive samples at/above enter
     uint32_t enterHoldStartMs;
+    uint8_t gateCloseCount;   // Consecutive samples below exit — used for re-arm latch
+
+    // Threshold-smoothing IIR — heavily smoothed Bessel output used exclusively
+    // for enter/exit STATE decisions.  The peak value + timestamp still come from
+    // the responsive Bessel output so timing is unaffected.
+    float   _threshSmooth;
+    uint8_t _threshSmoothOut;
+
+#if RSSI_STREAM_ENABLED
+    // USB RSSI stream (toggle via /api/rssistream)
+    bool     _rssiStream     = false;
+    uint32_t _lastStreamMs   = 0;
+    uint32_t _streamCount    = 0;
+    uint32_t _streamCountMs  = 0;
+#endif
 
     // Debug helpers (last processed RSSI chain)
     uint8_t lastRawRssi;
@@ -107,6 +122,13 @@ class LapTimer {
     uint32_t lastRaceDebugPrintMs;
 
     bool lapAvailable = false;
+
+#if RSSI_STREAM_ENABLED
+public:
+    void setRssiStream(bool e)       { _rssiStream = e; }
+    bool isRssiStreamEnabled() const { return _rssiStream; }
+private:
+#endif
     
     // Calibration wizard data
     uint16_t calibrationRssiCount;

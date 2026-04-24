@@ -43,6 +43,24 @@ static const int kMaxStepPerSample = 12;
 
 // kExitConfirmSamples: now read from config (conf->getExitConfirmSamples())
 
+// Gate re-arm latch: require this many consecutive samples of the THRESHOLD-SMOOTH
+// signal below exitT before the next gate entry is allowed.  With the smooth signal
+// doing most of the heavy lifting, a small count is sufficient.
+static const uint8_t kGateCloseRequired = 10;
+
+// Asymmetric IIR for the threshold-smooth signal:
+//   Rise alpha — tracks increases quickly so gate entry is detected promptly.
+//   Fall alpha — tracks decreases very slowly so noise dips within a single pass
+//                do not pull the smooth signal below exit threshold.
+//
+// With fall alpha=0.001 → tau ≈ 1000 samples.
+//   At ~1 kHz: tau ≈ 1 s  — tolerates noise dips up to ~2-3 s inside a pass.
+//   At ~5 kHz: tau ≈ 200 ms — tolerates noise dips up to ~500 ms.
+// After the drone genuinely departs the gate, the smooth signal reaches exitT
+// in roughly one tau — well within any minimum lap time.
+static const float kThreshRiseAlpha = 0.05f;   // fast rise  (tau ≈  20 samples)
+static const float kThreshFallAlpha = 0.001f;  // slow fall  (tau ≈ 1000 samples)
+
 void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook) {
     conf = config;
     rx = rx5808;
@@ -84,8 +102,17 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     lastRaceDebugPrintMs = 0;
     enteredGate = false;
     gateExited = true;
+    gateCloseCount = 0;
     enterHoldSamples = 0;
     enterHoldStartMs = 0;
+
+    _threshSmooth    = 128.0f;
+    _threshSmoothOut = 128;
+#if RSSI_STREAM_ENABLED
+    _lastStreamMs    = 0;
+    _streamCount     = 0;
+    _streamCountMs   = 0;
+#endif
 }
 
 void LapTimer::start() {
@@ -122,10 +149,24 @@ void LapTimer::start() {
     rssiPeak = 0;
     rssiPeakTimeMs = 0;
 
-    gateExited = true;
+    gateExited = true;   // Gate 1 may open immediately at race start
+    gateCloseCount = 0;
     enteredGate = false;
     enterHoldSamples = 0;
     enterHoldStartMs = 0;
+
+    // Seed the threshold-smooth filter at the ambient RSSI level so there is no
+    // artificial ramp-up period at the start of a race.
+    {
+        uint8_t seed = rx->readRssi();
+        _threshSmooth    = (float)seed;
+        _threshSmoothOut = seed;
+    }
+#if RSSI_STREAM_ENABLED
+    _lastStreamMs  = 0;
+    _streamCount   = 0;
+    _streamCountMs = 0;
+#endif
     prevAvgRssi = 0;
     lastRaceDebugPrintMs = 0;
 
@@ -169,6 +210,7 @@ void LapTimer::stop() {
     startTimeMs = 0;
 
     gateExited = true;
+    gateCloseCount = 0;
     enteredGate = false;
     enterHoldSamples = 0;
     enterHoldStartMs = 0;
@@ -345,6 +387,44 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     }
 #endif
 
+    // ── Threshold-smooth filter (asymmetric IIR) ────────────────────────────
+    // Rises quickly (tracks drone approach) but falls very slowly (noise dips
+    // within a single pass don't pull the signal below the exit threshold).
+    // Used ONLY for enter/exit state decisions — peak value and timestamp still
+    // come from the responsive Bessel output (out).
+    {
+        const float fOut = (float)out;
+        const float alpha = (fOut > _threshSmooth) ? kThreshRiseAlpha : kThreshFallAlpha;
+        _threshSmooth    = alpha * fOut + (1.0f - alpha) * _threshSmooth;
+        _threshSmoothOut = (uint8_t)lroundf(_threshSmooth);
+    }
+
+    // ── Gate re-arm latch (uses smooth signal) ──────────────────────────────
+    if (!gateExited) {
+        if (_threshSmoothOut < conf->getExitRssi()) {
+            if (gateCloseCount < kGateCloseRequired) ++gateCloseCount;
+            if (gateCloseCount >= kGateCloseRequired) gateExited = true;
+        } else {
+            gateCloseCount = 0;
+        }
+    }
+
+#if RSSI_STREAM_ENABLED
+    // ── USB RSSI stream (toggle via /api/rssistream) ────────────────────────
+    if (_rssiStream) {
+        ++_streamCount;
+        if (_streamCountMs == 0) _streamCountMs = currentTimeMs;
+        if (currentTimeMs - _lastStreamMs >= 100) {
+            _lastStreamMs = currentTimeMs;
+            uint32_t elapsed = currentTimeMs - _streamCountMs;
+            float hz = elapsed > 0 ? (_streamCount * 1000.0f / elapsed) : 0.0f;
+            Serial.printf("RS r=%3u b=%3u s=%3u ent=%d gex=%d gcc=%2u hz=%.0f\n",
+                rawRssi, out, _threshSmoothOut,
+                (int)enteredGate, (int)gateExited, (unsigned)gateCloseCount, hz);
+        }
+    }
+#endif
+
     switch (state) {
         case STOPPED:
             break;
@@ -399,6 +479,11 @@ void LapTimer::lapPeakCapture() {
 
     if (cur >= enter) {
         if (!enteredGate) {
+            if (!gateExited) {
+                // Gate hasn't re-armed yet: RSSI hasn't sustained below exit long
+                // enough since the last lap.  Ignore this rise above enter.
+                return;
+            }
             enteredGate = true;
             enterHoldSamples = 1;
             enterHoldStartMs = now;
@@ -425,8 +510,9 @@ void LapTimer::lapPeakCapture() {
             }
         }
     } else {
-        if (enteredGate && cur < exitT && rssiPeak == 0) {
-            // Noise blip: dipped below exit without any valid peak — reset.
+        if (enteredGate && _threshSmoothOut < exitT && rssiPeak == 0) {
+            // The smooth signal dropped below exit without capturing any valid
+            // peak — the Bessel rise was a noise blip never confirmed by smooth.
             enteredGate = false;
             gateExited = true;
             enterHoldSamples = 0;
@@ -447,15 +533,10 @@ bool LapTimer::lapPeakCaptured() {
                      (rssiPeak >= enter) &&
                      (rssiPeak > (exitT + 5));
 
-    // V1: require 2 consecutive samples below exit (rejects single-sample cliff drops).
-    // V2: trust the Bessel filter — a single sample below exit is sufficient.
-    bool droppedBelowExit = false;
-    if (v2 || conf->getExitConfirmSamples() <= 1) {
-        droppedBelowExit = (rssi[rssiCount] < exitT);
-    } else {
-        uint16_t prevIdx = (rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY;
-        droppedBelowExit = (rssi[rssiCount] < exitT) && (rssi[prevIdx] < exitT);
-    }
+    // Use the heavily smoothed RSSI for the exit decision so that brief noise
+    // dips within a single gate pass don't count as a true exit.  The smooth
+    // signal only crosses below exitT once the drone has genuinely departed.
+    bool droppedBelowExit = (_threshSmoothOut < exitT);
 
     bool captured = enteredGate && validPeak && droppedBelowExit;
 
@@ -492,9 +573,21 @@ void LapTimer::startLap() {
     v2PeakDurationMs = 0;
 
     enteredGate = false;
-    gateExited = true;
     enterHoldSamples = 0;
     enterHoldStartMs = 0;
+
+    // lapCount has already been incremented by finishLap() for real laps.
+    // If lapCount == 0 this is the WAITING→RUNNING pre-start transition —
+    // allow gate 1 to open immediately.  For all other laps, require the
+    // RSSI to sustain below exit (kGateCloseRequired samples) before the
+    // next gate can open, preventing re-triggering within the same broad pass.
+    if (lapCount > 0) {
+        gateExited = false;
+        gateCloseCount = 0;
+    } else {
+        gateExited = true;
+        gateCloseCount = 0;
+    }
 
     buz->beep(200);
     led->on(200);
