@@ -53,13 +53,22 @@ static const uint8_t kGateCloseRequired = 10;
 //   Fall alpha — tracks decreases very slowly so noise dips within a single pass
 //                do not pull the smooth signal below exit threshold.
 //
-// With fall alpha=0.001 → tau ≈ 1000 samples.
-//   At ~1 kHz: tau ≈ 1 s  — tolerates noise dips up to ~2-3 s inside a pass.
-//   At ~5 kHz: tau ≈ 200 ms — tolerates noise dips up to ~500 ms.
-// After the drone genuinely departs the gate, the smooth signal reaches exitT
-// in roughly one tau — well within any minimum lap time.
+// The fall alpha is deliberately linked to the Bessel speed setting so the user
+// has a single knob: "Smooth" Bessel = maximum noise rejection throughout;
+// "Fast" Bessel = more responsive throughout.  See getThreshFallAlpha().
 static const float kThreshRiseAlpha = 0.05f;   // fast rise  (tau ≈  20 samples)
-static const float kThreshFallAlpha = 0.001f;  // slow fall  (tau ≈ 1000 samples)
+
+// Fall alpha per Bessel preset — chosen in handleLapTimerUpdate via getThreshFallAlpha().
+//   besselHz=0 (100 Hz / Fast):     0.003  → tau ≈  333 samples — responsive
+//   besselHz=1  (50 Hz / Balanced): 0.001  → tau ≈ 1000 samples — default
+//   besselHz=2  (20 Hz / Smooth):   0.0003 → tau ≈ 3333 samples — maximum noise rejection
+static inline float getThreshFallAlpha(uint8_t besselHz) {
+    switch (besselHz) {
+        case 0:  return 0.003f;
+        case 2:  return 0.0003f;
+        default: return 0.001f;
+    }
+}
 
 void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook) {
     conf = config;
@@ -358,13 +367,16 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         const uint8_t exitT = conf->getExitRssi();
 
         if (prevAvgRssi < enter && cur >= enter) {
-            DEBUG("[RACE] ENTER crossed: cur=%u raw=%u kal=%u ma=%u out=%u t=%lu(ms since lap start)\n",
-                  cur, rawRssi, lastKalmanRssi, lastAvgRssi, out,
+            DEBUG("[RACE] ENTER crossed: b=%u raw=%u s=%u ent=%d gex=%d peak=%u t=%lu ms\n",
+                  cur, rawRssi, _threshSmoothOut,
+                  (int)enteredGate, (int)gateExited, rssiPeak,
                   (unsigned long)(millis() - startTimeMs));
         }
         if (prevAvgRssi >= exitT && cur < exitT) {
-            DEBUG("[RACE] EXIT crossed: cur=%u peak=%u t=%lu(ms since lap start)\n",
-                  cur, rssiPeak, (unsigned long)(millis() - startTimeMs));
+            DEBUG("[RACE] EXIT  crossed: b=%u s=%u ent=%d gex=%d peak=%u t=%lu ms\n",
+                  cur, _threshSmoothOut,
+                  (int)enteredGate, (int)gateExited, rssiPeak,
+                  (unsigned long)(millis() - startTimeMs));
         }
 
         const uint32_t now = millis();
@@ -394,7 +406,11 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // come from the responsive Bessel output (out).
     {
         const float fOut = (float)out;
-        const float alpha = (fOut > _threshSmooth) ? kThreshRiseAlpha : kThreshFallAlpha;
+        // V1 doesn't have a Bessel speed setting — use balanced alpha for it
+        const float fallAlpha = (conf->getFilterMode() == 1)
+                                ? getThreshFallAlpha(conf->getBesselHz())
+                                : getThreshFallAlpha(1);   // 1 = 50 Hz Balanced
+        const float alpha = (fOut > _threshSmooth) ? kThreshRiseAlpha : fallAlpha;
         _threshSmooth    = alpha * fOut + (1.0f - alpha) * _threshSmooth;
         _threshSmoothOut = (uint8_t)lroundf(_threshSmooth);
     }
