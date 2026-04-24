@@ -166,9 +166,7 @@
         <!-- ── Master multi-node race view ── -->
         <div id="master-race-view" style="display:none;">
           <div id="mn-race-data-buttons" style="display:none; margin-bottom:12px; text-align:center;">
-            <button onclick="downloadMnRaceData()" style="padding:8px 16px; margin-right:8px;">Download Race</button>
-            <button onclick="document.getElementById('mnImportFile').click()" style="padding:8px 16px;">Import Race</button>
-            <input type="file" id="mnImportFile" accept=".json" style="display:none;" onclick="this.value='';" onchange="importMnRace(this)">
+            <button onclick="downloadMnRaceData()" style="padding:8px 16px;">Download Race</button>
           </div>
           <div id="mn-race-timer" class="mn-race-timer-display">0:00.0</div>
           <div class="racebuttons mn-race-buttons">
@@ -182,13 +180,26 @@
       </div>
 
       <div id="history" class="tabcontent" style="display: none;">
-        <h2>Race History</h2>
-        <!--<div id="raceHistoryStorageLabel" class="info-label" style="margin: 8px 0; font-size: 0.95em;"></div>-->
-        <div class="history-controls">
-          <button id="importRacesBtn" onclick="document.getElementById('importFile').click()">Import Races</button>
-          <input type="file" id="importFile" accept=".json" style="display: none;" onclick="this.value='';" onchange="importRaces(this)" />
-          <button id="clearAllRacesBtn" onclick="clearAllRaces()" class="danger-button">Clear All</button>
+
+        <!-- Master mode: import-only view -->
+        <div id="mn-history-import-section" style="display:none; padding: 24px 0; text-align:center;">
+          <h2>Import Race</h2>
+          <p style="color:var(--secondary-color); margin-bottom:20px;">Import a previously downloaded MultiRace file to review race data.</p>
+          <button onclick="document.getElementById('mnImportFileHistory').click()" style="padding:10px 24px; font-size:15px;">Import Race File</button>
+          <input type="file" id="mnImportFileHistory" accept=".json" style="display:none;" onclick="this.value='';" onchange="importMnRace(this);">
         </div>
+
+        <!-- Single / client mode: full race history -->
+        <div id="mn-history-single-section">
+          <h2>Race History</h2>
+          <!--<div id="raceHistoryStorageLabel" class="info-label" style="margin: 8px 0; font-size: 0.95em;"></div>-->
+          <div class="history-controls">
+            <button id="importRacesBtn" onclick="document.getElementById('importFile').click()">Import Races</button>
+            <input type="file" id="importFile" accept=".json" style="display: none;" onclick="this.value='';" onchange="importRaces(this)" />
+            <button id="clearAllRacesBtn" onclick="clearAllRaces()" class="danger-button">Clear All</button>
+          </div>
+        </div>
+
         <div id="raceHistoryList" class="history-list">
           <p class="no-data">No races saved yet</p>
         </div>
@@ -578,7 +589,8 @@
               <div class="config-item">
                 <label for="lapFormatSelect">Lap Announcement Format:</label>
                 <select id="lapFormatSelect" onchange="saveLapFormat()">
-                  <option value="full" selected>Pilot + Lap + Time</option>
+                  <option value="full">Pilot + Lap + Time</option>
+                  <option value="pilottime" selected>Pilot + Time</option>
                   <option value="laptime">Lap + Time</option>
                   <option value="timeonly">Time Only</option>
                 </select>

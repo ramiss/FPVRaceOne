@@ -589,7 +589,7 @@ void Config::fromJson(JsonObject source) {
         modified = true;
     }
     if (source.containsKey("lapFormat") && source["lapFormat"] != conf.lapFormat) {
-        strlcpy(conf.lapFormat, source["lapFormat"] | "full", sizeof(conf.lapFormat));
+        strlcpy(conf.lapFormat, source["lapFormat"] | "pilottime", sizeof(conf.lapFormat));
         modified = true;
     }
     if (source.containsKey("ssid")) {
@@ -1018,7 +1018,7 @@ void Config::setDefaults(void) {
     conf.bandIndex = 4;  // RaceBand
     conf.channelIndex = 0;  // Channel 1
     conf.frequency = 5658;  // RaceBand Channel 1 (R1) - 5658 MHz
-    conf.minLap = 20;  // 2.0 seconds
+    conf.minLap = 50;  // 5.0 seconds
     conf.alarm = 0;  // Alarm disabled
     conf.announcerType = 2;
     conf.announcerRate = 10;
@@ -1049,7 +1049,7 @@ void Config::setDefaults(void) {
     strlcpy(conf.theme, "oceanic", sizeof(conf.theme));  // Default theme
     strlcpy(conf.selectedVoice, "piper", sizeof(conf.selectedVoice));  // Default voice
     conf.voiceEnabled = 1;   // default ON 
-    strlcpy(conf.lapFormat, "timeonly", sizeof(conf.lapFormat));  // Default lap format
+    strlcpy(conf.lapFormat, "pilottime", sizeof(conf.lapFormat));  // Default lap format
     strlcpy(conf.ssid, "", sizeof(conf.ssid));  // Empty WiFi credentials
     strlcpy(conf.password, "", sizeof(conf.password));  // Empty WiFi credentials
     conf.wifiExtAntenna = 1;  // External antenna by default (matches hardware)

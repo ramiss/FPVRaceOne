@@ -199,7 +199,7 @@ var minRssiValue = exitRssi - 10;
 
 var audioEnabled = false;
 var speakObjsQueue = [];
-var lapFormat = 'full'; // 'full', 'laptime', 'timeonly'
+var lapFormat = 'pilottime'; // 'full', 'pilottime', 'laptime', 'timeonly'
 var selectedVoice = 'default';
 
 // Initialize hybrid audio announcer
@@ -547,10 +547,17 @@ function setupWiFiEvents() {
       mnRefreshNodes();
       // Announce the lap using the existing announcer
       if (typeof queueSpeak === 'function') {
-        if (data.lap === 1) {
+        if (data.lap === 0) {
           queueSpeak(`<p>${callsign} entered gate 1</p>`);
         } else {
-          queueSpeak(`<p>${callsign} Lap ${data.lap}, ${formatMsSpeak(data.ms)}</p>`);
+          const timeStr = formatMsSpeak(data.ms);
+          let text;
+          switch (lapFormat) {
+            case 'pilottime': text = `<p>${callsign} ${timeStr}</p>`; break;
+            case 'timeonly':  text = `<p>${timeStr}</p>`;             break;
+            default:          text = `<p>${callsign} Lap ${data.lap}, ${timeStr}</p>`;
+          }
+          queueSpeak(text);
         }
       }
     } catch (_) {}
@@ -1766,7 +1773,8 @@ function openTab(evt, tabName) {
   document.getElementById(tabName).style.display = "block";
 
   // Switch between single-pilot and master race view
-  if (tabName === "race") onRaceTabOpen();
+  if (tabName === "race")    onRaceTabOpen();
+  if (tabName === "history") updateHistoryTabMode();
 
   // Hook pause button when entering Calibration tab; create chart on first open
   if (tabName === "calib") {
@@ -2543,16 +2551,13 @@ function addLap(lapStr) {
       } else {
         let text;
         switch (lapFormat) {
-          case 'full':
-            text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
-            break;
-          case 'laptime':
-            text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
-            break;
-          case 'timeonly':
+          case 'pilottime':
             text = `<p>${pilotName} ${lapSpeak}</p>`;
             break;
-          default:
+          case 'timeonly':
+            text = `<p>${lapSpeak}</p>`;
+            break;
+          default:  // 'full', 'laptime'
             text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
         }
         queueSpeak(text);
@@ -3177,6 +3182,9 @@ async function startRace() {
 }
 
 function stopRace() {
+  if (mnMasterRaceActive) {
+    if (!confirm('The race director started this race. Stopping will record a DNF for you. Stop anyway?')) return;
+  }
   _raceCountdownAborted = true;
   // Clear any queued audio to prevent race start sounds
   if (audioAnnouncer) {
@@ -3312,7 +3320,7 @@ function downloadCurrentRaceData() {
   const url = URL.createObjectURL(dataBlob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `race-${raceData.timestamp}.json`;
+  a.download = `SingleRace-${raceData.timestamp}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -4444,7 +4452,7 @@ async function importRaces(input) {
 
   // Reject multi-pilot race files
   if (json?.type === 'MultiRace') {
-    alert('This is a multi-pilot race file. Use the Import Race button on the Race tab in master mode.');
+    alert('This is a multi-pilot race file. Import a single pilot race here or use the Import Race button in master mode.');
     return;
   }
 
@@ -4987,8 +4995,8 @@ function detectTopPeaks(values, desiredCount = 3) {
   // noise bumps to win over well-separated true laps.
   const threshold = minVal + range * 0.70;
 
-  // Local-max check radius: wide enough to skip rapid noise spikes
-  const r = 10;
+  // Local-max check radius: wide enough to skip rapid noise spikes and handle broad peaks
+  const r = 20;
   const candidates = [];
   for (let i = r; i < n - r; i++) {
     const v = values[i];
@@ -5035,7 +5043,7 @@ function autoPopulateWizardPeaksIfEmpty(rawRssi, smoothedRssi) {
 
   // Detect on smoothed data (avoids noise spikes), then snap each index to the
   // true raw-data maximum nearby so the dot sits on the visible waveform peak.
-  const SNAP_WINDOW = 20;
+  const SNAP_WINDOW = 50;
   const peakIdx = detectTopPeaks(smoothedRssi, 3).map(idx => {
     const lo = Math.max(0, idx - SNAP_WINDOW);
     const hi = Math.min(rawRssi.length - 1, idx + SNAP_WINDOW);
@@ -5276,9 +5284,9 @@ function calculateThresholds() {
   const minPeak = Math.min(...peakRssis);
   let calculatedEnter = Math.round(minPeak * 0.93);
 
-  // Exit is deliberately tight (4 units) for close-range detection.
-  // Real-world testing shows ~4 units works well for 5-foot gate detection.
-  const EXIT_GAP = 4;
+  // Exit needs enough separation to avoid false positives from noise.
+  // Real-world testing shows a minimum 10-unit spread is reliable.
+  const EXIT_GAP = 10;
   let calculatedExit = calculatedEnter - EXIT_GAP;
 
   // Noise floor: 35th-percentile of the recording keeps exit above ambient.
@@ -5286,11 +5294,11 @@ function calculateThresholds() {
   const noiseFloor = sorted[Math.floor(sorted.length * 0.35)];
   calculatedExit = Math.max(noiseFloor + 3, calculatedExit);
 
-  // Final clamp
+  // Final clamp — enforce the minimum 10-unit spread even if noise floor pushed exit up.
   const MIN_RSSI = 30;
   const MAX_RSSI = 255;
   calculatedEnter = clamp(calculatedEnter, MIN_RSSI, MAX_RSSI);
-  calculatedExit  = clamp(calculatedExit,  MIN_RSSI, calculatedEnter - 2);
+  calculatedExit  = clamp(calculatedExit,  MIN_RSSI, calculatedEnter - 10);
 
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit  = calculatedExit;
@@ -6524,6 +6532,7 @@ let mnMasterRaceActive   = false;  // true when master initiated the current rac
 let mnMyNodeId           = 0;      // this client's assigned node ID
 let mnNodeMode           = 0;      // 0=standalone, 1=master, 2=client (cached from /api/mode)
 let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE / polling
+let mnImportedNodes      = null;   // non-null while viewing an imported race; blocks polling from overwriting
 let mnRaceTimerIntervalId = null;
 let _pageInitDone        = false;  // true once DOMContentLoaded IIFE completes successfully
 let mnRaceStartMs         = 0;
@@ -6768,7 +6777,7 @@ async function mnRefreshNodes() {
     const data = await r.json();
     const nodes = data.nodes || [];
     mnRenderNodes(nodes);
-    mnRenderRaceTab(nodes);
+    if (mnImportedNodes === null) mnRenderRaceTab(nodes);
   } catch (_) {}
 }
 
@@ -6855,6 +6864,29 @@ function onRaceTabOpen() {
     masterView.style.display  = 'none';
   }
   mnUpdateRaceStatusBar();
+  updateHistoryTabMode();
+}
+
+// Rename the Race History tab and swap its content based on node mode.
+function updateHistoryTabMode() {
+  const navLink       = document.getElementById('nav-link-history');
+  const masterSection = document.getElementById('mn-history-import-section');
+  const singleSection = document.getElementById('mn-history-single-section');
+  const historyList   = document.getElementById('raceHistoryList');
+  const raceDetails   = document.getElementById('raceDetails');
+
+  if (mnNodeMode === 1) {
+    if (navLink)       navLink.textContent  = 'Import Race';
+    if (masterSection) masterSection.style.display = '';
+    if (singleSection) singleSection.style.display = 'none';
+    if (historyList)   historyList.style.display   = 'none';
+    if (raceDetails)   raceDetails.style.display   = 'none';
+  } else {
+    if (navLink)       navLink.textContent  = 'Race History';
+    if (masterSection) masterSection.style.display = 'none';
+    if (singleSection) singleSection.style.display = '';
+    if (historyList)   historyList.style.display   = '';
+  }
 }
 
 // Dev mode: simulate a lap for a pilot by clicking their name card.
@@ -7052,7 +7084,7 @@ function mnRenderRaceTab(nodes) {
         ? 'Solo race in progress<br>(ignoring race director)'
         : _isExcludedThisRace
           ? 'Solo race in progress<br>(ignoring for this race)'
-          : 'Solo race in progress<br>(race director will override)';
+          : 'Solo race in progress<br>(race director can override)';
       html += `<div class="mn-card-solo-label">${soloLabel}</div>`;
     } else if (n.laps.length === 0) {
       html += `<div class="mn-card-lap" style="justify-content:center;color:var(--secondary-color);padding:10px;">—</div>`;
@@ -7330,6 +7362,7 @@ function _showThreeOptionModal(message, btn1Text, btn2Text, btn3Text) {
 }
 
 async function mnStartRace() {
+  mnImportedNodes = null;  // leave import view so live polling resumes
   // Offer to clear existing lap data before starting
   const hasMasterLaps = lapTimes.length > 0;
   const hasClientLaps = (mnCurrentNodes || []).some(n => !n.isMaster && (n.laps || []).length > 0);
@@ -7436,6 +7469,7 @@ async function mnStopRace() {
 
 async function mnClearRace() {
   if (!confirm('Clear all race data for all pilots?')) return;
+  mnImportedNodes = null;  // leave import view so live polling resumes
   try {
     await fetch('/api/multinode/clearLaps', { method: 'POST' });
     mnRaceRunning = false;
@@ -7555,6 +7589,7 @@ async function importMnRace(input) {
   });
 
   mnRaceRunning = false;
+  mnImportedNodes = mnCurrentNodes;  // freeze race tab against live polling
   _mnStopTimer();
   const timerEl = document.getElementById('mn-race-timer');
   if (timerEl) timerEl.textContent = '0:00.0';
@@ -7562,6 +7597,7 @@ async function importMnRace(input) {
   mnRenderRaceTab(mnCurrentNodes);
   mnUpdateRaceDataButtons();
   alert(`Race imported: ${nodes.length} pilot${nodes.length !== 1 ? 's' : ''}.`);
+  document.getElementById('nav-link-race').click();
 }
 
 // Stop polling whenever the user navigates away from the Race tab

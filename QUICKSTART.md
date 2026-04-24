@@ -4,7 +4,7 @@ Get your FPVRaceOne lap timer up and running in minutes!
 
 ## What You Need
 
-1. Purchase a pre-flashed FPVRaceOne Personal Lap Timer (link coming soon)
+1. Purchase a pre-flashed FPVRaceOne Lap Timer (link coming soon)
 
 2. **Power on** your FPVRaceOne device
 
