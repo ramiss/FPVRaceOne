@@ -502,6 +502,38 @@ main {
   text-align: left;
 }
 
+.rssi-step-btns {
+  display: flex;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.rssi-step-btn {
+  width: 28px;
+  height: 28px;
+  margin: 0;
+  padding: 0;
+  font-size: 1.1rem;
+  font-weight: bold;
+  line-height: 1;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background-color: var(--bg-secondary);
+  color: var(--text-color);
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color 0.15s;
+}
+
+.rssi-step-btn:hover {
+  background-color: var(--primary-color);
+  color: white;
+}
+
+.rssi-step-btn:active {
+  opacity: 0.75;
+}
+
 #freqOutput {
   font-weight: bold;
 }

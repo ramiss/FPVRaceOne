@@ -1863,6 +1863,18 @@ function redrawCalibrationLinesIfPaused() {
   }
 }
 
+function stepRssi(which, delta) {
+  if (which === 'enter') {
+    const v = Math.min(255, Math.max(50, enterRssi + delta));
+    enterRssiInput.value = v;
+    updateEnterRssi(enterRssiInput, v);
+  } else {
+    const v = Math.min(255, Math.max(50, exitRssi + delta));
+    exitRssiInput.value = v;
+    updateExitRssi(exitRssiInput, v);
+  }
+}
+
 function updateEnterRssi(obj, value) {
   enterRssi = parseInt(value);
   enterRssiSpan.textContent = enterRssi;
@@ -5041,15 +5053,18 @@ function detectTopPeaks(values, desiredCount = 3) {
 function autoPopulateWizardPeaksIfEmpty(rawRssi, smoothedRssi) {
   if (wizardState.markers.length !== 0) return;
 
-  // Detect on smoothed data (avoids noise spikes), then snap each index to the
-  // true raw-data maximum nearby so the dot sits on the visible waveform peak.
-  const SNAP_WINDOW = 50;
-  const peakIdx = detectTopPeaks(smoothedRssi, 3).map(idx => {
+  // Use a heavily smoothed curve purely for peak location — suppresses noise
+  // across broad asymmetric passes so detectTopPeaks finds the true apex.
+  // The display curve (smoothedRssi, 15-sample) is then used for the dot snap
+  // so the final position tracks the visual peak, not a noise spike.
+  const detectionCurve = smoothArray(smoothedRssi, 40);
+  const SNAP_WINDOW = 60;
+  const peakIdx = detectTopPeaks(detectionCurve, 3).map(idx => {
     const lo = Math.max(0, idx - SNAP_WINDOW);
-    const hi = Math.min(rawRssi.length - 1, idx + SNAP_WINDOW);
+    const hi = Math.min(smoothedRssi.length - 1, idx + SNAP_WINDOW);
     let bestIdx = idx, bestVal = -Infinity;
     for (let i = lo; i <= hi; i++) {
-      if (rawRssi[i] > bestVal) { bestVal = rawRssi[i]; bestIdx = i; }
+      if (smoothedRssi[i] > bestVal) { bestVal = smoothedRssi[i]; bestIdx = i; }
     }
     return bestIdx;
   });

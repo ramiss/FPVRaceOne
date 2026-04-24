@@ -261,6 +261,10 @@
           <label for="enter">Enter RSSI:</label>
           <div class="input-with-value">
             <span id="enterSpan" class="val">120</span>
+            <div class="rssi-step-btns">
+              <button class="rssi-step-btn" type="button" onclick="stepRssi('enter',-1)">−</button>
+              <button class="rssi-step-btn" type="button" onclick="stepRssi('enter',1)">+</button>
+            </div>
             <input type="range" min="50" max="255" step="1" id="enter" value="120" oninput="updateEnterRssi(this,value)" />
           </div>
         </div>
@@ -268,6 +272,10 @@
           <label for="exit">Exit RSSI:</label>
           <div class="input-with-value">
             <span id="exitSpan" class="val">100</span>
+            <div class="rssi-step-btns">
+              <button class="rssi-step-btn" type="button" onclick="stepRssi('exit',-1)">−</button>
+              <button class="rssi-step-btn" type="button" onclick="stepRssi('exit',1)">+</button>
+            </div>
             <input type="range" min="50" max="255" step="1" id="exit" value="100" oninput="updateExitRssi(this,value)" />
           </div>
         </div>
