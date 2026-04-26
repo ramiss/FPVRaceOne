@@ -149,7 +149,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["wifiExtAntenna"] = conf.wifiExtAntenna;
     config["wifiTxPower"] = conf.wifiTxPower;
     config["filterMode"] = conf.filterMode;
-    config["besselHz"] = conf.besselHz;
+    config["besselLevel"] = conf.besselLevel;
     config["enterHoldSamples"] = conf.enterHoldSamples;
     config["exitConfirmSamples"] = conf.exitConfirmSamples;
     config["nodeMode"] = conf.nodeMode;
@@ -201,7 +201,7 @@ void Config::toJsonString(char* buf) {
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
     config["filterMode"] = conf.filterMode;
-    config["besselHz"] = conf.besselHz;
+    config["besselLevel"] = conf.besselLevel;
     config["enterHoldSamples"] = conf.enterHoldSamples;
     config["exitConfirmSamples"] = conf.exitConfirmSamples;
     config["nodeMode"] = conf.nodeMode;
@@ -413,7 +413,7 @@ void Config::fromJson(JsonObject source) {
 
     // ===== Signal processing mode =====
     if (source.containsKey("filterMode"))       setU8("filterMode",       conf.filterMode,       0, 1);
-    if (source.containsKey("besselHz"))         setU8("besselHz",         conf.besselHz,         0, 2);
+    if (source.containsKey("besselLevel"))      setU8("besselLevel",      conf.besselLevel,      0, 10);
     if (source.containsKey("enterHoldSamples")) setU8("enterHoldSamples", conf.enterHoldSamples, 1, 20);
     if (source.containsKey("exitConfirmSamples")) setU8("exitConfirmSamples", conf.exitConfirmSamples, 1, 10);
 
@@ -761,8 +761,16 @@ uint8_t Config::getFilterMode() {
     return conf.filterMode;
 }
 
-uint8_t Config::getBesselHz() {
-    return conf.besselHz;
+uint8_t Config::getBesselLevel() {
+    return conf.besselLevel;
+}
+
+void Config::setBesselLevel(uint8_t level) {
+    if (level > 10) level = 10;
+    if (conf.besselLevel != level) {
+        conf.besselLevel = level;
+        modified = true;
+    }
 }
 
 uint8_t Config::getEnterHoldSamples() {
@@ -1054,8 +1062,8 @@ void Config::setDefaults(void) {
     strlcpy(conf.password, "", sizeof(conf.password));  // Empty WiFi credentials
     conf.wifiExtAntenna = 1;  // External antenna by default (matches hardware)
     conf.wifiTxPower = 21;    // Maximum TX power by default
-    conf.filterMode = 0;          // V1 (FPVGate multi-stage) by default
-    conf.besselHz = 0;            // 100 Hz Bessel (fastest, least lag) when V2 selected
+    conf.filterMode = 0;          // V1 (FPVRaceOne pipeline) by default
+    conf.besselLevel = 0;         // Bessel post-stage off by default; calibration wizard will recommend
     conf.enterHoldSamples = 4;    // 4 consecutive samples before gate entry (V1)
     conf.exitConfirmSamples = 2;  // 2 consecutive samples to confirm exit (V1)
     conf.nodeMode = 0;            // Single node (standalone) by default

@@ -53,22 +53,38 @@ static const uint8_t kGateCloseRequired = 10;
 //   Fall alpha — tracks decreases very slowly so noise dips within a single pass
 //                do not pull the smooth signal below exit threshold.
 //
-// The fall alpha is deliberately linked to the Bessel speed setting so the user
-// has a single knob: "Smooth" Bessel = maximum noise rejection throughout;
-// "Fast" Bessel = more responsive throughout.  See getThreshFallAlpha().
+// The fall alpha scales with the Bessel slider so the user has a coherent knob:
+// more Bessel = stronger noise rejection in the threshold-smooth layer too.
 static const float kThreshRiseAlpha = 0.05f;   // fast rise  (tau ≈  20 samples)
 
-// Fall alpha per Bessel preset — chosen in handleLapTimerUpdate via getThreshFallAlpha().
-//   besselHz=0 (100 Hz / Fast):     0.003  → tau ≈  333 samples — responsive
-//   besselHz=1  (50 Hz / Balanced): 0.001  → tau ≈ 1000 samples — default
-//   besselHz=2  (20 Hz / Smooth):   0.0003 → tau ≈ 3333 samples — maximum noise rejection
-static inline float getThreshFallAlpha(uint8_t besselHz) {
-    switch (besselHz) {
-        case 0:  return 0.003f;
-        case 2:  return 0.0003f;
-        default: return 0.001f;
-    }
+// Map besselLevel (0..10) to threshold-smooth fall alpha.
+// Level 0 (Bessel off) still uses a moderate fall alpha so within-pass dips
+// don't trip the exit latch.  Higher levels = slower fall = more rejection.
+static inline float getThreshFallAlpha(uint8_t besselLevel) {
+    if (besselLevel >= 8) return 0.0003f;  // levels 8-10 — heavy smoothing
+    if (besselLevel >= 4) return 0.001f;   // levels 4-7  — balanced
+    return 0.003f;                         // levels 0-3  — responsive
 }
+
+// ── Bessel coefficient table for the post-stage slider ─────────────────────
+// Levels 4 (100 Hz), 7 (50 Hz), 10 (20 Hz) are the original RotorHazard
+// designs.  In-between levels are linearly interpolated in coefficient space —
+// not strictly Bessel, but DC gain stays at 1.0 (verified) and smoothing
+// strength is monotone.  Level 0 bypasses the filter entirely.
+struct BesselCoef { float b0, a1, a2; };
+static const BesselCoef kBesselTable[11] = {
+    { 0.0f,         0.0f,        0.0f       }, // 0: off (bypass — never read)
+    { 0.21010f,    -0.06030f,   0.21980f   }, // 1: extrapolated very light
+    { 0.17020f,    -0.12060f,   0.43950f   }, // 2: extrapolated light
+    { 0.13030f,    -0.18100f,   0.65930f   }, // 3: extrapolated light-moderate
+    { 0.09053999669813994622f, -0.24114073878907091308f, 0.87898075199651115597f }, // 4: 100 Hz
+    { 0.07013f,    -0.32673f,   1.04631f   }, // 5: interp 4→7 (1/3)
+    { 0.04967f,    -0.41244f,   1.21364f   }, // 6: interp 4→7 (2/3)
+    { 0.02921062558939069298f, -0.49774398476624526211f, 1.38090148240868249019f }, // 7: 50 Hz
+    { 0.02134f,    -0.58446f,   1.49930f   }, // 8: interp 7→10 (1/3)
+    { 0.01346f,    -0.67117f,   1.61770f   }, // 9: interp 7→10 (2/3)
+    { 0.00559344020910809616f, -0.75788377219702429688f, 1.73551001136059190877f }  // 10: 20 Hz
+};
 
 void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook) {
     conf = config;
@@ -269,34 +285,15 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     uint8_t kalman_filtered = 0;
     uint8_t ma = 0;
 
+    // ===== Pre-filter stage (Filter Mode) =====
+    uint8_t preFiltered;
     if (conf->getFilterMode() == 1) {
-        // ===== V2: RotorHazard Bessel IIR =====
-        switch (conf->getBesselHz()) {
-            case 2: // 20 Hz — smoothest
-                out = besselStep(v2Bv,
-                    5.593440209108096160e-3f,
-                    -0.75788377219702429688f,
-                     1.73551001136059190877f, rawRssi);
-                break;
-            case 1: // 50 Hz — balanced
-                out = besselStep(v2Bv,
-                    2.921062558939069298e-2f,
-                    -0.49774398476624526211f,
-                     1.38090148240868249019f, rawRssi);
-                break;
-            default: // 0 = 100 Hz — fastest
-                out = besselStep(v2Bv,
-                    9.053999669813994622e-2f,
-                    -0.24114073878907091308f,
-                     0.87898075199651115597f, rawRssi);
-                break;
-        }
-        lastRawRssi    = rawRssi;
-        lastKalmanRssi = out;
-        lastAvgRssi    = out;
-
+        // V2 — RotorHazard: raw passthrough (Bessel is now an independent post-stage)
+        preFiltered = rawRssi;
+        lastKalmanRssi = rawRssi;
+        lastAvgRssi    = rawRssi;
     } else {
-        // ===== V1: FPVGate multi-stage pipeline =====
+        // V1 — FPVRaceOne: 5-stage pipeline (Kalman → Median → MA → EMA → Step limiter)
 
         // Stage 2: Kalman
         kalman_filtered = (uint8_t)round(filter.filter(rawRssi, 0));
@@ -325,19 +322,29 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         uint8_t lp = (uint8_t)lroundf(v1Ema);
 
         // Stage 5: Step limiter
-        out = lp;
+        preFiltered = lp;
         if (v1OutInit) {
             int delta = (int)lp - (int)v1OutPrev;
-            if      (delta >  kMaxStepPerSample) out = (uint8_t)(v1OutPrev + kMaxStepPerSample);
-            else if (delta < -kMaxStepPerSample) out = (uint8_t)(v1OutPrev - kMaxStepPerSample);
+            if      (delta >  kMaxStepPerSample) preFiltered = (uint8_t)(v1OutPrev + kMaxStepPerSample);
+            else if (delta < -kMaxStepPerSample) preFiltered = (uint8_t)(v1OutPrev - kMaxStepPerSample);
         } else {
             v1OutInit = true;
         }
-        v1OutPrev = out;
+        v1OutPrev = preFiltered;
 
-        lastRawRssi    = rawRssi;
         lastKalmanRssi = kalman_filtered;
         lastAvgRssi    = ma;
+    }
+    lastRawRssi = rawRssi;
+
+    // ===== Bessel post-stage (independent slider, applies to either mode) =====
+    const uint8_t besselLevel = conf->getBesselLevel();
+    if (besselLevel == 0) {
+        out = preFiltered;
+    } else {
+        const uint8_t lvl = (besselLevel > 10) ? 10 : besselLevel;
+        const BesselCoef& c = kBesselTable[lvl];
+        out = besselStep(v2Bv, c.b0, c.a1, c.a2, preFiltered);
     }
 
     // Store final value used by lap logic
@@ -406,10 +413,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // come from the responsive Bessel output (out).
     {
         const float fOut = (float)out;
-        // V1 doesn't have a Bessel speed setting — use balanced alpha for it
-        const float fallAlpha = (conf->getFilterMode() == 1)
-                                ? getThreshFallAlpha(conf->getBesselHz())
-                                : getThreshFallAlpha(1);   // 1 = 50 Hz Balanced
+        const float fallAlpha = getThreshFallAlpha(conf->getBesselLevel());
         const float alpha = (fOut > _threshSmooth) ? kThreshRiseAlpha : fallAlpha;
         _threshSmooth    = alpha * fOut + (1.0f - alpha) * _threshSmooth;
         _threshSmoothOut = (uint8_t)lroundf(_threshSmooth);

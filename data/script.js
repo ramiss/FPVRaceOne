@@ -1726,11 +1726,14 @@ async function createRssiChart() {
     grid: {
       strokeStyle: "rgba(255,255,255,0.25)",
       sharpLines: true,
-      verticalSections: 0,
+      verticalSections: 4,
       borderVisible: false,
     },
     labels: {
       precision: 0,
+      fillStyle: "rgba(255,255,255,0.85)",
+      fontSize: 11,
+      showIntermediateLabels: true,
     },
     maxValue: 1,
     minValue: 0,
@@ -2072,9 +2075,10 @@ function buildConfigSnapshotFromUI() {
       const el = document.getElementById('filterModeSelect');
       return el ? parseInt(el.value, 10) : 0;
     })(),
-    besselHz: (() => {
-      const el = document.getElementById('besselHzSelect');
-      return el ? parseInt(el.value, 10) : 0;
+    besselLevel: (() => {
+      const el = document.getElementById('besselLevel');
+      const v = el ? parseInt(el.value, 10) : 0;
+      return Number.isFinite(v) ? Math.min(10, Math.max(0, v)) : 0;
     })(),
     enterHoldSamples: (() => {
       const el = document.getElementById('enterHoldInput');
@@ -5053,12 +5057,14 @@ function detectTopPeaks(values, desiredCount = 3) {
 function autoPopulateWizardPeaksIfEmpty(rawRssi, smoothedRssi) {
   if (wizardState.markers.length !== 0) return;
 
-  // Use a heavily smoothed curve purely for peak location — suppresses noise
-  // across broad asymmetric passes so detectTopPeaks finds the true apex.
+  // Detection curve is lightly smoothed (15+10 ≈ 25-sample boxcar) so narrow
+  // tall peaks survive while broadband noise is suppressed.  Heavier smoothing
+  // crushes peaks below the 30%-of-range threshold, which is what was
+  // happening when fast passes failed to auto-populate.
   // The display curve (smoothedRssi, 15-sample) is then used for the dot snap
   // so the final position tracks the visual peak, not a noise spike.
-  const detectionCurve = smoothArray(smoothedRssi, 40);
-  const SNAP_WINDOW = 60;
+  const detectionCurve = smoothArray(smoothedRssi, 10);
+  const SNAP_WINDOW = 40;
   const peakIdx = detectTopPeaks(detectionCurve, 3).map(idx => {
     const lo = Math.max(0, idx - SNAP_WINDOW);
     const hi = Math.min(smoothedRssi.length - 1, idx + SNAP_WINDOW);
@@ -5133,7 +5139,29 @@ function drawWizardChart() {
   ctx.lineTo(padding, height - padding);
   ctx.lineTo(width - padding, height - padding);
   ctx.stroke();
-  
+
+  // Y-axis scale labels (raw RSSI) — 5 evenly-spaced ticks from min to max
+  const textColor = getComputedStyle(document.body).getPropertyValue('--text-color').trim() || '#ddd';
+  const gridColor = 'rgba(255,255,255,0.10)';
+  ctx.fillStyle = textColor;
+  ctx.font = '11px Arial';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  const yTicks = 5;
+  for (let t = 0; t <= yTicks; t++) {
+    const frac = t / yTicks;
+    const value = Math.round(minRssi + frac * rssiRange);
+    const y = height - padding - frac * chartHeight;
+    ctx.fillText(String(value), padding - 6, y);
+    ctx.strokeStyle = gridColor;
+    ctx.beginPath();
+    ctx.moveTo(padding, y);
+    ctx.lineTo(width - padding, y);
+    ctx.stroke();
+  }
+  ctx.textAlign = 'left';
+  ctx.textBaseline = 'alphabetic';
+
   // Draw filled area under RSSI line (similar to SmoothieChart style)
   ctx.fillStyle = 'rgba(0, 212, 255, 0.4)';
   ctx.beginPath();
@@ -5267,6 +5295,41 @@ function updateWizardStatus(text) {
   document.getElementById('wizardMarkingStatus').textContent = text;
 }
 
+// Measure FWHM (full width at half-max) of a peak in samples.
+// Walks outward from peakIdx until samples drop below halfway between the
+// peak and the nearby baseline.  Used to recommend a conservative Bessel
+// level that won't crush the narrowest pass.
+function measurePeakFWHM(rssiValues, peakIdx) {
+  if (peakIdx <= 0 || peakIdx >= rssiValues.length - 1) return 0;
+  const peakVal = rssiValues[peakIdx];
+  const lookback  = Math.min(300, peakIdx);
+  const lookahead = Math.min(300, rssiValues.length - 1 - peakIdx);
+  let baseline = peakVal;
+  for (let i = peakIdx - lookback; i <= peakIdx + lookahead; i++) {
+    if (rssiValues[i] < baseline) baseline = rssiValues[i];
+  }
+  const halfMax = baseline + (peakVal - baseline) / 2;
+  let leftIdx = peakIdx;
+  while (leftIdx > 0 && rssiValues[leftIdx] >= halfMax) leftIdx--;
+  let rightIdx = peakIdx;
+  while (rightIdx < rssiValues.length - 1 && rssiValues[rightIdx] >= halfMax) rightIdx++;
+  return rightIdx - leftIdx;
+}
+
+// Map narrowest-peak FWHM (in samples) to a Bessel level.  Bias conservative —
+// pick the highest level whose effective time constant is comfortably less
+// than the peak width, then back off one notch.
+function recommendBesselLevel(fwhmSamples) {
+  if (fwhmSamples < 10)  return 0;
+  if (fwhmSamples < 18)  return 1;
+  if (fwhmSamples < 28)  return 2;
+  if (fwhmSamples < 40)  return 3;
+  if (fwhmSamples < 60)  return 4;
+  if (fwhmSamples < 90)  return 5;
+  if (fwhmSamples < 130) return 6;
+  return 7;
+}
+
 function calculateThresholds() {
   if (wizardState.markers.length !== 3) {
     alert('Please mark all 3 peaks before calculating thresholds');
@@ -5318,29 +5381,45 @@ function calculateThresholds() {
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit  = calculatedExit;
 
+  // Measure FWHM at each marker and pick the narrowest — that's the worst case
+  // (fastest pass) the filter has to preserve.  Recommend a conservative Bessel
+  // level so the slowest pass gets noise rejection without crushing fast passes.
+  const fwhms = markers.map(m => measurePeakFWHM(allRssiValues, m.index));
+  const minFwhm = Math.max(0, Math.min(...fwhms));
+  const recommendedBessel = recommendBesselLevel(minFwhm);
+  wizardState.recommendedBessel = recommendedBessel;
+  wizardState.minFwhm = minFwhm;
+
   console.log('[Wizard] peaks:', peakRssis, 'minPeak:', minPeak, 'noiseFloor:', noiseFloor);
-  console.log('[Wizard] final:', { enter: calculatedEnter, exit: calculatedExit });
+  console.log('[Wizard] final:', { enter: calculatedEnter, exit: calculatedExit, fwhms, minFwhm, recommendedBessel });
 
   // Show results
   document.getElementById('wizardMarking').style.display = 'none';
   document.getElementById('wizardResults').style.display = 'block';
   document.getElementById('calculatedEnterRssi').textContent = calculatedEnter;
   document.getElementById('calculatedExitRssi').textContent = calculatedExit;
+  document.getElementById('recommendedBesselLevel').textContent = recommendedBessel;
+  document.getElementById('measuredFwhm').textContent = minFwhm;
 }
 
 function applyCalculatedThresholds() {
   // Apply to sliders
   if (enterRssiInput) { enterRssiInput.value = wizardState.calculatedEnter; updateEnterRssi(enterRssiInput, wizardState.calculatedEnter); }
   if (exitRssiInput)  { exitRssiInput.value  = wizardState.calculatedExit;  updateExitRssi(exitRssiInput,  wizardState.calculatedExit);  }
-  
+
+  // Apply recommended Bessel level (calibration always overwrites — it's the whole point of running it)
+  if (typeof wizardState.recommendedBessel === 'number') {
+    const slider = document.getElementById('besselLevel');
+    const span = document.getElementById('besselLevelSpan');
+    if (slider) slider.value = wizardState.recommendedBessel;
+    if (span)   span.textContent = wizardState.recommendedBessel;
+  }
+
   // Save to backend
   saveConfig();
-  
+
   // Close wizard
   closeCalibrationWizard();
-  
-  // Show success message
-  //alert('Calibration thresholds applied! You can now fine-tune them manually if needed.');
 }
 
 function cancelCalibrationWizard() {
@@ -5424,12 +5503,20 @@ function applyWiFiSettings() {
   }, 500);
 }
 
-function onFilterModeChange() {
-  const sel = document.getElementById('filterModeSelect');
-  const row = document.getElementById('besselHzRow');
-  if (!sel || !row) return;
-  // Show Bessel cutoff selector only when V2 is active
-  row.style.display = parseInt(sel.value, 10) === 1 ? '' : 'none';
+function updateBesselLevel(value) {
+  const v = Math.min(10, Math.max(0, parseInt(value, 10) || 0));
+  const slider = document.getElementById('besselLevel');
+  const span = document.getElementById('besselLevelSpan');
+  if (slider) slider.value = v;
+  if (span) span.textContent = v;
+  if (typeof autoSaveConfig === 'function') autoSaveConfig();
+}
+
+function stepBessel(delta) {
+  const slider = document.getElementById('besselLevel');
+  if (!slider) return;
+  const v = Math.min(10, Math.max(0, (parseInt(slider.value, 10) || 0) + delta));
+  updateBesselLevel(v);
 }
 
 function rebootDevice() {
@@ -6473,11 +6560,13 @@ function openSettingsModal() {
         if (filterModeSelect && config.filterMode !== undefined) {
           filterModeSelect.value = config.filterMode;
         }
-        const besselHzSelect = document.getElementById('besselHzSelect');
-        if (besselHzSelect && config.besselHz !== undefined) {
-          besselHzSelect.value = config.besselHz;
+        const besselSlider = document.getElementById('besselLevel');
+        const besselSpan = document.getElementById('besselLevelSpan');
+        if (besselSlider && config.besselLevel !== undefined) {
+          const v = Math.min(10, Math.max(0, parseInt(config.besselLevel, 10) || 0));
+          besselSlider.value = v;
+          if (besselSpan) besselSpan.textContent = v;
         }
-        onFilterModeChange();
 
         // Detection parameters
         const enterHoldInput = document.getElementById('enterHoldInput');

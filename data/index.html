@@ -265,7 +265,7 @@
               <button class="rssi-step-btn" type="button" onclick="stepRssi('enter',-1)">−</button>
               <button class="rssi-step-btn" type="button" onclick="stepRssi('enter',1)">+</button>
             </div>
-            <input type="range" min="50" max="255" step="1" id="enter" value="120" oninput="updateEnterRssi(this,value)" />
+            <input type="range" min="20" max="255" step="1" id="enter" value="120" oninput="updateEnterRssi(this,value)" />
           </div>
         </div>
         <div class="config-item">
@@ -276,7 +276,7 @@
               <button class="rssi-step-btn" type="button" onclick="stepRssi('exit',-1)">−</button>
               <button class="rssi-step-btn" type="button" onclick="stepRssi('exit',1)">+</button>
             </div>
-            <input type="range" min="50" max="255" step="1" id="exit" value="100" oninput="updateExitRssi(this,value)" />
+            <input type="range" min="20" max="255" step="1" id="exit" value="100" oninput="updateExitRssi(this,value)" />
           </div>
         </div>
         <div id="calibrationOverviewNotice" style="display:none; margin: 10px 0; font-weight: 600;">
@@ -454,8 +454,8 @@
           <div class="wizard-instructions">
             <p><strong>Instructions:</strong></p>
             <ol>
-              <li>Fly through the gate 3 times</li>
-              <li>The goal is to get clear signal peaks on each pass</li>
+              <li>Fly through the gate 3 times <strong>at full racing speed</strong></li>
+              <li>The wizard measures your narrowest peak so the smoothing filter doesn't crush fast passes</li>
               <li>Click "Stop Recording" when finished</li>
             </ol>
           </div>
@@ -506,9 +506,17 @@
               <label>Calculated Exit RSSI:</label>
               <span id="calculatedExitRssi" class="result-value">--</span>
             </div>
+            <div class="result-item">
+              <label>Recommended Bessel Level:</label>
+              <span id="recommendedBesselLevel" class="result-value">--</span>
+            </div>
+            <div class="result-item" style="font-size: 12px; color: var(--secondary-color);">
+              <label>Narrowest peak width (samples):</label>
+              <span id="measuredFwhm" class="result-value">--</span>
+            </div>
           </div>
           <div style="margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
-            <strong>Note:</strong> These values have been calculated based on your lap data with safety margins. You can apply them now and fine-tune manually in the next step.
+            <strong>Note:</strong> Thresholds and Bessel level are calculated from your lap data with conservative safety margins. The recommended Bessel level errs on the side of less smoothing — increase manually if you race in noisier environments. You can fine-tune any of these manually after applying.
           </div>
           <div style="display: flex; gap: 12px; margin-top: 16px;">
             <button onclick="applyCalculatedThresholds()" style="flex: 1;">Apply Thresholds</button>
@@ -1118,23 +1126,26 @@
               <h3>Signal Processing</h3>
               <div class="config-item">
                 <label for="filterModeSelect">Filter Mode:</label>
-                <select id="filterModeSelect" onchange="onFilterModeChange(); autoSaveConfig()">
-                  <option value="0">V1 — FPVRaceOne (Kalman + EMA)</option>
-                  <option value="1">V2 — RotorHazard (Bessel IIR)</option>
+                <select id="filterModeSelect" onchange="autoSaveConfig()">
+                  <option value="0">V1 — FPVRaceOne</option>
+                  <option value="1">V2 — RotorHazard</option>
                 </select>
               </div>
-              <div class="config-item" id="besselHzRow">
-                <label for="besselHzSelect">Bessel Cutoff:</label>
-                <select id="besselHzSelect" onchange="autoSaveConfig()">
-                  <option value="0">100 Hz — fastest response</option>
-                  <option value="1">50 Hz — balanced</option>
-                  <option value="2">20 Hz — smoothest</option>
-                </select>
+              <div class="config-item">
+                <label for="besselLevel">Bessel:</label>
+                <div class="input-with-value">
+                  <span id="besselLevelSpan" class="val">0</span>
+                  <div class="rssi-step-btns">
+                    <button class="rssi-step-btn" type="button" onclick="stepBessel(-1)">−</button>
+                    <button class="rssi-step-btn" type="button" onclick="stepBessel(1)">+</button>
+                  </div>
+                  <input type="range" min="0" max="10" step="1" id="besselLevel" value="0" oninput="updateBesselLevel(this.value)" />
+                </div>
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                V1 uses a 5-stage pipeline (Kalman → Median → MA → EMA → Step limiter).
-                V2 uses a single 2nd-order Bessel IIR (RotorHazard method) with midpoint lap timestamp.
-                Changes take effect immediately without reboot.
+                Bessel smoothing applies on top of the selected Filter Mode. <strong>0 = off</strong>; higher values reduce noise but add latency.
+                Only increase in noisy environments — too much smoothing risks lag or missed detection on fast passes.
+                The calibration wizard will recommend a conservative value.
               </div>
 
               <h3>Detection</h3>
