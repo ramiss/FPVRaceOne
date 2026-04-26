@@ -50,21 +50,17 @@ static const uint8_t kGateCloseRequired = 10;
 
 // Asymmetric IIR for the threshold-smooth signal:
 //   Rise alpha — tracks increases quickly so gate entry is detected promptly.
-//   Fall alpha — tracks decreases very slowly so noise dips within a single pass
-//                do not pull the smooth signal below exit threshold.
+//   Fall alpha — tracks decreases moderately so noise dips within a single pass
+//                do not pull the smooth signal below exit threshold, but the
+//                signal still recovers between consecutive passes.
 //
-// The fall alpha scales with the Bessel slider so the user has a coherent knob:
-// more Bessel = stronger noise rejection in the threshold-smooth layer too.
-static const float kThreshRiseAlpha = 0.05f;   // fast rise  (tau ≈  20 samples)
-
-// Map besselLevel (0..10) to threshold-smooth fall alpha.
-// Level 0 (Bessel off) still uses a moderate fall alpha so within-pass dips
-// don't trip the exit latch.  Higher levels = slower fall = more rejection.
-static inline float getThreshFallAlpha(uint8_t besselLevel) {
-    if (besselLevel >= 8) return 0.0003f;  // levels 8-10 — heavy smoothing
-    if (besselLevel >= 4) return 0.001f;   // levels 4-7  — balanced
-    return 0.003f;                         // levels 0-3  — responsive
-}
+// Fall alpha is constant (independent of Bessel level).  The threshold-smooth
+// only needs to reject brief within-pass dips (typically < 50 samples).  Tau
+// of ~200 samples (~200 ms at 1 kHz) rejects those comfortably while still
+// recovering between fast laps (≥ 1 s).  Slower fall alphas were causing
+// consecutive fast passes to merge into a single detection.
+static const float kThreshRiseAlpha = 0.05f;    // fast rise (tau ≈  20 samples)
+static const float kThreshFallAlpha = 0.005f;   // moderate fall (tau ≈ 200 samples)
 
 // ── Bessel coefficient table for the post-stage slider ─────────────────────
 // Levels 4 (100 Hz), 7 (50 Hz), 10 (20 Hz) are the original RotorHazard
@@ -129,7 +125,6 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     gateExited = true;
     gateCloseCount = 0;
     enterHoldSamples = 0;
-    enterHoldStartMs = 0;
 
     _threshSmooth    = 128.0f;
     _threshSmoothOut = 128;
@@ -160,7 +155,7 @@ void LapTimer::start() {
     v1OutInit  = false;
     v1OutPrev  = 0;
 
-    v2Bv[0] = v2Bv[1] = v2Bv[2] = 0.0f;
+    // v2Bv is seeded below from the current rawRssi reading; do not zero here.
     v2PeakDurationMs = 0;
 
     lapCount = 0;
@@ -178,14 +173,18 @@ void LapTimer::start() {
     gateCloseCount = 0;
     enteredGate = false;
     enterHoldSamples = 0;
-    enterHoldStartMs = 0;
 
-    // Seed the threshold-smooth filter at the ambient RSSI level so there is no
-    // artificial ramp-up period at the start of a race.
+    // Seed both the threshold-smooth filter and the Bessel post-stage IIR at
+    // the ambient RSSI level so there is no artificial ramp-up at race start.
+    // For the biquad form used in besselStep (numerator 1+2z⁻¹+z⁻², DC gain 1),
+    // the steady-state value of bv equals input/4.  Seeding bv = seed/4 makes
+    // the filter output `seed` from sample 0 instead of ramping up from 0.
     {
         uint8_t seed = rx->readRssi();
         _threshSmooth    = (float)seed;
         _threshSmoothOut = seed;
+        const float bvSeed = (float)seed / 4.0f;
+        v2Bv[0] = v2Bv[1] = v2Bv[2] = bvSeed;
     }
 #if RSSI_STREAM_ENABLED
     _lastStreamMs  = 0;
@@ -238,7 +237,6 @@ void LapTimer::stop() {
     gateCloseCount = 0;
     enteredGate = false;
     enterHoldSamples = 0;
-    enterHoldStartMs = 0;
 
     totalDistanceTravelled = 0.0f;
     distanceRemaining = 0.0f;
@@ -290,8 +288,10 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     if (conf->getFilterMode() == 1) {
         // V2 — RotorHazard: raw passthrough (Bessel is now an independent post-stage)
         preFiltered = rawRssi;
-        lastKalmanRssi = rawRssi;
-        lastAvgRssi    = rawRssi;
+        // No Kalman / MA stages in V2 — leave their telemetry slots at 0 so
+        // logs and snapshots reflect the actual pipeline that ran.
+        lastKalmanRssi = 0;
+        lastAvgRssi    = 0;
     } else {
         // V1 — FPVRaceOne: 5-stage pipeline (Kalman → Median → MA → EMA → Step limiter)
 
@@ -413,8 +413,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // come from the responsive Bessel output (out).
     {
         const float fOut = (float)out;
-        const float fallAlpha = getThreshFallAlpha(conf->getBesselLevel());
-        const float alpha = (fOut > _threshSmooth) ? kThreshRiseAlpha : fallAlpha;
+        const float alpha = (fOut > _threshSmooth) ? kThreshRiseAlpha : kThreshFallAlpha;
         _threshSmooth    = alpha * fOut + (1.0f - alpha) * _threshSmooth;
         _threshSmoothOut = (uint8_t)lroundf(_threshSmooth);
     }
@@ -476,7 +475,11 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         case CALIBRATION_WIZARD:
             if (calibrationRssiCount < LAPTIMER_CALIBRATION_HISTORY &&
                 (currentTimeMs - lastCalibrationSampleMs) >= 20) {
-                calibrationRssi[calibrationRssiCount] = rssi[rssiCount];
+                // Record the pre-Bessel value so the wizard sees the natural
+                // peak shape regardless of where the user has the Bessel slider.
+                // Otherwise the FWHM-based recommendation is circular: a high
+                // Bessel setting widens visible peaks, recommending more Bessel.
+                calibrationRssi[calibrationRssiCount] = preFiltered;
                 calibrationTimestamps[calibrationRssiCount] = currentTimeMs;
                 calibrationRssiCount++;
                 lastCalibrationSampleMs = currentTimeMs;
@@ -506,7 +509,6 @@ void LapTimer::lapPeakCapture() {
             }
             enteredGate = true;
             enterHoldSamples = 1;
-            enterHoldStartMs = now;
             gateExited = false;
         } else {
             if (enterHoldSamples < 255) enterHoldSamples++;
@@ -536,7 +538,6 @@ void LapTimer::lapPeakCapture() {
             enteredGate = false;
             gateExited = true;
             enterHoldSamples = 0;
-            enterHoldStartMs = 0;
             v2PeakDurationMs = 0;
         } else {
             enterHoldSamples = 0;
@@ -576,7 +577,6 @@ bool LapTimer::lapPeakCaptured() {
         enteredGate = false;
         gateExited = true;
         enterHoldSamples = 0;
-        enterHoldStartMs = 0;
         rssiPeak = 0;
         rssiPeakTimeMs = 0;
         v2PeakDurationMs = 0;
@@ -594,7 +594,6 @@ void LapTimer::startLap() {
 
     enteredGate = false;
     enterHoldSamples = 0;
-    enterHoldStartMs = 0;
 
     // lapCount has already been incremented by finishLap() for real laps.
     // If lapCount == 0 this is the WAITING→RUNNING pre-start transition —
