@@ -1,5 +1,5 @@
 #include "webserver.h"
-#include <ElegantOTA.h>
+#include "ota.h"
 #include <HTTPClient.h>
 
 #include <DNSServer.h>
@@ -180,6 +180,10 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
 
 void Webserver::setTransportManager(TransportManager *tm) {
     transportMgr = tm;
+}
+
+AsyncEventSource* Webserver::getEvents() {
+    return &events;
 }
 
 // TransportInterface implementation
@@ -657,6 +661,90 @@ void Webserver::startServices() {
     server.on("/api/version", HTTP_GET, [](AsyncWebServerRequest *request) {
         String json = String("{\"firmwareVersion\":\"") + FIRMWARE_VERSION + "\",\"buildTimestamp\":\"" + _buildTimestamp + "\"}";
         request->send(200, "application/json", json);
+    });
+
+    // ── OTA: check for updates ──────────────────────────────────────────────
+    // Synchronous — connects to home WiFi, queries GitHub, returns version
+    // info.  Blocking up to ~20 s while WiFi associates and the API responds.
+    // The browser's UI shows progress via the `updateProgress` SSE channel.
+    server.on("/api/update/check", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (timer && timer->isRunning()) {
+            request->send(409, "application/json",
+                "{\"error\":\"Cannot check for updates while a race is running\"}");
+            return;
+        }
+        OtaManager::UpdateInfo info;
+        String err;
+        if (!otaManager.checkForUpdate(info, err)) {
+            String body = String("{\"error\":\"") + err + "\"}";
+            // 502 = "we couldn't talk to the upstream service"; 4xx is wrong here
+            request->send(502, "application/json", body);
+            return;
+        }
+        String notes = info.releaseNotes;
+        notes.replace("\\", "\\\\");
+        notes.replace("\"", "\\\"");
+        notes.replace("\n", "\\n");
+        notes.replace("\r", "");
+        String body = "{";
+        body += "\"currentVersion\":\""  + info.currentVersion  + "\",";
+        body += "\"latestVersion\":\""   + info.latestVersion   + "\",";
+        body += "\"available\":"         + String(info.available ? "true" : "false") + ",";
+        body += "\"releaseNotes\":\""    + notes                + "\",";
+        body += "\"firmwareUrl\":\""     + info.firmwareUrl     + "\",";
+        body += "\"filesystemUrl\":\""   + info.filesystemUrl   + "\"";
+        body += "}";
+        request->send(200, "application/json", body);
+    });
+
+    // ── OTA: apply update ───────────────────────────────────────────────────
+    // Schedules the download+flash work on the parallel task.  Returns 202
+    // immediately; progress comes via the `updateProgress` SSE channel and the
+    // device reboots itself when done.
+    server.on("/api/update/apply", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            // Empty handler — body is consumed by the body callback below
+        },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            if (index + len < total) return;  // wait for the full body
+            if (timer && timer->isRunning()) {
+                request->send(409, "application/json",
+                    "{\"error\":\"Cannot update while a race is running\"}");
+                return;
+            }
+            DynamicJsonDocument doc(2048);
+            DeserializationError jerr = deserializeJson(doc, data, total);
+            if (jerr) {
+                request->send(400, "application/json",
+                    "{\"error\":\"Invalid JSON body\"}");
+                return;
+            }
+            String fwUrl = doc["firmwareUrl"].as<String>();
+            String fsUrl = doc["filesystemUrl"].as<String>();
+            if (fwUrl.length() == 0 || fsUrl.length() == 0) {
+                request->send(400, "application/json",
+                    "{\"error\":\"firmwareUrl and filesystemUrl are required\"}");
+                return;
+            }
+            otaManager.requestApply(fwUrl, fsUrl);
+            request->send(202, "application/json",
+                "{\"status\":\"started\",\"message\":\"Subscribe to /events for progress\"}");
+        });
+
+    // ── OTA: current status ─────────────────────────────────────────────────
+    // Lets a browser that just (re)connected discover whether an update is
+    // mid-flight without waiting for the next SSE event.
+    server.on("/api/update/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        String msg = otaManager.getStatusMessage();
+        msg.replace("\\", "\\\\");
+        msg.replace("\"", "\\\"");
+        String body = "{";
+        body += "\"state\":"    + String((int)otaManager.getState())     + ",";
+        body += "\"progress\":" + String(otaManager.getProgressPercent()) + ",";
+        body += "\"message\":\"" + msg + "\"";
+        body += "}";
+        request->send(200, "application/json", body);
     });
 
     server.on("/status", [this](AsyncWebServerRequest *request) {
@@ -2363,9 +2451,6 @@ EEPROM:\n\
         request->send(200, "application/json", "{\"status\":\"OK\"}");
     });
     // ────────────────────────────────────────────────────────────────────
-
-    ElegantOTA.setAutoReboot(true);
-    ElegantOTA.begin(&server);
 
     server.begin();
 

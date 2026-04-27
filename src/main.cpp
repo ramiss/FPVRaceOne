@@ -13,7 +13,7 @@
 #include "usb.h"
 #include "webhook.h"
 // DISABLED FOR NOW: #include "nodemode.h"  // Uncomment to re-enable RotorHazard support
-#include <ElegantOTA.h>
+#include "ota.h"
 #ifdef ESP32S3
 #include "rgbled.h"
 #endif
@@ -85,6 +85,10 @@ static void parallelTask(void *pvArgs) {
 #ifdef ESP32S3
         rgbLed.handleRgbLed(currentTimeMs);
 #endif
+        // OTA update work runs here (blocking) when an apply is pending.  The
+        // RSSI loop on Core 1 is unaffected; only this Core-0 task pauses
+        // during the download.
+        otaManager.loop();
         ws.handleWebUpdate(currentTimeMs);
         usbTransport.update(currentTimeMs);
         config.handleEeprom(currentTimeMs);
@@ -245,6 +249,9 @@ void setup() {
     multiNodeManager.init(&config);
 
     ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &trackManager, &webhookManager, &multiNodeManager);
+
+    // OTA manager — uses the webserver's SSE channel for progress events.
+    otaManager.init(&config, &timer, ws.getEvents());
     
     // Initialize USB transport
     usbTransport.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &trackManager);
@@ -317,9 +324,9 @@ void loop() {
         multiNodeManager.queueLap(lapTime);
     }
     
-    // WiFi mode - original behavior (RotorHazard mode disabled)
-    ElegantOTA.loop();
-    
+    // OTA update progress is driven from parallelTask (otaManager.loop());
+    // no per-loop work needed here.
+
     // Initialize SD card after boot (deferred to prevent watchdog timeout)
     // Try once after 5 seconds of uptime
     if (!sdInitAttempted && currentTimeMs > 5000) {

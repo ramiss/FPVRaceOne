@@ -370,6 +370,7 @@ async function onWiFiReconnect() {
     const newMode     = data.nodeMode    || 0;
     const modeChanged = newMode !== mnNodeMode;
     mnNodeMode        = newMode;
+    if (typeof updateApplyMultiNodeButtonState === 'function') updateApplyMultiNodeButtonState();
     mnMyNodeId        = data.myNodeId        || 0;
     mnMasterConnected = data.masterConnected  || false;
     mnMasterRaceActive = data.masterRaceActive || false;
@@ -523,6 +524,16 @@ function setupWiFiEvents() {
       stopRaceButton.disabled = true;
       startRaceButton.disabled = false;
       addLapButton.disabled = true;
+    }
+  }, false);
+
+  // OTA update progress — mirrors the OtaManager state machine onto the UI.
+  eventSource.addEventListener("updateProgress", function (e) {
+    try {
+      const data = JSON.parse(e.data);
+      handleUpdateProgress(data);
+    } catch (err) {
+      console.warn('[OTA] Bad updateProgress payload:', e.data, err);
     }
   }, false);
 
@@ -2345,6 +2356,160 @@ async function loadFirmwareVersion() {
     }
   } catch (e) {
     console.warn('[UI] Failed to load firmware version:', e);
+  }
+}
+
+// ─── OTA Auto-Update ───────────────────────────────────────────────────────
+//
+// Flow:
+//   1. User taps "Check for Updates" → checkForUpdates() POSTs /api/update/check.
+//      The device joins home WiFi, queries GitHub, returns version info.
+//   2. If a newer version is available, we confirm with the user, then
+//      applyUpdate() POSTs /api/update/apply with the asset URLs.
+//   3. The device schedules the apply on its parallel task (returns 202),
+//      streams progress over the `updateProgress` SSE channel, and reboots.
+//
+// All progress UI is driven by handleUpdateProgress().  The function is
+// idempotent — if the page is reloaded mid-update, /api/update/status seeds
+// the panel with whatever state the firmware is in.
+
+let _otaUpdateInfo = null;  // last successful check result (for applyUpdate)
+
+function setUpdateBusy(busy, label) {
+  const btn = document.getElementById('checkUpdatesBtn');
+  if (!btn) return;
+  btn.disabled = !!busy;
+  if (busy && label) btn.textContent = label;
+  else if (!busy)    btn.textContent = 'Check for Updates';
+}
+
+function showUpdateStatus(message, progressPercent) {
+  const panel = document.getElementById('updateStatusPanel');
+  const msg   = document.getElementById('updateStatusMessage');
+  const bar   = document.getElementById('updateProgressBar');
+  if (panel) panel.style.display = '';
+  if (msg)   msg.textContent = message || '—';
+  if (bar && typeof progressPercent === 'number') {
+    bar.style.width = Math.max(0, Math.min(100, progressPercent)) + '%';
+  }
+}
+
+function hideUpdateStatus() {
+  const panel = document.getElementById('updateStatusPanel');
+  if (panel) panel.style.display = 'none';
+}
+
+// Mirror OtaManager::State enum from lib/OTA/ota.h.
+const OTA_STATE = {
+  IDLE: 0, CONNECTING: 1, CHECKING: 2, UPDATE_AVAILABLE: 3, UP_TO_DATE: 4,
+  DOWNLOADING_FS: 5, DOWNLOADING_FW: 6, REBOOTING: 7, ERROR: 99,
+};
+
+function handleUpdateProgress(data) {
+  if (!data) return;
+  showUpdateStatus(data.message, data.progress);
+  // Lock the Check button while the device is mid-flight.
+  const busy = (data.state === OTA_STATE.CONNECTING ||
+                data.state === OTA_STATE.CHECKING   ||
+                data.state === OTA_STATE.DOWNLOADING_FS ||
+                data.state === OTA_STATE.DOWNLOADING_FW ||
+                data.state === OTA_STATE.REBOOTING);
+  setUpdateBusy(busy);
+  if (data.state === OTA_STATE.REBOOTING) {
+    // Device is about to drop the connection.  Show a clear note so the user
+    // doesn't think the page is broken when SSE goes silent.
+    setTimeout(() => {
+      showUpdateStatus('Device is rebooting. Reconnect to FPVRaceOne_XXXX, then refresh this page in 30–60 seconds.', 100);
+    }, 500);
+  }
+}
+
+async function checkForUpdates() {
+  const ssidEl = document.getElementById('ssid');
+  if (!ssidEl || !ssidEl.value.trim()) {
+    alert('Please set your Home WiFi SSID in WiFi & Connection settings first.');
+    return;
+  }
+
+  setUpdateBusy(true, 'Checking…');
+  showUpdateStatus('Connecting to home WiFi and contacting GitHub…', 10);
+
+  try {
+    const r = await fetch('/api/update/check', { method: 'POST' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = data.error || `HTTP ${r.status}`;
+      showUpdateStatus('Update check failed: ' + msg, 0);
+      setUpdateBusy(false);
+      return;
+    }
+
+    _otaUpdateInfo = data;
+
+    if (!data.available) {
+      showUpdateStatus(`You're on the latest version (${data.currentVersion}).`, 100);
+      setUpdateBusy(false);
+      return;
+    }
+
+    // Build a confirmation modal.  Truncate release notes so the prompt is readable.
+    const notes = (data.releaseNotes || '').trim();
+    const notesShort = notes.length > 600 ? notes.substring(0, 600) + '…' : notes;
+    const message =
+      `A new version is available:\n\n` +
+      `  Current: ${data.currentVersion}\n` +
+      `  Latest:  ${data.latestVersion}\n\n` +
+      (notesShort ? `Release notes:\n${notesShort}\n\n` : '') +
+      `The device will:\n` +
+      `  1. Join your home WiFi\n` +
+      `  2. Download the filesystem and firmware images (~1–3 minutes)\n` +
+      `  3. Reboot once the update is complete\n\n` +
+      `Your phone may briefly disconnect — reconnect to FPVRaceOne_XXXX if so.\n\n` +
+      `Update now?`;
+
+    if (!confirm(message)) {
+      showUpdateStatus(`Update available: ${data.latestVersion} (declined)`, 100);
+      setUpdateBusy(false);
+      return;
+    }
+
+    await applyUpdate();
+  } catch (err) {
+    console.error('[OTA] Check failed:', err);
+    showUpdateStatus('Update check failed: ' + (err.message || err), 0);
+    setUpdateBusy(false);
+  }
+}
+
+async function applyUpdate() {
+  if (!_otaUpdateInfo || !_otaUpdateInfo.firmwareUrl || !_otaUpdateInfo.filesystemUrl) {
+    alert('No update available to apply. Check for updates first.');
+    return;
+  }
+  setUpdateBusy(true, 'Updating…');
+  showUpdateStatus('Submitting update request…', 0);
+  try {
+    const r = await fetch('/api/update/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        firmwareUrl:   _otaUpdateInfo.firmwareUrl,
+        filesystemUrl: _otaUpdateInfo.filesystemUrl,
+      }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok && r.status !== 202) {
+      const msg = data.error || `HTTP ${r.status}`;
+      showUpdateStatus('Update failed: ' + msg, 0);
+      setUpdateBusy(false);
+      return;
+    }
+    // From here on, progress comes via the `updateProgress` SSE channel.
+    showUpdateStatus('Update started. Watch this panel for progress…', 5);
+  } catch (err) {
+    console.error('[OTA] Apply failed:', err);
+    showUpdateStatus('Update request failed: ' + (err.message || err), 0);
+    setUpdateBusy(false);
   }
 }
 
@@ -6579,14 +6744,16 @@ function openSettingsModal() {
         }
 
         // Multi-node settings
+        // Update mnNodeMode FIRST so onNodeModeChange() (which calls
+        // updateApplyMultiNodeButtonState) sees the correct live mode.
+        if (config.nodeMode !== undefined) {
+          mnNodeMode = config.nodeMode;
+          onRaceTabOpen();  // switch Race tab to master view if needed
+        }
         const nodeModeSelect = document.getElementById('nodeModeSelect');
         if (nodeModeSelect && config.nodeMode !== undefined) {
           nodeModeSelect.value = String(config.nodeMode);
           onNodeModeChange();
-        }
-        if (config.nodeMode !== undefined) {
-          mnNodeMode = config.nodeMode;
-          onRaceTabOpen();  // switch Race tab to master view if needed
         }
         const masterSSIDInput = document.getElementById('masterSSIDInput');
         if (masterSSIDInput && config.masterSSID !== undefined) {
@@ -6682,6 +6849,23 @@ function onNodeModeChange() {
       ? 'IP address will change to 192.168.5.1'
       : 'IP address will change to 192.168.4.1';
   }
+
+  updateApplyMultiNodeButtonState();
+}
+
+// Enable the "Apply Multi-Node & Reboot" button only when the dropdown
+// differs from the firmware's currently-running node mode (mnNodeMode).
+// Reboot is the only way to commit a mode change, so the button is meaningless
+// when nothing has changed.
+function updateApplyMultiNodeButtonState() {
+  const btn = document.getElementById('applyMultiNodeBtn');
+  const sel = document.getElementById('nodeModeSelect');
+  if (!btn || !sel) return;
+  const selected = parseInt(sel.value, 10);
+  const changed = Number.isFinite(selected) && selected !== mnNodeMode;
+  btn.disabled = !changed;
+  btn.style.opacity = changed ? '1' : '0.5';
+  btn.style.cursor = changed ? 'pointer' : 'not-allowed';
 }
 
 /** Apply multi-node settings and reboot */
@@ -7757,6 +7941,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const r = await fetchWithRetry('/api/mode', {}, 3, 1500);
       const data = await r.json();
       mnNodeMode        = data.nodeMode       || 0;
+      if (typeof updateApplyMultiNodeButtonState === 'function') updateApplyMultiNodeButtonState();
       mnMyNodeId        = data.myNodeId       || 0;
       mnMasterConnected = data.masterConnected || false;
       if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';

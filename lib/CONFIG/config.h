@@ -5,8 +5,19 @@
 #include <AsyncJson.h>
 #include <stdint.h>
 
-// Firmware version (update for each release)
-#define FIRMWARE_VERSION "1.0.0"
+// Firmware version — overridable from CI build flags so the git tag is the
+// single source of truth.  Local builds fall back to the placeholder below.
+#ifndef FIRMWARE_VERSION
+#define FIRMWARE_VERSION "0.0.0-dev"
+#endif
+
+// GitHub OTA update target.  Override at build time with -DUPDATE_REPO if you
+// fork the project.  Asset names are matched verbatim against release assets.
+#ifndef UPDATE_REPO
+#define UPDATE_REPO "ramiss/FPVRaceOne"
+#endif
+#define UPDATE_FW_ASSET "FPVRaceOne-firmware.bin"
+#define UPDATE_FS_ASSET "FPVRaceOne-littlefs.bin"
 
 // RSSI Logging for Dev only. Set to 0 for production
 // Set to 1 to enable dedicated RSSI logging SD card (see lib/RSSILOG/)

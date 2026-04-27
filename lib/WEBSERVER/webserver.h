@@ -21,6 +21,10 @@ class Webserver : public TransportInterface {
     void init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr, WebhookManager *webhookMgr, MultiNodeManager *multiNodeMgr = nullptr);
     void setTransportManager(TransportManager *tm);
     void handleWebUpdate(uint32_t currentTimeMs);
+
+    // Exposes the SSE channel so other modules (e.g. OtaManager) can publish
+    // progress events to connected browsers.  Returns nullptr until init().
+    AsyncEventSource* getEvents();
     
     // TransportInterface implementation
     void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) override;
