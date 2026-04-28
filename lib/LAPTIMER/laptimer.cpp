@@ -25,9 +25,6 @@ const float kalman_R = 16.0f;   // ADC noise rejection — raise to smooth, lowe
 
 static const uint32_t kRaceDebugPeriodMs = 100;  // 10 Hz
 
-// Debounce: require consecutive samples at/above enter before peak tracking
-// kEnterHoldSamplesMin: now read from config (conf->getEnterHoldSamples())
-
 // Moving average window (must match rssi_window[] size in laptimer.h)
 static const uint8_t kMaWindow = 7;
 
@@ -40,8 +37,6 @@ static const float kEmaAlpha = 0.15f;
 // This is NOT a low-pass; it only clamps absurd per-sample jumps.
 // Lower = stricter (less likely to false-trigger), Higher = more responsive.
 static const int kMaxStepPerSample = 12;
-
-// kExitConfirmSamples: now read from config (conf->getExitConfirmSamples())
 
 // Gate re-arm latch: require this many consecutive samples of the THRESHOLD-SMOOTH
 // signal below exitT before the next gate entry is allowed.  With the smooth signal
@@ -124,7 +119,6 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     enteredGate = false;
     gateExited = true;
     gateCloseCount = 0;
-    enterHoldSamples = 0;
 
     _threshSmooth    = 128.0f;
     _threshSmoothOut = 128;
@@ -172,7 +166,6 @@ void LapTimer::start() {
     gateExited = true;   // Gate 1 may open immediately at race start
     gateCloseCount = 0;
     enteredGate = false;
-    enterHoldSamples = 0;
 
     // Seed both the threshold-smooth filter and the Bessel post-stage IIR at
     // the ambient RSSI level so there is no artificial ramp-up at race start.
@@ -236,7 +229,6 @@ void LapTimer::stop() {
     gateExited = true;
     gateCloseCount = 0;
     enteredGate = false;
-    enterHoldSamples = 0;
 
     totalDistanceTravelled = 0.0f;
     distanceRemaining = 0.0f;
@@ -362,7 +354,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     snapshot.timerState       = (uint8_t)state;
     snapshot.enteredGate      = enteredGate;
     snapshot.gateExited       = gateExited;
-    snapshot.enterHoldSamples = enterHoldSamples;
+    snapshot.enterHoldSamples = 0;   // setting removed; field kept for log-format compat
     snapshot.filterMode       = conf->getFilterMode();
     // snapshot.lapEvent is set in finishLap(); lapTimeMs and lapCount updated there
 #endif
@@ -389,17 +381,6 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         const uint32_t now = millis();
         if (lastRaceDebugPrintMs == 0 || (now - lastRaceDebugPrintMs) >= kRaceDebugPeriodMs) {
             lastRaceDebugPrintMs = now;
-            const bool validPeak = (rssiPeak > 0) && (rssiPeak >= enter) && (rssiPeak > (exitT + 5));
-
-            // Show whether we've *confirmed* exit (2 samples) below
-            uint16_t prevIdx = (rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY;
-            const bool belowExit2 = (rssi[rssiCount] < exitT) && (rssi[prevIdx] < exitT);
-            /*
-            DEBUG("[RACE] raw=%3u kal=%3u ma=%3u out=%3u | enter=%3u exit=%3u | peak=%3u validPeak=%d belowExit2=%d entered=%d hold=%u\n",
-                  rawRssi, lastKalmanRssi, lastAvgRssi, out,
-                  enter, exitT, rssiPeak,
-                  (int)validPeak, (int)belowExit2, (int)enteredGate, (unsigned)enterHoldSamples);
-            */
         }
 
         prevAvgRssi = cur;
@@ -508,40 +489,32 @@ void LapTimer::lapPeakCapture() {
                 return;
             }
             enteredGate = true;
-            enterHoldSamples = 1;
             gateExited = false;
-        } else {
-            if (enterHoldSamples < 255) enterHoldSamples++;
         }
 
-        // V1 requires kEnterHoldSamplesMin consecutive samples before tracking peak.
-        // V2 trusts the Bessel filter and starts tracking immediately (hold = 1).
-        const uint8_t holdMin = v2 ? 1 : conf->getEnterHoldSamples();
-
-        if (enterHoldSamples >= holdMin) {
-            if (cur > rssiPeak) {
-                rssiPeak = cur;
-                rssiPeakTimeMs = now;
-                v2PeakDurationMs = 0;
-                DEBUG("*** PEAK CAPTURED: %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
-                      rssiPeak, lastRawRssi, lastKalmanRssi, lastAvgRssi,
-                      (unsigned long)(rssiPeakTimeMs - startTimeMs));
-            } else if (v2 && cur == rssiPeak) {
-                // V2: extend peak duration so we can use the midpoint as the lap timestamp.
-                v2PeakDurationMs = now - rssiPeakTimeMs;
-            }
-        }
-    } else {
-        if (enteredGate && _threshSmoothOut < exitT && rssiPeak == 0) {
-            // The smooth signal dropped below exit without capturing any valid
-            // peak — the Bessel rise was a noise blip never confirmed by smooth.
-            enteredGate = false;
-            gateExited = true;
-            enterHoldSamples = 0;
+        // Peak tracking starts immediately on the first at/above-enter sample.
+        // The V1 pipeline (Kalman + Median + MA + EMA + step limiter) and the
+        // optional Bessel post-stage already smooth out brief noise spikes;
+        // any extra "wait N samples before believing it" debounce here would
+        // be redundant and only adds latency.  False-positive rejection is
+        // handled downstream by the `validPeak` check in lapPeakCaptured().
+        if (cur > rssiPeak) {
+            rssiPeak = cur;
+            rssiPeakTimeMs = now;
             v2PeakDurationMs = 0;
-        } else {
-            enterHoldSamples = 0;
+            DEBUG("*** PEAK CAPTURED: %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
+                  rssiPeak, lastRawRssi, lastKalmanRssi, lastAvgRssi,
+                  (unsigned long)(rssiPeakTimeMs - startTimeMs));
+        } else if (v2 && cur == rssiPeak) {
+            // V2: extend peak duration so we can use the midpoint as the lap timestamp.
+            v2PeakDurationMs = now - rssiPeakTimeMs;
         }
+    } else if (enteredGate && _threshSmoothOut < exitT && rssiPeak == 0) {
+        // The smooth signal dropped below exit without capturing any valid
+        // peak — the Bessel rise was a noise blip never confirmed by smooth.
+        enteredGate = false;
+        gateExited = true;
+        v2PeakDurationMs = 0;
     }
 }
 
@@ -576,7 +549,6 @@ bool LapTimer::lapPeakCaptured() {
     if (!captured && enteredGate && droppedBelowExit && !validPeak) {
         enteredGate = false;
         gateExited = true;
-        enterHoldSamples = 0;
         rssiPeak = 0;
         rssiPeakTimeMs = 0;
         v2PeakDurationMs = 0;
@@ -593,7 +565,6 @@ void LapTimer::startLap() {
     v2PeakDurationMs = 0;
 
     enteredGate = false;
-    enterHoldSamples = 0;
 
     // lapCount has already been incremented by finishLap() for real laps.
     // If lapCount == 0 this is the WAITING→RUNNING pre-start transition —

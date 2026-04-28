@@ -27,6 +27,11 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # Full history + tags so extra_script.py's `git describe` works for
+          # manual workflow_dispatch runs (tag pushes set GITHUB_REF_NAME and
+          # don't actually need this, but it's harmless).
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -49,30 +54,18 @@ jobs:
       - name: Determine version
         id: version
         run: |
-          # Tag form is "v1.2.0"; the firmware version constant is "1.2.0"
-          # (the leading "v" is stripped server-side during compare too, so this
-          # is just for human-readable consistency).
+          # Just for the release name / artifact name / build log.  The actual
+          # FIRMWARE_VERSION constant is injected automatically by
+          # scripts/extra_script.py (it reads GITHUB_REF_NAME during the build).
           REF_NAME="${GITHUB_REF_NAME:-manual}"
           if [[ "$REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]]; then
             VERSION="${REF_NAME#v}"
           else
-            # Manual run with no tag: stamp a dev version so the build still works
             VERSION="0.0.0-${GITHUB_SHA::7}"
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$REF_NAME"     >> "$GITHUB_OUTPUT"
           echo "Building FIRMWARE_VERSION=$VERSION (tag=$REF_NAME)"
-
-      - name: Inject firmware version
-        run: |
-          # Replace the placeholder default in config.h with the version derived
-          # from the git tag.  Done as a sed replacement (rather than a build
-          # flag) so the value is visible in the source if anyone inspects the
-          # generated header — and so we don't have to deal with shell-quoting
-          # nested double quotes through PlatformIO's build_flags pipeline.
-          sed -i 's|FIRMWARE_VERSION "0.0.0-dev"|FIRMWARE_VERSION "${{ steps.version.outputs.version }}"|' lib/CONFIG/config.h
-          echo "----- config.h after injection -----"
-          grep -A1 -B1 'FIRMWARE_VERSION' lib/CONFIG/config.h | head -20
 
       - name: Build firmware
         run: |

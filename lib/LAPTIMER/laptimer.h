@@ -96,7 +96,6 @@ class LapTimer {
     // Gate state tracking / debounce helpers
     bool gateExited;          // True when gate has re-armed (sustained below exit after last lap)
     bool enteredGate;         // True once we have crossed the enter threshold
-    uint8_t enterHoldSamples; // Number of consecutive samples at/above enter
     uint8_t gateCloseCount;   // Consecutive samples below exit — used for re-arm latch
 
     // Threshold-smoothing IIR — heavily smoothed Bessel output used exclusively

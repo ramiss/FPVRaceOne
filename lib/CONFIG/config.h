@@ -5,8 +5,15 @@
 #include <AsyncJson.h>
 #include <stdint.h>
 
-// Firmware version — overridable from CI build flags so the git tag is the
-// single source of truth.  Local builds fall back to the placeholder below.
+// Firmware version — single source of truth is the git tag (or
+// GITHUB_REF_NAME on CI).  scripts/extra_script.py writes the resolved
+// value into firmware_version.h on every build, so config.h doesn't have
+// to be edited per-release.  The __has_include guard keeps the file
+// compileable in environments where the script hasn't run yet (e.g. an IDE
+// indexing pass); the hard fallback is "0.0.0-dev".
+#if __has_include("firmware_version.h")
+#  include "firmware_version.h"
+#endif
 #ifndef FIRMWARE_VERSION
 #define FIRMWARE_VERSION "0.0.0-dev"
 #endif
@@ -117,7 +124,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 17
+#define CONFIG_VERSION 18
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -164,8 +171,6 @@ typedef struct {
     uint8_t wifiTxPower;        // WiFi TX power in dBm (2–21, takes effect on next boot)
     uint8_t filterMode;         // 0=V1 FPVRaceOne (Kalman+EMA pipeline), 1=V2 RotorHazard (raw passthrough)
     uint8_t besselLevel;        // Independent Bessel post-stage: 0=off, 1..10 increasing smoothing
-    uint8_t enterHoldSamples;   // V1: consecutive samples at/above enter threshold before gate entry (1-20)
-    uint8_t exitConfirmSamples; // V1: consecutive samples below exit threshold to confirm exit (1-10)
     uint8_t nodeMode;           // 0=single (default), 1=master, 2=client
     char masterSSID[33];        // SSID of master to connect to (client mode only)
     char masterPassword[33];    // Password for master AP (default "fpvraceone")
@@ -229,8 +234,6 @@ class Config {
     uint8_t getFilterMode();
     uint8_t getBesselLevel();
     void    setBesselLevel(uint8_t level);
-    uint8_t getEnterHoldSamples();
-    uint8_t getExitConfirmSamples();
     char*   getPilotName();
     uint8_t getNodeMode();
     char*   getMasterSSID();

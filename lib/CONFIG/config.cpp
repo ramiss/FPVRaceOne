@@ -150,8 +150,6 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["wifiTxPower"] = conf.wifiTxPower;
     config["filterMode"] = conf.filterMode;
     config["besselLevel"] = conf.besselLevel;
-    config["enterHoldSamples"] = conf.enterHoldSamples;
-    config["exitConfirmSamples"] = conf.exitConfirmSamples;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -202,8 +200,6 @@ void Config::toJsonString(char* buf) {
     config["pwd"] = conf.password;
     config["filterMode"] = conf.filterMode;
     config["besselLevel"] = conf.besselLevel;
-    config["enterHoldSamples"] = conf.enterHoldSamples;
-    config["exitConfirmSamples"] = conf.exitConfirmSamples;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -414,8 +410,6 @@ void Config::fromJson(JsonObject source) {
     // ===== Signal processing mode =====
     if (source.containsKey("filterMode"))       setU8("filterMode",       conf.filterMode,       0, 1);
     if (source.containsKey("besselLevel"))      setU8("besselLevel",      conf.besselLevel,      0, 10);
-    if (source.containsKey("enterHoldSamples")) setU8("enterHoldSamples", conf.enterHoldSamples, 1, 20);
-    if (source.containsKey("exitConfirmSamples")) setU8("exitConfirmSamples", conf.exitConfirmSamples, 1, 10);
 
     // ===== Multi-node =====
     if (source.containsKey("nodeMode"))           setU8("nodeMode", conf.nodeMode, 0, 2);
@@ -773,14 +767,6 @@ void Config::setBesselLevel(uint8_t level) {
     }
 }
 
-uint8_t Config::getEnterHoldSamples() {
-    return conf.enterHoldSamples;
-}
-
-uint8_t Config::getExitConfirmSamples() {
-    return conf.exitConfirmSamples;
-}
-
 char* Config::getPilotName() {
     return conf.pilotName;
 }
@@ -1064,8 +1050,6 @@ void Config::setDefaults(void) {
     conf.wifiTxPower = 21;    // Maximum TX power by default
     conf.filterMode = 0;          // V1 (FPVRaceOne pipeline) by default
     conf.besselLevel = 0;         // Bessel post-stage off by default; calibration wizard will recommend
-    conf.enterHoldSamples = 4;    // 4 consecutive samples before gate entry (V1)
-    conf.exitConfirmSamples = 2;  // 2 consecutive samples to confirm exit (V1)
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));

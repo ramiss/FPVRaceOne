@@ -2091,16 +2091,6 @@ function buildConfigSnapshotFromUI() {
       const v = el ? parseInt(el.value, 10) : 0;
       return Number.isFinite(v) ? Math.min(10, Math.max(0, v)) : 0;
     })(),
-    enterHoldSamples: (() => {
-      const el = document.getElementById('enterHoldInput');
-      const v = el ? parseInt(el.value, 10) : 4;
-      return Number.isFinite(v) ? Math.min(20, Math.max(1, v)) : 4;
-    })(),
-    exitConfirmSamples: (() => {
-      const el = document.getElementById('exitConfirmInput');
-      const v = el ? parseInt(el.value, 10) : 2;
-      return Number.isFinite(v) ? Math.min(10, Math.max(1, v)) : 2;
-    })(),
 
     // Multi-node
     nodeMode: (() => {
@@ -2190,9 +2180,6 @@ function attachConfigStagingListeners() {
   };
 
   // --- Configuration tab controls (stage everything) ---
-
-  // RSSI sensitivity (your current missing one)
-  wire('rssiSensitivity', 'change');
 
   // Theme / Voice / Lap format
   wire('themeSelect', 'change');
@@ -6731,16 +6718,6 @@ function openSettingsModal() {
           const v = Math.min(10, Math.max(0, parseInt(config.besselLevel, 10) || 0));
           besselSlider.value = v;
           if (besselSpan) besselSpan.textContent = v;
-        }
-
-        // Detection parameters
-        const enterHoldInput = document.getElementById('enterHoldInput');
-        if (enterHoldInput && config.enterHoldSamples !== undefined) {
-          enterHoldInput.value = config.enterHoldSamples;
-        }
-        const exitConfirmInput = document.getElementById('exitConfirmInput');
-        if (exitConfirmInput && config.exitConfirmSamples !== undefined) {
-          exitConfirmInput.value = config.exitConfirmSamples;
         }
 
         // Multi-node settings
