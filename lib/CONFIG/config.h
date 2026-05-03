@@ -124,7 +124,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 18
+#define CONFIG_VERSION 19
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -169,8 +169,9 @@ typedef struct {
     char password[33];
     uint8_t wifiExtAntenna;     // 0=internal, 1=external antenna (takes effect on next boot)
     uint8_t wifiTxPower;        // WiFi TX power in dBm (2–21, takes effect on next boot)
-    uint8_t filterMode;         // 0=V1 FPVRaceOne (Kalman+EMA pipeline), 1=V2 RotorHazard (raw passthrough)
-    uint8_t besselLevel;        // Independent Bessel post-stage: 0=off, 1..10 increasing smoothing
+    uint8_t filterMode;         // 0=V1 (FPVRaceOne, Path B), 1=V2 (RotorHazard raw + Bessel + threshSmooth), 2=V3 (verbatim upstream FPVGate)
+    uint8_t besselLevel;        // Independent Bessel post-stage (V1/V2 only): 0=off, 1..10 increasing smoothing
+    uint8_t gate1Bootstrap;     // V3 only: 0=off (default), 1=on — special handling for first lap when drone is already in gate at race start
     uint8_t nodeMode;           // 0=single (default), 1=master, 2=client
     char masterSSID[33];        // SSID of master to connect to (client mode only)
     char masterPassword[33];    // Password for master AP (default "fpvraceone")
@@ -234,6 +235,7 @@ class Config {
     uint8_t getFilterMode();
     uint8_t getBesselLevel();
     void    setBesselLevel(uint8_t level);
+    uint8_t getGate1Bootstrap();
     char*   getPilotName();
     uint8_t getNodeMode();
     char*   getMasterSSID();

@@ -96,7 +96,11 @@ class LapTimer {
     // Gate state tracking / debounce helpers
     bool gateExited;          // True when gate has re-armed (sustained below exit after last lap)
     bool enteredGate;         // True once we have crossed the enter threshold
-    uint8_t gateCloseCount;   // Consecutive samples below exit — used for re-arm latch
+    uint8_t enterHoldSamples; // V1 + V3: consecutive samples at/above enter (debounce counter)
+    uint32_t enterHoldStartMs;// V3 only: timestamp of first at-enter sample (used for ceiling-drift watchdog)
+    bool gate1Armed;          // V3 only: Gate-1 bootstrap fired for current race
+    uint8_t gateCloseCount;   // V2 only: consecutive samples below exit — used for re-arm latch
+    uint8_t lastFilterMode;   // tracks filterMode changes so Kalman gains can be re-applied at runtime
 
     // Threshold-smoothing IIR — heavily smoothed Bessel output used exclusively
     // for enter/exit STATE decisions.  The peak value + timestamp still come from
@@ -139,9 +143,18 @@ private:
     float totalDistanceTravelled;
     float distanceRemaining;
 
-    void lapPeakCapture();
-    bool lapPeakCaptured();
+    void lapPeakCapture();   // dispatcher — calls V1/V2/V3 internal based on filterMode
+    bool lapPeakCaptured();  // dispatcher — calls V1/V2/V3 internal based on filterMode
     void lapPeakReset();
+
+    // Per-mode internals — keep detection logic isolated so changing one mode
+    // can't accidentally regress another.
+    void lapPeakCaptureV1();
+    bool lapPeakCapturedV1();
+    void lapPeakCaptureV2();
+    bool lapPeakCapturedV2();
+    void lapPeakCaptureV3();
+    bool lapPeakCapturedV3();
 
     void startLap();
     void finishLap();

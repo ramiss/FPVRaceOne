@@ -150,6 +150,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["wifiTxPower"] = conf.wifiTxPower;
     config["filterMode"] = conf.filterMode;
     config["besselLevel"] = conf.besselLevel;
+    config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -200,6 +201,7 @@ void Config::toJsonString(char* buf) {
     config["pwd"] = conf.password;
     config["filterMode"] = conf.filterMode;
     config["besselLevel"] = conf.besselLevel;
+    config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -408,8 +410,9 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("wifiTxPower"))    setU8("wifiTxPower", conf.wifiTxPower, 2, 21);
 
     // ===== Signal processing mode =====
-    if (source.containsKey("filterMode"))       setU8("filterMode",       conf.filterMode,       0, 1);
+    if (source.containsKey("filterMode"))       setU8("filterMode",       conf.filterMode,       0, 2);
     if (source.containsKey("besselLevel"))      setU8("besselLevel",      conf.besselLevel,      0, 10);
+    if (source.containsKey("gate1Bootstrap"))   setU8("gate1Bootstrap",   conf.gate1Bootstrap,    0, 1);
 
     // ===== Multi-node =====
     if (source.containsKey("nodeMode"))           setU8("nodeMode", conf.nodeMode, 0, 2);
@@ -759,6 +762,10 @@ uint8_t Config::getBesselLevel() {
     return conf.besselLevel;
 }
 
+uint8_t Config::getGate1Bootstrap() {
+    return conf.gate1Bootstrap;
+}
+
 void Config::setBesselLevel(uint8_t level) {
     if (level > 10) level = 10;
     if (conf.besselLevel != level) {
@@ -1050,6 +1057,7 @@ void Config::setDefaults(void) {
     conf.wifiTxPower = 21;    // Maximum TX power by default
     conf.filterMode = 0;          // V1 (FPVRaceOne pipeline) by default
     conf.besselLevel = 0;         // Bessel post-stage off by default; calibration wizard will recommend
+    conf.gate1Bootstrap = 0;      // V3-only Gate-1 bootstrap, off by default
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));

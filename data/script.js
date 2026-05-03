@@ -1108,6 +1108,15 @@ onload = async function (e) {
     if (nodeModeSelectEarly && configData.nodeMode !== undefined) {
       nodeModeSelectEarly.value = String(configData.nodeMode);
     }
+    // Same for filterMode — needed so the Calibration tab's live-view banner
+    // reflects the active mode even if the user never opens settings.
+    const filterModeEarly = document.getElementById('filterModeSelect');
+    if (filterModeEarly && configData.filterMode !== undefined) {
+      filterModeEarly.value = String(configData.filterMode);
+    }
+    if (typeof updateCalibLiveBanner === 'function') {
+      updateCalibLiveBanner(configData.filterMode);
+    }
     const masterSSIDEarly = document.getElementById('masterSSIDInput');
     if (masterSSIDEarly && configData.masterSSID !== undefined) {
       masterSSIDEarly.value = configData.masterSSID;
@@ -2090,6 +2099,10 @@ function buildConfigSnapshotFromUI() {
       const el = document.getElementById('besselLevel');
       const v = el ? parseInt(el.value, 10) : 0;
       return Number.isFinite(v) ? Math.min(10, Math.max(0, v)) : 0;
+    })(),
+    gate1Bootstrap: (() => {
+      const el = document.getElementById('gate1BootstrapToggle');
+      return (el && el.checked) ? 1 : 0;
     })(),
 
     // Multi-node
@@ -5087,6 +5100,30 @@ function wizardRecordingLoop() {
     });
 }
 
+// Show / hide the wizard's "Calculating…" spinner panel.  Used during the two
+// places where the UI used to look frozen for several seconds: fetching the
+// recorded calibration buffer after Stop Recording, and the FWHM/threshold
+// math triggered by Calculate Thresholds.
+function showWizardProcessing(title, detail) {
+  const panel  = document.getElementById('wizardProcessing');
+  const tEl    = document.getElementById('wizardProcessingTitle');
+  const dEl    = document.getElementById('wizardProcessingDetail');
+  if (tEl && title)  tEl.textContent  = title;
+  if (dEl && detail) dEl.textContent  = detail;
+  if (panel) panel.style.display = '';
+}
+function hideWizardProcessing() {
+  const panel = document.getElementById('wizardProcessing');
+  if (panel) panel.style.display = 'none';
+}
+
+// Force a paint cycle so a freshly-shown spinner actually appears on screen
+// before we start a long synchronous task.  Without this the browser may
+// batch layout work and skip displaying the spinner entirely.
+function nextPaint() {
+  return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+}
+
 async function stopCalibrationWizard() {
   wizardState.recording = false;
 
@@ -5094,6 +5131,12 @@ async function stopCalibrationWizard() {
     clearTimeout(wizardRecordingTimerId);
     wizardRecordingTimerId = null;
   }
+
+  // Hide recording UI immediately and put up the spinner.  The fetch + draw
+  // below can take a few seconds for large recordings, so showing the
+  // recording UI during that time would feel like the Stop button is frozen.
+  document.getElementById('wizardRecording').style.display = 'none';
+  showWizardProcessing('Processing recording…', 'Downloading samples from the device and detecting peaks.');
 
   try {
     const resp = await fetch('/calibration/stop', { method: 'POST', signal: wizardAbortController?.signal });
@@ -5112,6 +5155,7 @@ async function stopCalibrationWizard() {
     wizardState.data = data;
 
     if (!Array.isArray(wizardState.data) || wizardState.data.length < 10) {
+      hideWizardProcessing();
       alert('Not enough data recorded. Please try again with at least 3 clear gate passes.');
       closeCalibrationWizard();
       return;
@@ -5119,12 +5163,13 @@ async function stopCalibrationWizard() {
 
     enterCalibrationOverviewModeFromWizard();
 
-    document.getElementById('wizardRecording').style.display = 'none';
+    hideWizardProcessing();
     document.getElementById('wizardMarking').style.display = 'block';
 
     drawWizardChart();
   } catch (error) {
     console.error('Error stopping calibration wizard:', error);
+    hideWizardProcessing();
     alert('Error processing calibration data');
     closeCalibrationWizard();
   }
@@ -5482,11 +5527,18 @@ function recommendBesselLevel(fwhmSamples) {
   return 7;
 }
 
-function calculateThresholds() {
+async function calculateThresholds() {
   if (wizardState.markers.length !== 3) {
     alert('Please mark all 3 peaks before calculating thresholds');
     return;
   }
+
+  // Show spinner BEFORE the heavy synchronous math runs.  Without the paint
+  // wait, the browser will batch the spinner's first frame with the final
+  // results render and the user just sees a frozen UI for a few seconds.
+  document.getElementById('wizardMarking').style.display = 'none';
+  showWizardProcessing('Calculating thresholds…', 'Analysing peak shapes — this usually takes a few seconds.');
+  await nextPaint();
 
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
 
@@ -5533,25 +5585,52 @@ function calculateThresholds() {
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit  = calculatedExit;
 
-  // Measure FWHM at each marker and pick the narrowest — that's the worst case
-  // (fastest pass) the filter has to preserve.  Recommend a conservative Bessel
-  // level so the slowest pass gets noise rejection without crushing fast passes.
-  const fwhms = markers.map(m => measurePeakFWHM(allRssiValues, m.index));
-  const minFwhm = Math.max(0, Math.min(...fwhms));
-  const recommendedBessel = recommendBesselLevel(minFwhm);
-  wizardState.recommendedBessel = recommendedBessel;
-  wizardState.minFwhm = minFwhm;
+  // V3 (verbatim upstream FPVGate) does not use the Bessel post-stage — skip
+  // the FWHM-based recommendation entirely.  V1 and V2 do use Bessel, so
+  // measure the narrowest peak and recommend a conservative level.
+  const filterMode = (() => {
+    const el = document.getElementById('filterModeSelect');
+    return el ? parseInt(el.value, 10) : 0;
+  })();
+  const isV3 = (filterMode === 2);
+
+  let minFwhm = 0;
+  let recommendedBessel = 0;
+  if (!isV3) {
+    const fwhms = markers.map(m => measurePeakFWHM(allRssiValues, m.index));
+    minFwhm = Math.max(0, Math.min(...fwhms));
+    recommendedBessel = recommendBesselLevel(minFwhm);
+  }
+  wizardState.filterMode        = filterMode;
+  wizardState.recommendedBessel = isV3 ? null : recommendedBessel;
+  wizardState.minFwhm           = minFwhm;
 
   console.log('[Wizard] peaks:', peakRssis, 'minPeak:', minPeak, 'noiseFloor:', noiseFloor);
-  console.log('[Wizard] final:', { enter: calculatedEnter, exit: calculatedExit, fwhms, minFwhm, recommendedBessel });
+  console.log('[Wizard] final:',
+      { enter: calculatedEnter, exit: calculatedExit, mode: filterMode,
+        minFwhm: isV3 ? 'n/a' : minFwhm,
+        recommendedBessel: isV3 ? 'n/a (V3)' : recommendedBessel });
 
   // Show results
-  document.getElementById('wizardMarking').style.display = 'none';
+  hideWizardProcessing();
   document.getElementById('wizardResults').style.display = 'block';
   document.getElementById('calculatedEnterRssi').textContent = calculatedEnter;
   document.getElementById('calculatedExitRssi').textContent = calculatedExit;
-  document.getElementById('recommendedBesselLevel').textContent = recommendedBessel;
-  document.getElementById('measuredFwhm').textContent = minFwhm;
+
+  // Hide Bessel-specific rows entirely in V3 — they don't apply to upstream's
+  // pipeline and would mislead the user about what's being saved.
+  const besselRow = document.getElementById('recommendedBesselRow');
+  const fwhmRow   = document.getElementById('measuredFwhmRow');
+  const noteV1V2  = document.getElementById('wizardNoteV1V2');
+  const noteV3    = document.getElementById('wizardNoteV3');
+  if (besselRow) besselRow.style.display = isV3 ? 'none' : '';
+  if (fwhmRow)   fwhmRow.style.display   = isV3 ? 'none' : '';
+  if (noteV1V2)  noteV1V2.style.display  = isV3 ? 'none' : '';
+  if (noteV3)    noteV3.style.display    = isV3 ? '' : 'none';
+  if (!isV3) {
+    document.getElementById('recommendedBesselLevel').textContent = recommendedBessel;
+    document.getElementById('measuredFwhm').textContent           = minFwhm;
+  }
 }
 
 function applyCalculatedThresholds() {
@@ -5559,7 +5638,9 @@ function applyCalculatedThresholds() {
   if (enterRssiInput) { enterRssiInput.value = wizardState.calculatedEnter; updateEnterRssi(enterRssiInput, wizardState.calculatedEnter); }
   if (exitRssiInput)  { exitRssiInput.value  = wizardState.calculatedExit;  updateExitRssi(exitRssiInput,  wizardState.calculatedExit);  }
 
-  // Apply recommended Bessel level (calibration always overwrites — it's the whole point of running it)
+  // Apply recommended Bessel level — V1/V2 only.  V3 ignores the Bessel
+  // post-stage entirely (matches upstream FPVGate verbatim), so we leave the
+  // slider alone and rely on stagedConfig forcing it to 0 via onFilterModeChange.
   if (typeof wizardState.recommendedBessel === 'number') {
     const slider = document.getElementById('besselLevel');
     const span = document.getElementById('besselLevelSpan');
@@ -5605,6 +5686,7 @@ function closeCalibrationWizard() {
   document.getElementById('wizardRecording').style.display = 'none';
   document.getElementById('wizardMarking').style.display = 'none';
   document.getElementById('wizardResults').style.display = 'none';
+  hideWizardProcessing();
 }
 
 // WiFi Settings Functions
@@ -5669,6 +5751,77 @@ function stepBessel(delta) {
   if (!slider) return;
   const v = Math.min(10, Math.max(0, (parseInt(slider.value, 10) || 0) + delta));
   updateBesselLevel(v);
+}
+
+// Show/hide the Bessel slider and Gate-1 bootstrap toggle based on the
+// selected Filter Mode.  V3 hides Bessel (firmware locks level=0 in V3 anyway)
+// and shows the Gate-1 toggle.  V1/V2 do the inverse.
+function onFilterModeChange() {
+  const sel = document.getElementById('filterModeSelect');
+  if (!sel) return;
+  const mode = parseInt(sel.value, 10);
+  const besselGroup = document.getElementById('besselGroup');
+  const gate1Group  = document.getElementById('gate1BootstrapGroup');
+  if (besselGroup) besselGroup.style.display = (mode === 2) ? 'none' : '';
+  if (gate1Group)  gate1Group.style.display  = (mode === 2) ? '' : 'none';
+
+  // Force the Bessel slider to 0 when V3 is selected so the saved config
+  // matches the firmware's behaviour (firmware ignores Bessel in V3 mode,
+  // but persisting 0 keeps the UI visually consistent if the user switches
+  // away from V3 later).
+  if (mode === 2) {
+    const slider = document.getElementById('besselLevel');
+    const span   = document.getElementById('besselLevelSpan');
+    if (slider && parseInt(slider.value, 10) !== 0) {
+      slider.value = 0;
+      if (span) span.textContent = 0;
+    }
+  }
+
+  // Keep the calibration tab's live-view banner in sync — the diagnostic
+  // explanation is filter-mode-specific.
+  updateCalibLiveBanner(mode);
+}
+
+// Updates the small banner above the live RSSI chart on the Calibration tab.
+// The banner explains exactly what the chart represents for the active filter
+// mode, so the user can interpret the visible peaks correctly when picking
+// thresholds.  V2 has a hidden internal signal (_threshSmooth) that drives
+// exit decisions — we call that out so users don't get surprised.
+function updateCalibLiveBanner(mode) {
+  const el = document.getElementById('calibLiveBannerText');
+  if (!el) return;
+  // Allow callers without a mode arg to look it up themselves.
+  if (typeof mode !== 'number') {
+    const sel = document.getElementById('filterModeSelect');
+    mode = sel ? parseInt(sel.value, 10) : 0;
+  }
+  let html;
+  switch (mode) {
+    case 1:
+      html =
+        '<strong>V2 — RotorHazard:</strong> chart shows raw RSSI ' +
+        '<em>after</em> the optional Bessel post-stage. This is what V2 uses ' +
+        'for peak detection. <strong>Note:</strong> exit decisions in V2 use ' +
+        'an internal smoothed signal — the visible line may briefly dip below ' +
+        'Exit during a single pass without ending the lap.';
+      break;
+    case 2:
+      html =
+        '<strong>V3 — Upstream FPVGate (verbatim):</strong> chart shows the ' +
+        'full pipeline output (Kalman → median → MA → EMA → step limiter). ' +
+        'No Bessel is applied. This is exactly what V3 uses for both peak ' +
+        'detection and enter/exit decisions — what you see is what you get.';
+      break;
+    default:
+      html =
+        '<strong>V1 — FPVRaceOne:</strong> chart shows the full pipeline ' +
+        'output (Kalman → median → MA → EMA → step limiter) followed by the ' +
+        'optional Bessel post-stage. This is exactly what V1 uses for both ' +
+        'peak detection and enter/exit decisions — what you see is what you get.';
+      break;
+  }
+  el.innerHTML = html;
 }
 
 function rebootDevice() {
@@ -6719,6 +6872,14 @@ function openSettingsModal() {
           besselSlider.value = v;
           if (besselSpan) besselSpan.textContent = v;
         }
+        const gate1Toggle = document.getElementById('gate1BootstrapToggle');
+        const gate1Label  = document.getElementById('gate1BootstrapLabel');
+        if (gate1Toggle && config.gate1Bootstrap !== undefined) {
+          gate1Toggle.checked = (parseInt(config.gate1Bootstrap, 10) || 0) === 1;
+          if (gate1Label) gate1Label.textContent = gate1Toggle.checked ? 'On' : 'Off';
+        }
+        // Apply visibility rules now that filterMode is set.
+        if (typeof onFilterModeChange === 'function') onFilterModeChange();
 
         // Multi-node settings
         // Update mnNodeMode FIRST so onNodeModeChange() (which calls
