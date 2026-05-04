@@ -4,7 +4,6 @@ const { SerialPort } = require('serialport');
 const { ReadlineParser } = require('@serialport/parser-readline');
 
 let mainWindow;
-let osdWindow = null;
 let serialPort = null;
 let parser = null;
 
@@ -70,12 +69,6 @@ function createMenu() {
       label: 'File',
       submenu: [
         {
-          label: 'Open OSD Overlay',
-          accelerator: 'CmdOrCtrl+O',
-          click: () => createOSDWindow()
-        },
-        { type: 'separator' },
-        {
           label: 'Refresh Connection',
           accelerator: 'CmdOrCtrl+R',
           click: () => mainWindow.reload()
@@ -119,7 +112,7 @@ function createMenu() {
               type: 'info',
               title: 'About FPVRaceOne',
               message: 'FPVRaceOne Lap Timer v1.3.3',
-              detail: 'RSSI-based lap timing for FPV drones\n\nFeatures:\n• USB/WiFi connectivity\n• Modern configuration UI\n• Marshalling mode for race editing\n• Enhanced calibration wizard\n• OSD overlay for streaming\n\nMIT License - Open Source'
+              detail: 'RSSI-based lap timing for FPV drones\n\nFeatures:\n• USB/WiFi connectivity\n• Modern configuration UI\n• Marshalling mode for race editing\n• Enhanced calibration wizard\n\nMIT License - Open Source'
             });
           }
         }
@@ -129,42 +122,6 @@ function createMenu() {
   
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);
-}
-
-function createOSDWindow() {
-  if (osdWindow) {
-    osdWindow.focus();
-    return;
-  }
-  
-  osdWindow = new BrowserWindow({
-    width: 800,
-    height: 600,
-    transparent: true,
-    frame: false,
-    alwaysOnTop: true,
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      preload: path.join(__dirname, 'preload.js')
-    },
-    title: 'FPVRaceOne OSD Overlay',
-    backgroundColor: '#00000000'
-  });
-  
-  const isDev = !app.isPackaged;
-  const dataPath = isDev 
-    ? path.join(__dirname, '../data/osd.html')
-    : path.join(process.resourcesPath, 'data/osd.html');
-  
-  osdWindow.loadFile(dataPath).catch(err => {
-    console.error('Failed to load OSD:', err);
-    osdWindow.loadFile(path.join(__dirname, '../data/osd.html'));
-  });
-  
-  osdWindow.on('closed', () => {
-    osdWindow = null;
-  });
 }
 
 app.whenReady().then(createWindow);
@@ -278,15 +235,4 @@ ipcMain.handle('serial-status', async () => {
     connected: serialPort !== null && serialPort.isOpen,
     path: serialPort ? serialPort.path : null
   };
-});
-
-// Open OSD overlay window
-ipcMain.handle('open-osd', async () => {
-  try {
-    createOSDWindow();
-    return { success: true };
-  } catch (error) {
-    console.error('Error opening OSD:', error);
-    return { success: false, error: error.message };
-  }
 });

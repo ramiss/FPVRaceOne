@@ -322,16 +322,6 @@ Statistics and charts update immediately. Changes are saved automatically.
 
 Switch between V1 and V2 in **Settings → Signal Processing**. See the [Settings](#signal-processing) section for a full comparison.
 
-### OSD Overlay
-
-Click **"Open OSD"** in the Race tab to open a transparent overlay for use in OBS or similar streaming software.
-
-**OBS setup:**
-1. Add a **Browser Source**
-2. Paste the OSD URL
-3. Set width: 1920, height: 1080
-4. Position over your stream
-
 ### Config Backup & Restore
 
 In **Settings → footer**:

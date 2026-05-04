@@ -187,7 +187,6 @@ All core functionality works identically in both modes. USB actually provides **
 
 ## Keyboard Shortcuts
 
-- **Ctrl+O** - Open OSD overlay window
 - **Ctrl+R** - Refresh connection
 - **F11** - Toggle fullscreen
 - **F12** - Toggle DevTools (for debugging)

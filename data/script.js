@@ -862,15 +862,12 @@ onload = async function (e) {
     });
   }
 
-  // Restore always-hide banner toggle — default ON (null treated as hidden).
+  // Restore always-hide banner toggle — default OFF (banner is visible until
+  // the user explicitly opts in by toggling On).  Only "1" means hidden.
   const alwaysHideBannerToggle = document.getElementById("alwaysHideBannerToggle");
   const alwaysHideBannerLabel  = document.getElementById("alwaysHideBannerLabel");
   if (alwaysHideBannerToggle) {
-    // null = never set → default to ON (hidden); only "0" explicitly opts out
-    const stored = localStorage.getItem("alwaysHideRaceBanner") !== "0";
-    if (localStorage.getItem("alwaysHideRaceBanner") === null) {
-      localStorage.setItem("alwaysHideRaceBanner", "1");
-    }
+    const stored = localStorage.getItem("alwaysHideRaceBanner") === "1";
     alwaysHideBannerToggle.checked = stored;
     if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = stored ? "On" : "Off";
     alwaysHideBannerToggle.addEventListener("change", () => {
@@ -3939,7 +3936,7 @@ function applyRaceHistoryModeUI() {
   // Banner logic (RAM-only reminder), with "hide" persisted for this browser session
   if (raceTabBanner) {
     const userHidden = sessionStorage.getItem("hideRaceDownloadReminder") === "1";
-    const alwaysHidden = localStorage.getItem("alwaysHideRaceBanner") !== "0"; // default ON
+    const alwaysHidden = localStorage.getItem("alwaysHideRaceBanner") === "1"; // default OFF — only "1" hides
 
     if (raceHistoryPersistent || userHidden || alwaysHidden) {
       raceTabBanner.style.display = 'none';
@@ -4780,33 +4777,6 @@ function clearAllRaces() {
     closeRaceDetails();
   })
   .catch(error => console.error('Error clearing races:', error));
-}
-
-// OSD Overlay Function
-function openOSD() {
-  const osdUrl = window.location.origin + '/osd.html';
-  
-  // Open OSD in new tab
-  window.open(osdUrl, '_blank');
-  
-  // Copy URL to clipboard
-  navigator.clipboard.writeText(osdUrl)
-    .then(() => {
-      // Show temporary success message
-      const button = event.target;
-      const originalText = button.textContent;
-      button.textContent = '✓ URL Copied!';
-      button.style.backgroundColor = '#27ae60';
-      
-      setTimeout(() => {
-        button.textContent = originalText;
-        button.style.backgroundColor = '';
-      }, 2000);
-    })
-    .catch(err => {
-      console.error('Failed to copy URL:', err);
-      alert('OSD opened, but failed to copy URL. URL: ' + osdUrl);
-    });
 }
 
 // Config Download/Import Functions
