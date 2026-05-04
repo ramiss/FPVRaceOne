@@ -535,7 +535,10 @@
             <div class="settings-nav-item" onclick="switchSettingsSection('multinode')">
               <span>Multi-Node</span>
             </div>
-            <div class="settings-nav-item" onclick="switchSettingsSection('webhooks')">
+            <!-- Webhooks: feature works but kept hidden from end users until UX is improved.
+                 Re-enable by removing the inline display:none.  Section content + firmware
+                 endpoints + WebhookManager all remain wired up and functional. -->
+            <div class="settings-nav-item" style="display:none;" onclick="switchSettingsSection('webhooks')">
               <span>Webhooks</span>
             </div>
             <div class="settings-nav-item" onclick="switchSettingsSection('signal')">

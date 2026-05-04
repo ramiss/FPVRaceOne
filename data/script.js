@@ -6511,10 +6511,13 @@ function toggleWebhooks(enabled, opts = {}) {
   const webhooksCheckbox = document.getElementById('webhooksEnabled');
   if (webhooksCheckbox) webhooksCheckbox.checked = !!enabled;
 
-  // If you have UI sections to show/hide, keep doing it here...
+  // Reveal / hide the IP entry, configured-webhooks list, and test button.
+  // Without this the user toggles the switch on but sees no way to add an IP.
+  setWebhooksUI(!!enabled);
 
-  // Stage-only
-  autoSaveConfig();
+  // Stage-only — `opts.save === false` is used by the config-load path so
+  // restoring saved state doesn't dirty the Save Config button.
+  if (opts.save !== false) autoSaveConfig();
 }
 
 function loadWebhooks() {
