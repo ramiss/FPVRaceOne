@@ -5585,31 +5585,31 @@ async function calculateThresholds() {
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit  = calculatedExit;
 
-  // V3 (verbatim upstream FPVGate) does not use the Bessel post-stage — skip
-  // the FWHM-based recommendation entirely.  V1 and V2 do use Bessel, so
+  // V1 (verbatim upstream FPVGate) does not use the Bessel post-stage — skip
+  // the FWHM-based recommendation entirely.  V2 and V3 do use Bessel, so
   // measure the narrowest peak and recommend a conservative level.
   const filterMode = (() => {
     const el = document.getElementById('filterModeSelect');
     return el ? parseInt(el.value, 10) : 0;
   })();
-  const isV3 = (filterMode === 2);
+  const isUpstream = (filterMode === 0);
 
   let minFwhm = 0;
   let recommendedBessel = 0;
-  if (!isV3) {
+  if (!isUpstream) {
     const fwhms = markers.map(m => measurePeakFWHM(allRssiValues, m.index));
     minFwhm = Math.max(0, Math.min(...fwhms));
     recommendedBessel = recommendBesselLevel(minFwhm);
   }
   wizardState.filterMode        = filterMode;
-  wizardState.recommendedBessel = isV3 ? null : recommendedBessel;
+  wizardState.recommendedBessel = isUpstream ? null : recommendedBessel;
   wizardState.minFwhm           = minFwhm;
 
   console.log('[Wizard] peaks:', peakRssis, 'minPeak:', minPeak, 'noiseFloor:', noiseFloor);
   console.log('[Wizard] final:',
       { enter: calculatedEnter, exit: calculatedExit, mode: filterMode,
-        minFwhm: isV3 ? 'n/a' : minFwhm,
-        recommendedBessel: isV3 ? 'n/a (V3)' : recommendedBessel });
+        minFwhm: isUpstream ? 'n/a' : minFwhm,
+        recommendedBessel: isUpstream ? 'n/a (V1 upstream)' : recommendedBessel });
 
   // Show results
   hideWizardProcessing();
@@ -5617,17 +5617,17 @@ async function calculateThresholds() {
   document.getElementById('calculatedEnterRssi').textContent = calculatedEnter;
   document.getElementById('calculatedExitRssi').textContent = calculatedExit;
 
-  // Hide Bessel-specific rows entirely in V3 — they don't apply to upstream's
+  // Hide Bessel-specific rows entirely in V1 — they don't apply to upstream's
   // pipeline and would mislead the user about what's being saved.
-  const besselRow = document.getElementById('recommendedBesselRow');
-  const fwhmRow   = document.getElementById('measuredFwhmRow');
-  const noteV1V2  = document.getElementById('wizardNoteV1V2');
-  const noteV3    = document.getElementById('wizardNoteV3');
-  if (besselRow) besselRow.style.display = isV3 ? 'none' : '';
-  if (fwhmRow)   fwhmRow.style.display   = isV3 ? 'none' : '';
-  if (noteV1V2)  noteV1V2.style.display  = isV3 ? 'none' : '';
-  if (noteV3)    noteV3.style.display    = isV3 ? '' : 'none';
-  if (!isV3) {
+  const besselRow      = document.getElementById('recommendedBesselRow');
+  const fwhmRow        = document.getElementById('measuredFwhmRow');
+  const noteWithBessel = document.getElementById('wizardNoteWithBessel');
+  const noteNoBessel   = document.getElementById('wizardNoteNoBessel');
+  if (besselRow)      besselRow.style.display      = isUpstream ? 'none' : '';
+  if (fwhmRow)        fwhmRow.style.display        = isUpstream ? 'none' : '';
+  if (noteWithBessel) noteWithBessel.style.display = isUpstream ? 'none' : '';
+  if (noteNoBessel)   noteNoBessel.style.display   = isUpstream ? '' : 'none';
+  if (!isUpstream) {
     document.getElementById('recommendedBesselLevel').textContent = recommendedBessel;
     document.getElementById('measuredFwhm').textContent           = minFwhm;
   }
@@ -5638,7 +5638,7 @@ function applyCalculatedThresholds() {
   if (enterRssiInput) { enterRssiInput.value = wizardState.calculatedEnter; updateEnterRssi(enterRssiInput, wizardState.calculatedEnter); }
   if (exitRssiInput)  { exitRssiInput.value  = wizardState.calculatedExit;  updateExitRssi(exitRssiInput,  wizardState.calculatedExit);  }
 
-  // Apply recommended Bessel level — V1/V2 only.  V3 ignores the Bessel
+  // Apply recommended Bessel level — V2/V3 only.  V1 ignores the Bessel
   // post-stage entirely (matches upstream FPVGate verbatim), so we leave the
   // slider alone and rely on stagedConfig forcing it to 0 via onFilterModeChange.
   if (typeof wizardState.recommendedBessel === 'number') {
@@ -5754,22 +5754,24 @@ function stepBessel(delta) {
 }
 
 // Show/hide the Bessel slider and Gate-1 bootstrap toggle based on the
-// selected Filter Mode.  V3 hides Bessel (firmware locks level=0 in V3 anyway)
-// and shows the Gate-1 toggle.  V1/V2 do the inverse.
+// selected Filter Mode.  V1 (verbatim upstream FPVGate) hides the Bessel
+// slider — the firmware locks level=0 in V1 anyway — and shows the Gate-1
+// toggle.  V2 (FPVRaceOne) and V3 (RotorHazard) do the inverse.
 function onFilterModeChange() {
   const sel = document.getElementById('filterModeSelect');
   if (!sel) return;
   const mode = parseInt(sel.value, 10);
+  const isUpstream  = (mode === 0);  // V1 = verbatim upstream FPVGate
   const besselGroup = document.getElementById('besselGroup');
   const gate1Group  = document.getElementById('gate1BootstrapGroup');
-  if (besselGroup) besselGroup.style.display = (mode === 2) ? 'none' : '';
-  if (gate1Group)  gate1Group.style.display  = (mode === 2) ? '' : 'none';
+  if (besselGroup) besselGroup.style.display = isUpstream ? 'none' : '';
+  if (gate1Group)  gate1Group.style.display  = isUpstream ? '' : 'none';
 
-  // Force the Bessel slider to 0 when V3 is selected so the saved config
-  // matches the firmware's behaviour (firmware ignores Bessel in V3 mode,
+  // Force the Bessel slider to 0 when V1 is selected so the saved config
+  // matches the firmware's behaviour (firmware ignores Bessel in V1 mode,
   // but persisting 0 keeps the UI visually consistent if the user switches
-  // away from V3 later).
-  if (mode === 2) {
+  // away from V1 later).
+  if (isUpstream) {
     const slider = document.getElementById('besselLevel');
     const span   = document.getElementById('besselLevelSpan');
     if (slider && parseInt(slider.value, 10) !== 0) {
@@ -5786,8 +5788,8 @@ function onFilterModeChange() {
 // Updates the small banner above the live RSSI chart on the Calibration tab.
 // The banner explains exactly what the chart represents for the active filter
 // mode, so the user can interpret the visible peaks correctly when picking
-// thresholds.  V2 has a hidden internal signal (_threshSmooth) that drives
-// exit decisions — we call that out so users don't get surprised.
+// thresholds.  V3 (RotorHazard) has a hidden internal signal (_threshSmooth)
+// that drives exit decisions — we call that out so users aren't surprised.
 function updateCalibLiveBanner(mode) {
   const el = document.getElementById('calibLiveBannerText');
   if (!el) return;
@@ -5800,25 +5802,25 @@ function updateCalibLiveBanner(mode) {
   switch (mode) {
     case 1:
       html =
-        '<strong>V2 — RotorHazard:</strong> chart shows raw RSSI ' +
-        '<em>after</em> the optional Bessel post-stage. This is what V2 uses ' +
-        'for peak detection. <strong>Note:</strong> exit decisions in V2 use ' +
-        'an internal smoothed signal — the visible line may briefly dip below ' +
-        'Exit during a single pass without ending the lap.';
+        '<strong>V2 — Experimental 1:</strong> chart shows the full pipeline ' +
+        'output (Kalman → median → MA → EMA → step limiter) followed by the ' +
+        'optional Bessel post-stage. This is exactly what V2 uses for both ' +
+        'peak detection and enter/exit decisions — what you see is what you get.';
       break;
     case 2:
       html =
-        '<strong>V3 — Upstream FPVGate (verbatim):</strong> chart shows the ' +
-        'full pipeline output (Kalman → median → MA → EMA → step limiter). ' +
-        'No Bessel is applied. This is exactly what V3 uses for both peak ' +
-        'detection and enter/exit decisions — what you see is what you get.';
+        '<strong>V3 — Experimental 2:</strong> chart shows raw RSSI ' +
+        '<em>after</em> the optional Bessel post-stage. This is what V3 uses ' +
+        'for peak detection. <strong>Note:</strong> exit decisions in V3 use ' +
+        'an internal smoothed signal — the visible line may briefly dip below ' +
+        'Exit during a single pass without ending the lap.';
       break;
     default:
       html =
-        '<strong>V1 — FPVRaceOne:</strong> chart shows the full pipeline ' +
-        'output (Kalman → median → MA → EMA → step limiter) followed by the ' +
-        'optional Bessel post-stage. This is exactly what V1 uses for both ' +
-        'peak detection and enter/exit decisions — what you see is what you get.';
+        '<strong>V1 — FPVRaceOne (default):</strong> chart shows the full ' +
+        'pipeline output (Kalman → median → MA → EMA → step limiter). No ' +
+        'Bessel is applied. This is exactly what V1 uses for both peak ' +
+        'detection and enter/exit decisions — what you see is what you get.';
       break;
   }
   el.innerHTML = html;

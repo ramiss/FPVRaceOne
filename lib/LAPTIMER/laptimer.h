@@ -148,13 +148,15 @@ private:
     void lapPeakReset();
 
     // Per-mode internals — keep detection logic isolated so changing one mode
-    // can't accidentally regress another.
-    void lapPeakCaptureV1();
-    bool lapPeakCapturedV1();
-    void lapPeakCaptureV2();
-    bool lapPeakCapturedV2();
-    void lapPeakCaptureV3();
-    bool lapPeakCapturedV3();
+    // can't accidentally regress another.  Names describe the *behaviour*, not
+    // the user-facing V-number, so future renumbering only touches the
+    // dispatcher in lapPeakCapture()/lapPeakCaptured().
+    void lapPeakCapture_FpvGate();      // V1 (default) — verbatim upstream FPVGate
+    bool lapPeakCaptured_FpvGate();
+    void lapPeakCapture_FpvRaceOne();   // V2 — FPVRaceOne Path B (simplified)
+    bool lapPeakCaptured_FpvRaceOne();
+    void lapPeakCapture_RotorHazard();  // V3 — raw + Bessel + threshSmooth
+    bool lapPeakCaptured_RotorHazard();
 
     void startLap();
     void finishLap();

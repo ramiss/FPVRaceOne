@@ -11,27 +11,29 @@ extern RgbLed* g_rgbLed;
 
 // ── Kalman filter tuning ──────────────────────────────────────────────────
 //
-// V1 / V2 (FPVRaceOne): standard naming convention — Q is process noise,
-// R is measurement noise.  Higher R = more smoothing.
-// V3 (verbatim upstream FPVGate): upstream uses an inverted naming convention
-// (Q maps to setMeasurementNoise, R maps to setProcessNoise); we apply the
-// gains the same way upstream does, so V3 produces the exact same Kalman
-// behaviour as the upstream RX5808 path.
-static const float kKalmanQ_V1V2 = 3.0f;   // process noise — V1/V2
-static const float kKalmanR_V1V2 = 16.0f;  // measurement noise — V1/V2
-
-static const float kKalmanQ_V3   = 9.0f;   // *measurement* noise per upstream — V3
-static const float kKalmanR_V3   = 0.002f; // *process* noise per upstream — V3
+// Two distinct gain pairs:
+//   _Default   — used by the FPVRaceOne (Path B) pre-filter.  Standard
+//                Kalman naming convention: Q is process noise, R is
+//                measurement noise.  Higher R = more smoothing.
+//   _Upstream  — used by the verbatim upstream FPVGate path.  Upstream uses
+//                an *inverted* naming convention (Q maps to
+//                setMeasurementNoise, R maps to setProcessNoise).  We apply
+//                the gains the same way upstream does, so this path produces
+//                the exact same Kalman behaviour as the upstream RX5808 path.
+static const float kKalmanQ_Default  = 3.0f;
+static const float kKalmanR_Default  = 16.0f;
+static const float kKalmanQ_Upstream = 9.0f;
+static const float kKalmanR_Upstream = 0.002f;
 
 static void applyKalmanGains(KalmanFilter& f, uint8_t filterMode) {
-    if (filterMode == 2) {
-        // V3 — verbatim upstream call ordering
-        f.setMeasurementNoise(kKalmanQ_V3);
-        f.setProcessNoise(kKalmanR_V3);
+    if (filterMode == 0) {
+        // V1 (verbatim upstream FPVGate) — upstream's inverted call ordering
+        f.setMeasurementNoise(kKalmanQ_Upstream);
+        f.setProcessNoise(kKalmanR_Upstream);
     } else {
-        // V1 / V2 — standard convention
-        f.setProcessNoise(kKalmanQ_V1V2);
-        f.setMeasurementNoise(kKalmanR_V1V2);
+        // V2 (FPVRaceOne) / V3 (RotorHazard, Kalman irrelevant — raw passthrough)
+        f.setProcessNoise(kKalmanQ_Default);
+        f.setMeasurementNoise(kKalmanR_Default);
     }
 }
 
@@ -56,17 +58,18 @@ static const float kEmaAlpha = 0.15f;
 // Lower = stricter (less likely to false-trigger), Higher = more responsive.
 static const int kMaxStepPerSample = 12;
 
-// ── V1 / V3 enter/exit debounce constants (verbatim upstream FPVGate) ──────
-// V1 (Path B) uses kEnterHoldSamplesMin + kExitConfirmSamples for its
-// debounce.  V3 uses the full upstream set including the Gate-1 relaxations.
+// ── V1 / V2 enter/exit debounce constants (from upstream FPVGate) ──────────
+// V2 (FPVRaceOne / Path B) uses kEnterHoldSamplesMin + kExitConfirmSamples
+// for its debounce.  V1 (verbatim upstream) uses the full upstream set
+// including the Gate-1 relaxations.
 static const uint8_t kEnterHoldSamplesMin   = 4;   // consecutive at-or-above-enter samples before peak tracking starts
 static const uint8_t kExitConfirmSamples    = 2;   // consecutive below-exit samples to confirm exit (raw, not smoothed)
 static const uint8_t kPeakMinAboveExit      = 5;   // peak must exceed exit by at least this much to be valid
-// V3-only Gate-1 relaxations (used only when gate1Bootstrap is enabled):
+// V1-only Gate-1 relaxations (used only when gate1Bootstrap is enabled):
 static const uint8_t kGate1RelaxMargin      = 4;   // effective Gate-1 enter ~= exit + 4 (if enter is much higher)
 static const uint8_t kGate1HoldSamplesMin   = 2;   // lower debounce just for Gate 1
 static const uint8_t kGate1PeakMinAboveExit = 3;   // lower peak margin just for Gate 1
-// V3-only ceiling-drift watchdog: if the gate has been "entered" longer than
+// V1-only ceiling-drift watchdog: if the gate has been "entered" longer than
 // this without exit, force-reset state (signal must have drifted up to enter).
 static const uint32_t kCeilingDriftTimeoutMs = 3000;
 
@@ -117,7 +120,7 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     webhooks = webhook;
 
     // Apply Kalman gains based on the *currently configured* filterMode so that
-    // a device booting into V3 immediately uses upstream's heavy smoothing.
+    // a device booting into V1 immediately uses upstream's heavy smoothing.
     lastFilterMode = conf ? conf->getFilterMode() : 0;
     applyKalmanGains(filter, lastFilterMode);
 
@@ -133,14 +136,14 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     memset(rssi_window, 0, sizeof(rssi_window));
     rssi_window_index = 0;
 
-    // V1 filter state
+    // FPVRaceOne (V2) pipeline state
     memset(v1KHist, 0, sizeof(v1KHist));
     v1KHistIdx  = 0;
     v1Ema       = NAN;
     v1OutInit   = false;
     v1OutPrev   = 0;
 
-    // V2 filter state
+    // Bessel post-stage IIR state (used by V2 + V3) and RotorHazard plateau timer
     v2Bv[0] = v2Bv[1] = v2Bv[2] = 0.0f;
     v2PeakDurationMs = 0;
 
@@ -176,13 +179,15 @@ void LapTimer::start() {
     DEBUG("====================\n\n");
 
     // Filter state reset depends on mode:
-    //   V1/V2 — reset everything, seed Bessel/_threshSmooth from current sample.
-    //   V3    — keep Kalman running (verbatim upstream: "resetting it causes a
-    //           transient ramp that can false-trigger the first lap").
+    //   V1 (upstream FPVGate) — keep Kalman running (verbatim upstream:
+    //                          "resetting it causes a transient ramp that can
+    //                          false-trigger the first lap").
+    //   V2 / V3               — reset everything, seed Bessel/_threshSmooth
+    //                           from current sample.
     const uint8_t fm = conf ? conf->getFilterMode() : 0;
     lastFilterMode = fm;
 
-    if (fm != 2) {
+    if (fm != 0) {
         filter = KalmanFilter();
     }
     applyKalmanGains(filter, fm);
@@ -212,7 +217,7 @@ void LapTimer::start() {
     enteredGate = false;
     enterHoldSamples = 0;
     enterHoldStartMs = 0;
-    gate1Armed = false;  // V3 Gate-1 bootstrap re-arms each race
+    gate1Armed = false;  // V1 Gate-1 bootstrap re-arms each race
 
     // Seed both the threshold-smooth filter and the Bessel post-stage IIR at
     // the ambient RSSI level so there is no artificial ramp-up at race start.
@@ -319,8 +324,8 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
 #endif
 
     // Detect runtime filter-mode changes and re-apply Kalman gains accordingly.
-    // V3 uses upstream's heavier gains; switching V1 ↔ V3 mid-session must
-    // re-tune the filter or it'll behave wrong until the next race start.
+    // V1 uses upstream's heavier Kalman gains; switching V1 ↔ V2 mid-session
+    // must re-tune the filter or it'll behave wrong until the next race start.
     const uint8_t filterMode = conf->getFilterMode();
     if (filterMode != lastFilterMode) {
         applyKalmanGains(filter, filterMode);
@@ -335,17 +340,18 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     uint8_t ma = 0;
 
     // ===== Pre-filter stage (Filter Mode) =====
-    // V1 and V3 share the same Kalman+Median+MA+EMA+step-limiter pipeline —
-    // only the Kalman tuning differs (handled by applyKalmanGains).  V2 is a
-    // raw passthrough.
+    // V1 (upstream FPVGate) and V2 (FPVRaceOne) share the same
+    // Kalman+Median+MA+EMA+step-limiter pipeline — only the Kalman tuning
+    // differs (handled by applyKalmanGains).  V3 (RotorHazard) is a raw
+    // passthrough.
     uint8_t preFiltered;
-    if (filterMode == 1) {
-        // V2 — RotorHazard: raw passthrough (Bessel is the independent post-stage)
+    if (filterMode == 2) {
+        // V3 — RotorHazard: raw passthrough (Bessel is the independent post-stage)
         preFiltered = rawRssi;
         lastKalmanRssi = 0;
         lastAvgRssi    = 0;
     } else {
-        // V1 / V3 — 5-stage pipeline (Kalman → Median → MA → EMA → step limiter)
+        // V1 / V2 — 5-stage pipeline (Kalman → Median → MA → EMA → step limiter)
 
         // Stage 2: Kalman
         kalman_filtered = (uint8_t)round(filter.filter(rawRssi, 0));
@@ -389,8 +395,8 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     }
     lastRawRssi = rawRssi;
 
-    // ===== Bessel post-stage (V1 + V2 only — V3 is verbatim upstream, no Bessel) =====
-    const uint8_t besselLevel = (filterMode == 2) ? 0 : conf->getBesselLevel();
+    // ===== Bessel post-stage (V2 + V3 only — V1 is verbatim upstream, no Bessel) =====
+    const uint8_t besselLevel = (filterMode == 0) ? 0 : conf->getBesselLevel();
     if (besselLevel == 0) {
         out = preFiltered;
     } else {
@@ -414,7 +420,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     snapshot.timerState       = (uint8_t)state;
     snapshot.enteredGate      = enteredGate;
     snapshot.gateExited       = gateExited;
-    snapshot.enterHoldSamples = enterHoldSamples;   // V1 + V3: live debounce counter
+    snapshot.enterHoldSamples = enterHoldSamples;   // V1 + V2: live debounce counter
     snapshot.filterMode       = filterMode;
     // snapshot.lapEvent is set in finishLap(); lapTimeMs and lapCount updated there
 #endif
@@ -459,11 +465,11 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         _threshSmoothOut = (uint8_t)lroundf(_threshSmooth);
     }
 
-    // ── Gate re-arm latch (V2 only — uses _threshSmooth signal) ─────────────
-    // V1 and V3 re-arm immediately in startLap() (matching upstream FPVGate).
-    // V2 keeps the threshold-smooth-driven latch because its raw passthrough
-    // signal can dip below exit briefly during a single pass.
-    if (filterMode == 1 && !gateExited) {
+    // ── Gate re-arm latch (V3 only — uses _threshSmooth signal) ─────────────
+    // V1 (upstream) and V2 (FPVRaceOne) re-arm immediately in startLap().
+    // V3 (RotorHazard) keeps the threshold-smooth-driven latch because its
+    // raw passthrough signal can dip below exit briefly during a single pass.
+    if (filterMode == 2 && !gateExited) {
         if (_threshSmoothOut < conf->getExitRssi()) {
             if (gateCloseCount < kGateCloseRequired) ++gateCloseCount;
             if (gateCloseCount >= kGateCloseRequired) gateExited = true;
@@ -505,9 +511,9 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             const bool minLapElapsed = (currentTimeMs - startTimeMs) > conf->getMinLapMs();
             bool canCapture = false;
 
-            // V3 + gate1Bootstrap=on: run the upstream first-lap bootstrap.
-            // Other modes (and V3 with bootstrap off) just gate on minLapElapsed.
-            const bool useGate1Bootstrap = (filterMode == 2) && conf->getGate1Bootstrap();
+            // V1 + gate1Bootstrap=on: run the upstream first-lap bootstrap.
+            // Other modes (and V1 with bootstrap off) just gate on minLapElapsed.
+            const bool useGate1Bootstrap = (filterMode == 0) && conf->getGate1Bootstrap();
             if (useGate1Bootstrap && isGate1) {
                 if (!gate1Armed) {
                     const uint8_t cur = rssi[rssiCount];
@@ -547,7 +553,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
                 }
                 canCapture = gate1Armed;
             } else if (isGate1) {
-                canCapture = true;            // V1/V2/V3-no-bootstrap: Gate 1 may fire immediately
+                canCapture = true;            // V2/V3 (and V1-no-bootstrap): Gate 1 may fire immediately
             } else {
                 canCapture = minLapElapsed;
             }
@@ -593,36 +599,36 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
 // filter mode owns its own internal pair so logic for one mode can change
 // without risk of regressing another.
 //
-//   V1 (Path B)         : our simplified FPVRaceOne — pipeline-smoothed signal,
-//                         4-sample enter debounce, 2-sample raw exit confirm,
-//                         no _threshSmooth, no Gate-1 bootstrap.
-//   V2 (RotorHazard)    : raw passthrough + Bessel + _threshSmooth — the
-//                         current default; uses the smoothed signal for the
-//                         exit decision and supports peak-plateau midpoint.
-//   V3 (verbatim FPVGate): byte-for-byte port of upstream's RX5808 path,
-//                         including Gate-1 relax / ceiling-drift watchdog.
-//                         _threshSmooth is computed for telemetry only —
-//                         never read by V3's decisions.
+// User-facing → behaviour mapping:
+//   V1 (filterMode == 0, default): _FpvGate    — verbatim upstream FPVGate
+//                                  (RX5808 pipeline + Gate-1 bootstrap +
+//                                   ceiling-drift watchdog).  Smoothest peaks.
+//   V2 (filterMode == 1):          _FpvRaceOne — Path B simplified pipeline
+//                                  (4-sample enter / 2-sample raw exit confirm,
+//                                   no _threshSmooth, no Gate-1 bootstrap).
+//   V3 (filterMode == 2):          _RotorHazard — raw + Bessel + _threshSmooth
+//                                  (uses the smoothed signal for the exit
+//                                   decision and supports peak-plateau midpoint).
 // ---------------------------------------------------------------------------
 
 void LapTimer::lapPeakCapture() {
     switch (conf->getFilterMode()) {
-        case 1:  lapPeakCaptureV2(); break;
-        case 2:  lapPeakCaptureV3(); break;
-        default: lapPeakCaptureV1(); break;
+        case 1:  lapPeakCapture_FpvRaceOne();  break;  // V2
+        case 2:  lapPeakCapture_RotorHazard(); break;  // V3
+        default: lapPeakCapture_FpvGate();     break;  // V1 (default)
     }
 }
 
 bool LapTimer::lapPeakCaptured() {
     switch (conf->getFilterMode()) {
-        case 1:  return lapPeakCapturedV2();
-        case 2:  return lapPeakCapturedV3();
-        default: return lapPeakCapturedV1();
+        case 1:  return lapPeakCaptured_FpvRaceOne();   // V2
+        case 2:  return lapPeakCaptured_RotorHazard();  // V3
+        default: return lapPeakCaptured_FpvGate();      // V1 (default)
     }
 }
 
-// ── V1 (Path B) ─────────────────────────────────────────────────────────────
-void LapTimer::lapPeakCaptureV1() {
+// ── FPVRaceOne (Path B) — user-facing V2 ────────────────────────────────────
+void LapTimer::lapPeakCapture_FpvRaceOne() {
     const uint8_t cur   = rssi[rssiCount];
     const uint8_t enter = conf->getEnterRssi();
     const uint8_t exitT = conf->getExitRssi();
@@ -643,7 +649,7 @@ void LapTimer::lapPeakCaptureV1() {
             if (cur > rssiPeak) {
                 rssiPeak = cur;
                 rssiPeakTimeMs = now;
-                DEBUG("*** PEAK CAPTURED (V1): %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
+                DEBUG("*** PEAK CAPTURED (FPVRaceOne): %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
                       rssiPeak, lastRawRssi, lastKalmanRssi, lastAvgRssi,
                       (unsigned long)(rssiPeakTimeMs - startTimeMs));
             }
@@ -661,7 +667,7 @@ void LapTimer::lapPeakCaptureV1() {
     }
 }
 
-bool LapTimer::lapPeakCapturedV1() {
+bool LapTimer::lapPeakCaptured_FpvRaceOne() {
     const uint8_t enter = conf->getEnterRssi();
     const uint8_t exitT = conf->getExitRssi();
 
@@ -669,7 +675,7 @@ bool LapTimer::lapPeakCapturedV1() {
         (rssiPeak > 0) && (rssiPeak >= enter) && (rssiPeak > (exitT + kPeakMinAboveExit));
 
     // Two-sample raw exit confirm — direct comparison against `rssi[]`,
-    // not _threshSmoothOut.  Slow-falling smooth signal was the V1 regression.
+    // not _threshSmoothOut.  Slow-falling smooth signal was the FPVRaceOne regression.
     const uint16_t prevIdx = (rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY;
     const bool droppedBelowExit =
         (rssi[rssiCount] < exitT) && (rssi[prevIdx] < exitT);
@@ -677,7 +683,7 @@ bool LapTimer::lapPeakCapturedV1() {
     const bool captured = enteredGate && validPeak && droppedBelowExit;
 
     if (captured) {
-        DEBUG("\n*** V1 LAP DETECTED! Peak=%u enter=%u exit=%u margin=%d ***\n",
+        DEBUG("\n*** LAP DETECTED (FPVRaceOne)! Peak=%u enter=%u exit=%u margin=%d ***\n",
               rssiPeak, enter, exitT, rssiPeak - exitT);
     }
 
@@ -693,8 +699,8 @@ bool LapTimer::lapPeakCapturedV1() {
     return captured;
 }
 
-// ── V2 (RotorHazard, current default) ───────────────────────────────────────
-void LapTimer::lapPeakCaptureV2() {
+// ── RotorHazard — user-facing V3 ────────────────────────────────────────────
+void LapTimer::lapPeakCapture_RotorHazard() {
     const uint8_t cur   = rssi[rssiCount];
     const uint8_t enter = conf->getEnterRssi();
     const uint8_t exitT = conf->getExitRssi();
@@ -714,7 +720,7 @@ void LapTimer::lapPeakCaptureV2() {
             rssiPeak = cur;
             rssiPeakTimeMs = now;
             v2PeakDurationMs = 0;
-            DEBUG("*** PEAK CAPTURED (V2): %u (raw=%u) at %lu ms ***\n",
+            DEBUG("*** PEAK CAPTURED (RotorHazard): %u (raw=%u) at %lu ms ***\n",
                   rssiPeak, lastRawRssi,
                   (unsigned long)(rssiPeakTimeMs - startTimeMs));
         } else if (cur == rssiPeak) {
@@ -728,14 +734,14 @@ void LapTimer::lapPeakCaptureV2() {
     }
 }
 
-bool LapTimer::lapPeakCapturedV2() {
+bool LapTimer::lapPeakCaptured_RotorHazard() {
     const uint8_t enter = conf->getEnterRssi();
     const uint8_t exitT = conf->getExitRssi();
 
     const bool validPeak =
         (rssiPeak > 0) && (rssiPeak >= enter) && (rssiPeak > (exitT + kPeakMinAboveExit));
 
-    // V2 trusts the threshold-smooth IIR for exit detection so a single
+    // V3 trusts the threshold-smooth IIR for exit detection so a single
     // brief dip mid-pass doesn't end the lap prematurely.
     const bool droppedBelowExit = (_threshSmoothOut < exitT);
 
@@ -744,10 +750,10 @@ bool LapTimer::lapPeakCapturedV2() {
     if (captured) {
         if (v2PeakDurationMs > 0) {
             rssiPeakTimeMs += v2PeakDurationMs / 2;
-            DEBUG("\n*** V2 LAP DETECTED! Peak=%u duration=%ums midpoint+%ums ***\n",
+            DEBUG("\n*** LAP DETECTED (RotorHazard)! Peak=%u duration=%ums midpoint+%ums ***\n",
                   rssiPeak, v2PeakDurationMs, v2PeakDurationMs / 2);
         } else {
-            DEBUG("\n*** V2 LAP DETECTED! Peak=%u enter=%u exit=%u margin=%d ***\n",
+            DEBUG("\n*** LAP DETECTED (RotorHazard)! Peak=%u enter=%u exit=%u margin=%d ***\n",
                   rssiPeak, enter, exitT, rssiPeak - exitT);
         }
     }
@@ -763,8 +769,8 @@ bool LapTimer::lapPeakCapturedV2() {
     return captured;
 }
 
-// ── V3 (verbatim upstream FPVGate RX5808 path) ──────────────────────────────
-void LapTimer::lapPeakCaptureV3() {
+// ── FPVGate (verbatim upstream RX5808 path) — user-facing V1 (default) ──────
+void LapTimer::lapPeakCapture_FpvGate() {
     const uint8_t cur = rssi[rssiCount];
     const uint32_t now = millis();
     const bool isGate1 = (lapCount == 0 && !lapCountWraparound && gate1Armed);
@@ -804,7 +810,7 @@ void LapTimer::lapPeakCaptureV3() {
             // without an exit, the antenna RSSI must have drifted up to enter.
             // Force-reset rather than emit a phantom lap.
             if ((now - enterHoldStartMs) > kCeilingDriftTimeoutMs) {
-                DEBUG("[V3] Ceiling-drift timeout (>%lu ms in gate) — resetting state\n",
+                DEBUG("[FPVGate] Ceiling-drift timeout (>%lu ms in gate) — resetting state\n",
                       (unsigned long)kCeilingDriftTimeoutMs);
                 enteredGate = false;
                 gateExited = true;
@@ -820,7 +826,7 @@ void LapTimer::lapPeakCaptureV3() {
             if (cur > rssiPeak) {
                 rssiPeak = cur;
                 rssiPeakTimeMs = now;
-                DEBUG("*** PEAK CAPTURED (V3): %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
+                DEBUG("*** PEAK CAPTURED (FPVGate): %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
                       rssiPeak, lastRawRssi, lastKalmanRssi, lastAvgRssi,
                       (unsigned long)(rssiPeakTimeMs - startTimeMs));
             }
@@ -837,7 +843,7 @@ void LapTimer::lapPeakCaptureV3() {
     }
 }
 
-bool LapTimer::lapPeakCapturedV3() {
+bool LapTimer::lapPeakCaptured_FpvGate() {
     const bool isGate1 = (lapCount == 0 && !lapCountWraparound && gate1Armed);
     bool validPeak;
     bool droppedBelowExit;
@@ -866,7 +872,7 @@ bool LapTimer::lapPeakCapturedV3() {
     const bool captured = enteredGate && validPeak && droppedBelowExit;
 
     if (captured) {
-        DEBUG("\n*** V3 LAP DETECTED! ***\n");
+        DEBUG("\n*** LAP DETECTED (FPVGate)! ***\n");
         DEBUG("  Current RSSI: %u\n", rssi[rssiCount]);
         DEBUG("  Peak was: %u\n", rssiPeak);
         DEBUG("  Enter: %u  Exit: %u\n", conf->getEnterRssi(), conf->getExitRssi());
@@ -896,17 +902,17 @@ void LapTimer::startLap() {
     enterHoldSamples = 0;
     enterHoldStartMs = 0;
 
-    // V2 (RotorHazard) re-arms via the kGateCloseRequired sample-count latch
-    // driven from _threshSmoothOut in handleLapTimerUpdate.  V1 and V3 follow
-    // upstream FPVGate: re-arm immediately and trust the per-mode debounce
-    // (4-sample enter hold + 2-sample raw exit confirm).
+    // V3 (RotorHazard) re-arms via the kGateCloseRequired sample-count latch
+    // driven from _threshSmoothOut in handleLapTimerUpdate.  V1 (upstream
+    // FPVGate) and V2 (FPVRaceOne) re-arm immediately and trust the per-mode
+    // debounce (4-sample enter hold + 2-sample raw exit confirm).
     const uint8_t fm = conf ? conf->getFilterMode() : 0;
-    if (fm == 1 && lapCount > 0) {
-        // V2 mid-race re-arm uses the latch.
+    if (fm == 2 && lapCount > 0) {
+        // V3 mid-race re-arm uses the latch.
         gateExited = false;
         gateCloseCount = 0;
     } else {
-        // V1, V3, or pre-Gate-1 (lapCount == 0): re-arm immediately.
+        // V1, V2, or pre-Gate-1 (lapCount == 0): re-arm immediately.
         gateExited = true;
         gateCloseCount = 0;
     }

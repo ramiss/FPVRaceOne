@@ -1055,9 +1055,9 @@ void Config::setDefaults(void) {
     strlcpy(conf.password, "", sizeof(conf.password));  // Empty WiFi credentials
     conf.wifiExtAntenna = 1;  // External antenna by default (matches hardware)
     conf.wifiTxPower = 21;    // Maximum TX power by default
-    conf.filterMode = 0;          // V1 (FPVRaceOne pipeline) by default
+    conf.filterMode = 0;          // V1 (verbatim upstream FPVGate) by default — smoothest peaks
     conf.besselLevel = 0;         // Bessel post-stage off by default; calibration wizard will recommend
-    conf.gate1Bootstrap = 0;      // V3-only Gate-1 bootstrap, off by default
+    conf.gate1Bootstrap = 0;      // V1-only Gate-1 bootstrap, off by default
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));

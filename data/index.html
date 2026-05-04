@@ -495,11 +495,11 @@
               <span id="measuredFwhm" class="result-value">--</span>
             </div>
           </div>
-          <div id="wizardNoteV1V2" style="margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
+          <div id="wizardNoteWithBessel" style="margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
             <strong>Note:</strong> Thresholds and Bessel level are calculated from your lap data with conservative safety margins. The recommended Bessel level errs on the side of less smoothing — increase manually if you race in noisier environments. You can fine-tune any of these manually after applying.
           </div>
-          <div id="wizardNoteV3" style="display:none; margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
-            <strong>Note:</strong> V3 (verbatim upstream FPVGate) does not use the Bessel post-stage, so only Enter / Exit thresholds are calculated. The signal you saw on the chart is exactly what V3 uses for peak detection — adjust manually after applying if needed.
+          <div id="wizardNoteNoBessel" style="display:none; margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
+            <strong>Note:</strong> V1 (FPVRaceOne) does not use the Bessel post-stage, so only Enter / Exit thresholds are calculated. The signal you saw on the chart is exactly what V1 uses for peak detection — adjust manually after applying if needed.
           </div>
           <div style="display: flex; gap: 12px; margin-top: 16px;">
             <button onclick="applyCalculatedThresholds()" style="flex: 1;">Apply Thresholds</button>
@@ -1061,15 +1061,15 @@
               <div class="config-item">
                 <label for="filterModeSelect">Filter Mode:</label>
                 <select id="filterModeSelect" onchange="onFilterModeChange(); autoSaveConfig()">
-                  <option value="0">V1 — FPVRaceOne (current)</option>
-                  <option value="1">V2 — RotorHazard</option>
-                  <option value="2">V3 — Upstream FPVGate (verbatim)</option>
+                  <option value="0">V1 — FPVRaceOne (default)</option>
+                  <option value="1">V2 — Experimental 1</option>
+                  <option value="2">V3 — Experimental 2</option>
                 </select>
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 12px;">
-                <strong>V1</strong> runs a multi-stage pipeline (Kalman → median → moving average → EMA → step limiter) plus a 4-sample enter / 2-sample exit debounce. Recommended default.<br>
-                <strong>V2</strong> passes raw RSSI through with no pre-filter and uses the Bessel slider for smoothing. Use V2 + Bessel = 0 for the lowest possible detection latency on clean signals.<br>
-                <strong>V3</strong> is a strict port of the upstream FPVGate code — same 5-stage pipeline as V1 but with upstream's heavier Kalman gains, the optional Gate-1 bootstrap below, and a 3-second ceiling-drift watchdog. No Bessel post-stage. Useful as a reference baseline.
+                <strong>V1 — FPVRaceOne (recommended)</strong>: full 5-stage signal-processing pipeline (Kalman → median → moving average → EMA → step limiter) with the optional Gate-1 bootstrap below and a 3-second ceiling-drift watchdog. Smoothest peaks; works well in most environments. No Bessel post-stage.<br>
+                <strong>V2 — Experimental 1</strong>: same 5-stage pipeline as V1 but with lighter Kalman gains and a simpler detection state machine (4-sample enter / 2-sample exit debounce). Bessel slider available for extra smoothing. Try this if V1 produces lag or misses fast passes.<br>
+                <strong>V3 — Experimental 2</strong>: raw RSSI passthrough with no pre-filter, relying entirely on the Bessel slider for smoothing. Lowest possible detection latency at Bessel = 0; useful for very clean signals or for measuring raw RX5808 output.
               </div>
 
               <!-- Bessel: hidden when V3 selected (V3 forces level=0 in firmware too) -->
@@ -1092,9 +1092,9 @@
                 </div>
               </div>
 
-              <!-- Gate-1 Bootstrap: V3 only -->
+              <!-- Gate-1 Bootstrap: V1 only -->
               <div id="gate1BootstrapGroup" style="display:none;">
-                <h3>Gate-1 Bootstrap (V3 only)</h3>
+                <h3>Gate-1 Bootstrap (V1 only)</h3>
                 <div class="config-item">
                   <label for="gate1BootstrapToggle">Gate-1 Bootstrap:</label>
                   <div style="flex: 1;">
@@ -1106,7 +1106,7 @@
                   </div>
                 </div>
                 <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                  When <strong>on</strong>, V3 special-cases the first lap of a race: if the drone is already in the gate at start (RSSI ≥ enter), the first confirmed exit counts as Gate 1, with relaxed thresholds (~exit + 4) and a lower 2-sample debounce. When <strong>off</strong>, V3 treats Gate 1 like any other gate.
+                  When <strong>on</strong>, V1 special-cases the first lap of a race: if the drone is already in the gate at start (RSSI ≥ enter), the first confirmed exit counts as Gate 1, with relaxed thresholds (~exit + 4) and a lower 2-sample debounce. When <strong>off</strong>, V1 treats Gate 1 like any other gate.
                 </div>
               </div>
             </div>
