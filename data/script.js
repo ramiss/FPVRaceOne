@@ -1559,14 +1559,35 @@ function addRssiPoint() {
 
     rssiChart.start();
     if (rssiBuffer.length > 0) {
-      rssiValue = parseInt(rssiBuffer.shift());
+      // Firmware streams RSSI at 10 Hz but addRssiPoint runs at 5 Hz.  Using
+      // FIFO shift() here meant the chart drew the oldest queued sample each
+      // cycle, accumulating up to ~10 samples (~1 s) of artificial lag in
+      // steady state and feeling much more sluggish than the actual signal
+      // processing.  Take the newest sample instead and discard the rest —
+      // the chart only renders one point per cycle anyway, so older samples
+      // would never have been drawn.
+      rssiValue = parseInt(rssiBuffer[rssiBuffer.length - 1]);
+      rssiBuffer.length = 0;
       if (crossing && rssiValue < exitRssi) {
         crossing = false;
       } else if (!crossing && rssiValue > enterRssi) {
         crossing = true;
       }
-      maxRssiValue = Math.max(maxRssiValue, rssiValue);
-      minRssiValue = Math.min(minRssiValue, rssiValue);
+      // Y-axis range tracker: rises instantly to new extremes (so peaks aren't
+      // clipped) but decays back toward the current sample over ~5 s of quiet
+      // data (so the chart doesn't stay zoomed out forever after a single
+      // historical peak).  Decay alpha 0.02 at 10 Hz cycle ≈ 50-sample tau.
+      const RSSI_RANGE_DECAY = 0.02;
+      if (rssiValue > maxRssiValue) {
+        maxRssiValue = rssiValue;
+      } else {
+        maxRssiValue -= (maxRssiValue - rssiValue) * RSSI_RANGE_DECAY;
+      }
+      if (rssiValue < minRssiValue) {
+        minRssiValue = rssiValue;
+      } else {
+        minRssiValue += (rssiValue - minRssiValue) * RSSI_RANGE_DECAY;
+      }
     }
 
     // update horizontal lines and min max values
@@ -1730,7 +1751,10 @@ function exitCalibrationOverviewMode() {
   try { if (window.rssiChart && typeof window.rssiChart.start === 'function') window.rssiChart.start(); } catch (e) {}
 }
 
-setInterval(addRssiPoint, 200);
+// Match the firmware's 100 ms RSSI send rate (WEB_RSSI_SEND_TIMEOUT_MS) so
+// every SSE event gets drawn on the next cycle, instead of accumulating in
+// the buffer and arriving on the chart up to 200 ms late.
+setInterval(addRssiPoint, 100);
 
 async function createRssiChart() {
   await loadScript('smoothie.js');
@@ -1740,6 +1764,16 @@ async function createRssiChart() {
   rssiChart = new SmoothieChart({
     responsive: true,
     millisPerPixel: 50,
+    // Accuracy-critical defaults — SmoothieChart's defaults compromise the
+    // diagnostic value of this chart and have to be turned off explicitly:
+    //   interpolation 'bezier' (default) draws CURVED lines between samples
+    //     and rounds off sharp peaks; 'linear' connects actual sample points
+    //     with straight segments so peak position and value are preserved.
+    //   scaleSmoothing 0.125 (default) animates Y-axis range changes slowly,
+    //     so a tall peak briefly clips at the top before the axis "catches
+    //     up"; 1.0 snaps the axis instantly so peaks appear at correct height.
+    interpolation: 'linear',
+    scaleSmoothing: 1.0,
     grid: {
       strokeStyle: "rgba(255,255,255,0.25)",
       sharpLines: true,
@@ -1770,7 +1804,11 @@ async function createRssiChart() {
     strokeStyle: "none",
     fillStyle: "hsla(45, 100%, 60%, 0.55)",
   });
-  rssiChart.streamTo(document.getElementById("rssiChart"), 200);
+  // streamTo's second arg is a deliberate render delay used to let the chart
+  // smooth-scroll without flicker.  200ms (the original value) was the single
+  // largest contributor to perceived live-view lag.  50ms is enough buffer
+  // for the 100ms SSE rate while keeping the trace visibly close to real-time.
+  rssiChart.streamTo(document.getElementById("rssiChart"), 50);
 }
 
 function openTab(evt, tabName) {
