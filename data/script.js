@@ -1573,21 +1573,11 @@ function addRssiPoint() {
       } else if (!crossing && rssiValue > enterRssi) {
         crossing = true;
       }
-      // Y-axis range tracker: rises instantly to new extremes (so peaks aren't
-      // clipped) but decays back toward the current sample over ~5 s of quiet
-      // data (so the chart doesn't stay zoomed out forever after a single
-      // historical peak).  Decay alpha 0.02 at 10 Hz cycle ≈ 50-sample tau.
-      const RSSI_RANGE_DECAY = 0.02;
-      if (rssiValue > maxRssiValue) {
-        maxRssiValue = rssiValue;
-      } else {
-        maxRssiValue -= (maxRssiValue - rssiValue) * RSSI_RANGE_DECAY;
-      }
-      if (rssiValue < minRssiValue) {
-        minRssiValue = rssiValue;
-      } else {
-        minRssiValue += (rssiValue - minRssiValue) * RSSI_RANGE_DECAY;
-      }
+      // Y-axis range tracker: monotonically expands to fit observed extremes,
+      // never contracts within a session.  Reset on Calibration tab exit
+      // (see `else` branch below) so each visit starts fresh.
+      maxRssiValue = Math.max(maxRssiValue, rssiValue);
+      minRssiValue = Math.min(minRssiValue, rssiValue);
     }
 
     // update horizontal lines and min max values
