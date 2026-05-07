@@ -78,16 +78,12 @@ class LapTimer {
     uint8_t rssi_window[7];
     uint8_t rssi_window_index;
 
-    // V1 filter state (converted from static locals so start() can reset them)
+    // Pre-filter pipeline state (Kalman → Median-3 → MA → EMA → step limiter)
     uint8_t v1KHist[3];     // Median-of-3 history buffer
     uint8_t v1KHistIdx;
     float   v1Ema;          // EMA accumulator (NAN = uninitialised)
     bool    v1OutInit;      // Step-limiter has a valid previous sample
     uint8_t v1OutPrev;      // Step-limiter previous output
-
-    // V2 filter state (RotorHazard Bessel IIR)
-    float   v2Bv[3];        // IIR state variables
-    uint32_t v2PeakDurationMs;  // How long filtered RSSI has sat at peak value
 
     uint8_t rssiPeak;
     uint32_t rssiPeakTimeMs;
@@ -96,17 +92,9 @@ class LapTimer {
     // Gate state tracking / debounce helpers
     bool gateExited;          // True when gate has re-armed (sustained below exit after last lap)
     bool enteredGate;         // True once we have crossed the enter threshold
-    uint8_t enterHoldSamples; // V1 + V3: consecutive samples at/above enter (debounce counter)
-    uint32_t enterHoldStartMs;// V3 only: timestamp of first at-enter sample (used for ceiling-drift watchdog)
-    bool gate1Armed;          // V3 only: Gate-1 bootstrap fired for current race
-    uint8_t gateCloseCount;   // V2 only: consecutive samples below exit — used for re-arm latch
-    uint8_t lastFilterMode;   // tracks filterMode changes so Kalman gains can be re-applied at runtime
-
-    // Threshold-smoothing IIR — heavily smoothed Bessel output used exclusively
-    // for enter/exit STATE decisions.  The peak value + timestamp still come from
-    // the responsive Bessel output so timing is unaffected.
-    float   _threshSmooth;
-    uint8_t _threshSmoothOut;
+    uint8_t enterHoldSamples; // Consecutive samples at/above enter (debounce counter)
+    uint32_t enterHoldStartMs;// Timestamp of first at-enter sample (used for ceiling-drift watchdog)
+    bool gate1Armed;          // Gate-1 bootstrap fired for current race
 
 #if RSSI_STREAM_ENABLED
     // USB RSSI stream (toggle via /api/rssistream)
@@ -143,20 +131,9 @@ private:
     float totalDistanceTravelled;
     float distanceRemaining;
 
-    void lapPeakCapture();   // dispatcher — calls V1/V2/V3 internal based on filterMode
-    bool lapPeakCaptured();  // dispatcher — calls V1/V2/V3 internal based on filterMode
+    void lapPeakCapture();
+    bool lapPeakCaptured();
     void lapPeakReset();
-
-    // Per-mode internals — keep detection logic isolated so changing one mode
-    // can't accidentally regress another.  Names describe the *behaviour*, not
-    // the user-facing V-number, so future renumbering only touches the
-    // dispatcher in lapPeakCapture()/lapPeakCaptured().
-    void lapPeakCapture_FpvGate();      // V1 (default) — verbatim upstream FPVGate
-    bool lapPeakCaptured_FpvGate();
-    void lapPeakCapture_FpvRaceOne();   // V2 — FPVRaceOne Path B (simplified)
-    bool lapPeakCaptured_FpvRaceOne();
-    void lapPeakCapture_RotorHazard();  // V3 — raw + Bessel + threshSmooth
-    bool lapPeakCaptured_RotorHazard();
 
     void startLap();
     void finishLap();

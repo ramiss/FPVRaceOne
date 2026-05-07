@@ -50,27 +50,20 @@ The time between consecutive peaks is your lap time. Two configurable signal pro
 - **USB Serial CDC** — zero-latency wired connection
 - Electron desktop app for Windows / Mac / Linux
 
-### Signal Processing — V1 and V2 Modes
+### Signal Processing
 
-Two runtime-switchable RSSI processing pipelines, selectable from the Settings page:
+A single 5-stage RSSI processing pipeline based on the upstream FPVGate algorithm:
+**Kalman → Median-of-3 → 7-sample moving average → EMA → step limiter**
 
-**V1 — FPVGate Multi-Stage Pipeline**
-- Kalman filter → Median-of-3 → 7-sample moving average → EMA → step limiter
-- Tunable Enter Hold Samples and Exit Confirm Samples for debounce control
-- Best for noisy environments where extra smoothing reduces false laps
-
-**V2 — RotorHazard Bessel IIR Filter**
-- 2nd-order Bessel low-pass filter at selectable cutoff: **100 Hz / 50 Hz / 20 Hz**
-- Single-sample gate entry and exit (trusts the filter rather than hold counters)
-- Lap timestamp placed at the midpoint of the signal peak plateau for improved accuracy
-- Best for clean environments where low latency is the priority
+- Optional Gate-1 Bootstrap for first-lap detection in close-pattern layouts
+- 3-second ceiling-drift watchdog prevents phantom laps from RSSI drift
+- Tunable EMA smoothing slider (0–10, default 5 = upstream behaviour)
 
 ### RSSI Calibration Wizard
 - Guided fly-over recording with real-time RSSI chart
-- Automatic Enter / Exit threshold calculation from the recorded peak
+- Automatic Enter / Exit threshold calculation from the recorded peaks
 - Visual calibration overview overlaid on the live scanner
 - Pause / resume live signal view for threshold fine-tuning
-- Works identically in both V1 and V2 modes
 
 ### Voice Announcements
 - Pre-recorded ElevenLabs voices (4 voices included)
@@ -222,8 +215,6 @@ Select **Filesystem** in the ElegantOTA UI, upload `littlefs.bin`, and the devic
 ## Credits
 
 FPVRaceOne is derived from [FPVGate](https://github.com/LouisHitchcock/FPVGate) v1.2.0 by LouisHitchcock, which is itself a heavily modified fork of [PhobosLT](https://github.com/phobos-/PhobosLT) by phobos-. The original project provided the foundation for RSSI-based lap timing on ESP32.
-
-Signal processing concepts and Bessel IIR filter coefficients for V2 mode are derived from [RotorHazard](https://github.com/RotorHazard/RotorHazard).
 
 ---
 

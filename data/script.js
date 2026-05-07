@@ -1105,15 +1105,6 @@ onload = async function (e) {
     if (nodeModeSelectEarly && configData.nodeMode !== undefined) {
       nodeModeSelectEarly.value = String(configData.nodeMode);
     }
-    // Same for filterMode — needed so the Calibration tab's live-view banner
-    // reflects the active mode even if the user never opens settings.
-    const filterModeEarly = document.getElementById('filterModeSelect');
-    if (filterModeEarly && configData.filterMode !== undefined) {
-      filterModeEarly.value = String(configData.filterMode);
-    }
-    if (typeof updateCalibLiveBanner === 'function') {
-      updateCalibLiveBanner(configData.filterMode);
-    }
     const masterSSIDEarly = document.getElementById('masterSSIDInput');
     if (masterSSIDEarly && configData.masterSSID !== undefined) {
       masterSSIDEarly.value = configData.masterSSID;
@@ -2116,15 +2107,6 @@ function buildConfigSnapshotFromUI() {
     })(),
 
     // Signal processing
-    filterMode: (() => {
-      const el = document.getElementById('filterModeSelect');
-      return el ? parseInt(el.value, 10) : 0;
-    })(),
-    besselLevel: (() => {
-      const el = document.getElementById('besselLevel');
-      const v = el ? parseInt(el.value, 10) : 0;
-      return Number.isFinite(v) ? Math.min(10, Math.max(0, v)) : 0;
-    })(),
     gate1Bootstrap: (() => {
       const el = document.getElementById('gate1BootstrapToggle');
       return (el && el.checked) ? 1 : 0;
@@ -5500,41 +5482,6 @@ function updateWizardStatus(text) {
   document.getElementById('wizardMarkingStatus').textContent = text;
 }
 
-// Measure FWHM (full width at half-max) of a peak in samples.
-// Walks outward from peakIdx until samples drop below halfway between the
-// peak and the nearby baseline.  Used to recommend a conservative Bessel
-// level that won't crush the narrowest pass.
-function measurePeakFWHM(rssiValues, peakIdx) {
-  if (peakIdx <= 0 || peakIdx >= rssiValues.length - 1) return 0;
-  const peakVal = rssiValues[peakIdx];
-  const lookback  = Math.min(300, peakIdx);
-  const lookahead = Math.min(300, rssiValues.length - 1 - peakIdx);
-  let baseline = peakVal;
-  for (let i = peakIdx - lookback; i <= peakIdx + lookahead; i++) {
-    if (rssiValues[i] < baseline) baseline = rssiValues[i];
-  }
-  const halfMax = baseline + (peakVal - baseline) / 2;
-  let leftIdx = peakIdx;
-  while (leftIdx > 0 && rssiValues[leftIdx] >= halfMax) leftIdx--;
-  let rightIdx = peakIdx;
-  while (rightIdx < rssiValues.length - 1 && rssiValues[rightIdx] >= halfMax) rightIdx++;
-  return rightIdx - leftIdx;
-}
-
-// Map narrowest-peak FWHM (in samples) to a Bessel level.  Bias conservative —
-// pick the highest level whose effective time constant is comfortably less
-// than the peak width, then back off one notch.
-function recommendBesselLevel(fwhmSamples) {
-  if (fwhmSamples < 10)  return 0;
-  if (fwhmSamples < 18)  return 1;
-  if (fwhmSamples < 28)  return 2;
-  if (fwhmSamples < 40)  return 3;
-  if (fwhmSamples < 60)  return 4;
-  if (fwhmSamples < 90)  return 5;
-  if (fwhmSamples < 130) return 6;
-  return 7;
-}
-
 async function calculateThresholds() {
   if (wizardState.markers.length !== 3) {
     alert('Please mark all 3 peaks before calculating thresholds');
@@ -5602,73 +5549,20 @@ async function calculateThresholds() {
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit  = calculatedExit;
 
-  // V1 (verbatim upstream FPVGate) does not use the Bessel post-stage — skip
-  // the FWHM-based recommendation entirely.  V2 and V3 do use Bessel, so
-  // measure the narrowest peak and recommend a conservative level.
-  const filterMode = (() => {
-    const el = document.getElementById('filterModeSelect');
-    return el ? parseInt(el.value, 10) : 0;
-  })();
-  const isUpstream = (filterMode === 0);
-
-  let minFwhm = 0;
-  let recommendedBessel = 0;
-  if (!isUpstream) {
-    const fwhms = markers.map(m => measurePeakFWHM(allRssiValues, m.index));
-    minFwhm = Math.max(0, Math.min(...fwhms));
-    recommendedBessel = recommendBesselLevel(minFwhm);
-  }
-  wizardState.filterMode        = filterMode;
-  wizardState.recommendedBessel = isUpstream ? null : recommendedBessel;
-  wizardState.minFwhm           = minFwhm;
-
   console.log('[Wizard] peaks:', peakRssis, 'minPeak:', minPeak, 'noiseFloor:', noiseFloor);
-  console.log('[Wizard] final:',
-      { enter: calculatedEnter, exit: calculatedExit, mode: filterMode,
-        minFwhm: isUpstream ? 'n/a' : minFwhm,
-        recommendedBessel: isUpstream ? 'n/a (V1 upstream)' : recommendedBessel });
+  console.log('[Wizard] final:', { enter: calculatedEnter, exit: calculatedExit });
 
   // Show results
   hideWizardProcessing();
   document.getElementById('wizardResults').style.display = 'block';
   document.getElementById('calculatedEnterRssi').textContent = calculatedEnter;
   document.getElementById('calculatedExitRssi').textContent = calculatedExit;
-
-  // Hide Bessel-specific rows entirely in V1 — they don't apply to upstream's
-  // pipeline and would mislead the user about what's being saved.
-  const besselRow      = document.getElementById('recommendedBesselRow');
-  const fwhmRow        = document.getElementById('measuredFwhmRow');
-  const noteWithBessel = document.getElementById('wizardNoteWithBessel');
-  const noteNoBessel   = document.getElementById('wizardNoteNoBessel');
-  if (besselRow)      besselRow.style.display      = isUpstream ? 'none' : '';
-  if (fwhmRow)        fwhmRow.style.display        = isUpstream ? 'none' : '';
-  if (noteWithBessel) noteWithBessel.style.display = isUpstream ? 'none' : '';
-  if (noteNoBessel)   noteNoBessel.style.display   = isUpstream ? '' : 'none';
-  if (!isUpstream) {
-    document.getElementById('recommendedBesselLevel').textContent = recommendedBessel;
-    document.getElementById('measuredFwhm').textContent           = minFwhm;
-  }
 }
 
 function applyCalculatedThresholds() {
-  // Apply to sliders
   if (enterRssiInput) { enterRssiInput.value = wizardState.calculatedEnter; updateEnterRssi(enterRssiInput, wizardState.calculatedEnter); }
   if (exitRssiInput)  { exitRssiInput.value  = wizardState.calculatedExit;  updateExitRssi(exitRssiInput,  wizardState.calculatedExit);  }
-
-  // Apply recommended Bessel level — V2/V3 only.  V1 ignores the Bessel
-  // post-stage entirely (matches upstream FPVGate verbatim), so we leave the
-  // slider alone and rely on stagedConfig forcing it to 0 via onFilterModeChange.
-  if (typeof wizardState.recommendedBessel === 'number') {
-    const slider = document.getElementById('besselLevel');
-    const span = document.getElementById('besselLevelSpan');
-    if (slider) slider.value = wizardState.recommendedBessel;
-    if (span)   span.textContent = wizardState.recommendedBessel;
-  }
-
-  // Save to backend
   saveConfig();
-
-  // Close wizard
   closeCalibrationWizard();
 }
 
@@ -5836,23 +5730,7 @@ function applyWiFiSettings() {
   }, 500);
 }
 
-function updateBesselLevel(value) {
-  const v = Math.min(10, Math.max(0, parseInt(value, 10) || 0));
-  const slider = document.getElementById('besselLevel');
-  const span = document.getElementById('besselLevelSpan');
-  if (slider) slider.value = v;
-  if (span) span.textContent = v;
-  if (typeof autoSaveConfig === 'function') autoSaveConfig();
-}
-
-function stepBessel(delta) {
-  const slider = document.getElementById('besselLevel');
-  if (!slider) return;
-  const v = Math.min(10, Math.max(0, (parseInt(slider.value, 10) || 0) + delta));
-  updateBesselLevel(v);
-}
-
-// V1+V2 pipeline EMA smoothing slider (0=lightest, 5=upstream default, 10=heaviest).
+// Pipeline EMA smoothing slider (0=lightest, 5=upstream default, 10=heaviest).
 function updateV1Smoothing(value) {
   const v = Math.min(10, Math.max(0, parseInt(value, 10) || 0));
   const slider = document.getElementById('v1Smoothing');
@@ -5869,81 +5747,6 @@ function stepV1Smoothing(delta) {
   updateV1Smoothing(v);
 }
 
-// Show/hide per-mode tuning controls based on the selected Filter Mode.
-//   V1 (FPVRaceOne)    : Pipeline Smoothing visible, Gate-1 visible, Bessel hidden
-//   V2 (Experimental 1): Pipeline Smoothing visible, Gate-1 hidden,  Bessel visible
-//   V3 (Experimental 2): Pipeline Smoothing hidden,  Gate-1 hidden,  Bessel visible
-function onFilterModeChange() {
-  const sel = document.getElementById('filterModeSelect');
-  if (!sel) return;
-  const mode = parseInt(sel.value, 10);
-  const isV1 = (mode === 0);
-  const isV3 = (mode === 2);
-  const v1SmoothingGroup = document.getElementById('v1SmoothingGroup');
-  const besselGroup      = document.getElementById('besselGroup');
-  const gate1Group       = document.getElementById('gate1BootstrapGroup');
-  if (v1SmoothingGroup) v1SmoothingGroup.style.display = isV3 ? 'none' : '';  // V1 + V2 only
-  if (besselGroup)      besselGroup.style.display      = isV1 ? 'none' : '';  // V2 + V3 only
-  if (gate1Group)       gate1Group.style.display       = isV1 ? '' : 'none';  // V1 only
-
-  // Force the Bessel slider to 0 when V1 is selected so the saved config
-  // matches the firmware's behaviour (firmware ignores Bessel in V1 mode,
-  // but persisting 0 keeps the UI visually consistent if the user switches
-  // away from V1 later).
-  if (isV1) {
-    const slider = document.getElementById('besselLevel');
-    const span   = document.getElementById('besselLevelSpan');
-    if (slider && parseInt(slider.value, 10) !== 0) {
-      slider.value = 0;
-      if (span) span.textContent = 0;
-    }
-  }
-
-  // Keep the calibration tab's live-view banner in sync — the diagnostic
-  // explanation is filter-mode-specific.
-  updateCalibLiveBanner(mode);
-}
-
-// Updates the small banner above the live RSSI chart on the Calibration tab.
-// The banner explains exactly what the chart represents for the active filter
-// mode, so the user can interpret the visible peaks correctly when picking
-// thresholds.  V3 (RotorHazard) has a hidden internal signal (_threshSmooth)
-// that drives exit decisions — we call that out so users aren't surprised.
-function updateCalibLiveBanner(mode) {
-  const el = document.getElementById('calibLiveBannerText');
-  if (!el) return;
-  // Allow callers without a mode arg to look it up themselves.
-  if (typeof mode !== 'number') {
-    const sel = document.getElementById('filterModeSelect');
-    mode = sel ? parseInt(sel.value, 10) : 0;
-  }
-  let html;
-  switch (mode) {
-    case 1:
-      html =
-        '<strong>V2 — Experimental 1:</strong> chart shows the full pipeline ' +
-        'output (Kalman → median → MA → EMA → step limiter) followed by the ' +
-        'optional Bessel post-stage. This is exactly what V2 uses for both ' +
-        'peak detection and enter/exit decisions — what you see is what you get.';
-      break;
-    case 2:
-      html =
-        '<strong>V3 — Experimental 2:</strong> chart shows raw RSSI ' +
-        '<em>after</em> the optional Bessel post-stage. This is what V3 uses ' +
-        'for peak detection. <strong>Note:</strong> exit decisions in V3 use ' +
-        'an internal smoothed signal — the visible line may briefly dip below ' +
-        'Exit during a single pass without ending the lap.';
-      break;
-    default:
-      html =
-        '<strong>V1 — FPVRaceOne (default):</strong> chart shows the full ' +
-        'pipeline output (Kalman → median → MA → EMA → step limiter). No ' +
-        'Bessel is applied. This is exactly what V1 uses for both peak ' +
-        'detection and enter/exit decisions — what you see is what you get.';
-      break;
-  }
-  el.innerHTML = html;
-}
 
 function rebootDevice() {
   if (!confirm('Reboot the device now?')) return;
@@ -6984,18 +6787,7 @@ function openSettingsModal() {
           txPowerInput.value = config.wifiTxPower;
         }
 
-        // Signal processing mode
-        const filterModeSelect = document.getElementById('filterModeSelect');
-        if (filterModeSelect && config.filterMode !== undefined) {
-          filterModeSelect.value = config.filterMode;
-        }
-        const besselSlider = document.getElementById('besselLevel');
-        const besselSpan = document.getElementById('besselLevelSpan');
-        if (besselSlider && config.besselLevel !== undefined) {
-          const v = Math.min(10, Math.max(0, parseInt(config.besselLevel, 10) || 0));
-          besselSlider.value = v;
-          if (besselSpan) besselSpan.textContent = v;
-        }
+        // Signal processing
         const gate1Toggle = document.getElementById('gate1BootstrapToggle');
         const gate1Label  = document.getElementById('gate1BootstrapLabel');
         if (gate1Toggle && config.gate1Bootstrap !== undefined) {
@@ -7009,8 +6801,6 @@ function openSettingsModal() {
           v1SmoothingSlider.value = Number.isFinite(v) ? v : 5;
           if (v1SmoothingSpan) v1SmoothingSpan.textContent = v1SmoothingSlider.value;
         }
-        // Apply visibility rules now that filterMode is set.
-        if (typeof onFilterModeChange === 'function') onFilterModeChange();
 
         // Multi-node settings
         // Update mnNodeMode FIRST so onNodeModeChange() (which calls

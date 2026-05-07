@@ -60,7 +60,7 @@ USB and WiFi operate simultaneously. A race director can control the timer via U
 
 ## Signal Processing
 
-Two complete RSSI processing pipelines are available, switchable at runtime via **Settings → Signal Processing**. Both read the same raw ADC value and write to the same RSSI history buffer, so the calibration wizard and all gate detection logic work identically regardless of which mode is selected.
+A single RSSI processing pipeline based verbatim on the upstream FPVGate algorithm.
 
 ### ADC Input
 
@@ -69,47 +69,33 @@ Two complete RSSI processing pipelines are available, switchable at runtime via 
 - **Scale:** 1 V ≈ 2340 counts; full-scale divisor = 2400
 - **Output:** 0–255 (8-bit, clamped)
 
-### V1 — FPVRaceOne Multi-Stage Pipeline
+### Multi-Stage Pipeline
 
 A sequential chain of five filter stages:
 
 | Stage | Filter | Parameters |
 |-------|--------|------------|
-| 1 | Kalman | Q = 5.0 (process noise), R = 8.0 (measurement noise) |
+| 1 | Kalman | Process noise = 0.002, Measurement noise = 9.0 (upstream FPVGate gains) |
 | 2 | Median-of-3 | Rolling 3-sample window |
 | 3 | Moving average | 7-sample window |
-| 4 | EMA | α = 0.15 |
+| 4 | EMA | α = 0.03–0.50, user-tunable via Pipeline Smoothing slider (default 0.15) |
 | 5 | Step limiter | Max ±12 counts per sample |
 
-**Gate detection (V1):**
-- **Enter Hold Samples** (configurable, default 4) — consecutive samples at or above Enter RSSI before gate entry is registered
-- **Exit Confirm Samples** (configurable, default 2) — consecutive samples below Exit RSSI before gate exit is confirmed
+### Gate Detection
 
-All filter state is reset at race start so stale data from a previous race cannot affect the first lap.
+- **4-sample enter debounce** — consecutive samples at or above Enter RSSI before peak tracking starts
+- **2-sample raw exit confirm** — direct comparison against the unsmoothed sample buffer to avoid slow-falling smoothed signals masking the exit
+- **Peak must exceed exit by ≥5 counts** to be considered a valid lap
+- **Ceiling-drift watchdog** — if "in gate" for >3 s without an exit, state is force-reset (the antenna RSSI must have drifted up to enter)
 
-### V2 — RotorHazard Bessel IIR
+### Optional Gate-1 Bootstrap
 
-A single 2nd-order Bessel infinite impulse response filter applied directly to raw RSSI. Coefficients are ported from the RotorHazard open-source project.
+When enabled, the first lap of a race is special-cased so a drone already inside the gate at race start still produces a clean first lap:
 
-| Cutoff | b₀ | a₁ | a₂ | Character |
-|--------|----|----|-----|-----------|
-| 100 Hz | 9.054e-2 | −0.24114 | 0.87898 | Fastest / least smoothing |
-| 50 Hz | 2.921e-2 | −0.49774 | 1.38090 | Balanced |
-| 20 Hz | 5.593e-3 | −0.75788 | 1.73551 | Smoothest / most lag |
-
-Output formula: `out = v[0] + v[2] + 2·v[1]` (DC gain = 1.0 — verified analytically).
-
-**Gate detection (V2):**
-- Single-sample entry and exit (trusts the filter rather than hold counters)
-- Lap timestamp placed at the **midpoint of the signal peak plateau**: `peakTime + peakDuration / 2`
-
-### Kalman Filter (V1)
-
-Standard Kalman predictor-corrector:
-
-- **Q (process noise)** — How fast the true signal can change. Higher Q = more responsive, more noise passes through.
-- **R (measurement noise)** — How noisy the ADC is. Higher R = more smoothing, more lag.
-- Steady-state gain ≈ 43% at Q=5, R=8 (29× more responsive than the original misconfigured defaults).
+- Relaxed effective enter threshold (~exit + 4 counts)
+- Lower 2-sample debounce
+- Lower 3-count peak-above-exit margin
+- If RSSI at race start is already ≥ enter, the peak is seeded so the first confirmed exit counts as Gate 1
 
 ---
 

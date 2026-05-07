@@ -125,40 +125,26 @@ Band and channel changes are **auto-saved** immediately on selection.
 
 ### Signal Processing
 
-Choose between two RSSI processing pipelines — switchable at any time without restarting.
-
-#### V1 — FPVRaceOne Multi-Stage Pipeline (Default)
+A single RSSI processing pipeline based verbatim on the upstream FPVGate algorithm.
 
 Applies a chain of filters in sequence:
 
 1. **Kalman filter** — Tracks signal dynamics while rejecting ADC noise
 2. **Median-of-3** — Removes isolated spike samples
 3. **Moving average (7 samples)** — Smooths the signal
-4. **EMA (α = 0.15)** — Additional low-pass smoothing
+4. **EMA** — User-tunable low-pass via the **Pipeline Smoothing** slider (default level 5 = α 0.15 = upstream behaviour; lower = less lag, higher = more smoothing)
 5. **Step limiter (±12/sample)** — Prevents single-sample teleport jumps
 
-**Detection parameters (V1 only):**
+**Detection parameters (built in, not exposed):**
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| **Enter Hold Samples** | Consecutive samples at/above Enter RSSI required before registering gate entry | 4 |
-| **Exit Confirm Samples** | Consecutive samples below Exit RSSI required to confirm exit | 2 |
+| Parameter | Default | Notes |
+|-----------|---------|-------|
+| Enter hold samples | 4 | Consecutive samples at/above Enter RSSI before peak tracking starts |
+| Exit confirm samples | 2 | Consecutive raw samples below Exit RSSI to confirm exit |
+| Peak min above exit | 5 | Peak must exceed Exit by at least this many counts to count as a lap |
+| Ceiling-drift watchdog | 3 s | If "in gate" longer than this without exit, state is force-reset |
 
-Higher values = more debounce, fewer false triggers; lower values = faster response.
-
-#### V2 — RotorHazard Bessel IIR
-
-A single 2nd-order Bessel low-pass filter applied directly to raw RSSI. Cutoff frequency is configurable:
-
-| Setting | Cutoff | Character |
-|---------|--------|-----------|
-| 100 Hz | Fastest | Minimal lag, some noise passes through |
-| 50 Hz | Balanced | Good compromise for most environments |
-| 20 Hz | Smoothest | Maximum noise rejection, most lag |
-
-V2 uses single-sample gate entry/exit (no hold counters) and places the lap timestamp at the **midpoint of the signal peak plateau** for improved accuracy.
-
-**When to use V2:** Clean RF environments where low lag matters more than noise rejection.
+**Gate-1 Bootstrap (toggle):** When on, the first lap of a race is special-cased so a drone already inside the gate at race start still produces a clean first lap (relaxed enter, lower 2-sample debounce, 3-count peak margin). When off, Gate 1 behaves like any other gate.
 
 ### LED Setup
 

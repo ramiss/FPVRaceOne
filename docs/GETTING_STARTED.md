@@ -145,13 +145,13 @@ Fly through the gate once more and check that the Calibration tab shows a single
 - Lower Enter RSSI by 5 points
 - Confirm the VTx has warmed up (30 seconds minimum)
 - Check band and channel are set correctly
-- Try switching to **V2 (RotorHazard Bessel IIR)** mode in Settings → Signal Processing for lower-latency detection
+- In Settings → Signal Processing, lower the **Pipeline Smoothing** slider to reduce signal lag
 
 ### False / Extra Laps
 
 - Increase **Minimum Lap Time** in Settings → Race Setup
 - Raise Exit RSSI by 5 points
-- In V1 mode, increase **Enter Hold Samples** (Settings → Signal Processing → Detection) to require more consecutive samples before registering an entry
+- In Settings → Signal Processing, raise the **Pipeline Smoothing** slider for extra noise rejection
 - Move the timer further from the flight path
 
 ### Can't Connect to Web Interface

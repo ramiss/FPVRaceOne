@@ -254,11 +254,8 @@
           <button id="startWizardButton" onclick="startCalibrationWizard()" style="width: 100%; padding: 12px; font-size: 16px; background-color: var(--primary-color);">Start Calibration Wizard</button>
         </div>
 
-        <!-- Live-view diagnostic banner — populated by updateCalibLiveBanner() based on
-             the current filterMode so the user knows exactly what signal the chart shows
-             and how it relates to lap detection in that mode. -->
         <div id="calibLiveBanner" style="margin: 0 0 8px 0; padding: 8px 12px; background-color: var(--bg-secondary); border-radius: 6px; font-size: 12px; color: var(--secondary-color);">
-          <span id="calibLiveBannerText">Live RSSI feed</span>
+          <span id="calibLiveBannerText">Live RSSI feed — final pipeline output (raw → Kalman → median-3 → MA → EMA → step limiter). This is what lap detection sees.</span>
         </div>
 
         <div>
@@ -502,20 +499,9 @@
               <label>Calculated Exit RSSI:</label>
               <span id="calculatedExitRssi" class="result-value">--</span>
             </div>
-            <div class="result-item" id="recommendedBesselRow">
-              <label>Recommended Bessel Level:</label>
-              <span id="recommendedBesselLevel" class="result-value">--</span>
-            </div>
-            <div class="result-item" id="measuredFwhmRow" style="font-size: 12px; color: var(--secondary-color);">
-              <label>Narrowest peak width (samples):</label>
-              <span id="measuredFwhm" class="result-value">--</span>
-            </div>
           </div>
-          <div id="wizardNoteWithBessel" style="margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
-            <strong>Note:</strong> Thresholds and Bessel level are calculated from your lap data with conservative safety margins. The recommended Bessel level errs on the side of less smoothing — increase manually if you race in noisier environments. You can fine-tune any of these manually after applying.
-          </div>
-          <div id="wizardNoteNoBessel" style="display:none; margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
-            <strong>Note:</strong> V1 (FPVRaceOne) does not use the Bessel post-stage, so only Enter / Exit thresholds are calculated. The signal you saw on the chart is exactly what V1 uses for peak detection — adjust manually after applying if needed.
+          <div style="margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
+            <strong>Note:</strong> Thresholds are calculated from your lap data with conservative safety margins. The signal you saw on the chart is exactly what lap detection uses — adjust manually after applying if needed.
           </div>
           <div style="display: flex; gap: 12px; margin-top: 16px;">
             <button onclick="applyCalculatedThresholds()" style="flex: 1;">Apply Thresholds</button>
@@ -1072,80 +1058,39 @@
               <div style="margin-bottom: 16px; padding: 12px; background-color: var(--bg-secondary); border-radius: 8px; font-size: 14px;">
                 <p style="margin: 0 0 8px 0;"><strong>Tune how the timer interprets RSSI before deciding a lap has occurred.</strong></p>
                 <p style="margin: 0; color: var(--secondary-color);">
-                  Most users should run the <em>Calibration Wizard</em> first — it picks a sensible Bessel level from your actual peak shape. Come here if you want to fine-tune by hand or switch the filter algorithm.
+                  Most users should run the <em>Calibration Wizard</em> first. Come here if you want to fine-tune by hand.
                 </p>
               </div>
 
-              <h3>Filter Mode</h3>
+              <h3>Pipeline Smoothing</h3>
               <div class="config-item">
-                <label for="filterModeSelect">Filter Mode:</label>
-                <select id="filterModeSelect" onchange="onFilterModeChange(); autoSaveConfig()">
-                  <option value="0">V1 — FPVRaceOne (default)</option>
-                  <option value="1">V2 — Experimental 1</option>
-                  <option value="2">V3 — Experimental 2</option>
-                </select>
+                <label for="v1Smoothing">Smoothing:</label>
+                <div class="input-with-value">
+                  <span id="v1SmoothingSpan" class="val">5</span>
+                  <div class="rssi-step-btns">
+                    <button class="rssi-step-btn" type="button" onclick="stepV1Smoothing(-1)">−</button>
+                    <button class="rssi-step-btn" type="button" onclick="stepV1Smoothing(1)">+</button>
+                  </div>
+                  <input type="range" min="0" max="10" step="1" id="v1Smoothing" value="5" oninput="updateV1Smoothing(this.value)" />
+                </div>
               </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 12px;">
-                <strong>V1 — FPVRaceOne (recommended)</strong>: full 5-stage signal-processing pipeline (Kalman → median → moving average → EMA → step limiter) with the optional Gate-1 bootstrap below and a 3-second ceiling-drift watchdog. Smoothest peaks; works well in most environments. No Bessel post-stage.<br>
-                <strong>V2 — Experimental 1</strong>: same 5-stage pipeline as V1 but with lighter Kalman gains and a simpler detection state machine (4-sample enter / 2-sample exit debounce). Bessel slider available for extra smoothing. Try this if V1 produces lag or misses fast passes.<br>
-                <strong>V3 — Experimental 2</strong>: raw RSSI passthrough with no pre-filter, relying entirely on the Bessel slider for smoothing. Lowest possible detection latency at Bessel = 0; useful for very clean signals or for measuring raw RX5808 output.
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                Tunes the EMA stage of the 5-stage pipeline (Kalman → median-3 → moving average → EMA → step limiter). <strong>5 (default) = upstream FPVGate behaviour</strong>. Lower values reduce signal lag at the cost of letting more noise through; higher values add extra smoothing.
               </div>
 
-              <!-- V1+V2 pipeline EMA smoothing: hidden when V3 selected (V3 has no pipeline) -->
-              <div id="v1SmoothingGroup">
-                <h3>Pipeline Smoothing</h3>
-                <div class="config-item">
-                  <label for="v1Smoothing">Smoothing:</label>
-                  <div class="input-with-value">
-                    <span id="v1SmoothingSpan" class="val">5</span>
-                    <div class="rssi-step-btns">
-                      <button class="rssi-step-btn" type="button" onclick="stepV1Smoothing(-1)">−</button>
-                      <button class="rssi-step-btn" type="button" onclick="stepV1Smoothing(1)">+</button>
-                    </div>
-                    <input type="range" min="0" max="10" step="1" id="v1Smoothing" value="5" oninput="updateV1Smoothing(this.value)" />
-                  </div>
-                </div>
-                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                  Tunes the EMA stage of the V1/V2 pipeline. <strong>5 (default) = upstream FPVGate behaviour</strong>. Lower values reduce signal lag at the cost of letting more noise through; higher values add extra smoothing on top of upstream's design. Doesn't apply in V3.
+              <h3>Gate-1 Bootstrap</h3>
+              <div class="config-item">
+                <label for="gate1BootstrapToggle">Gate-1 Bootstrap:</label>
+                <div style="flex: 1;">
+                  <label class="switch">
+                    <input type="checkbox" id="gate1BootstrapToggle" onchange="document.getElementById('gate1BootstrapLabel').textContent=this.checked?'On':'Off'; stagedConfig['gate1Bootstrap']=this.checked?1:0; stagedDirty=true; updateSaveButton()">
+                    <span class="slider"></span>
+                  </label>
+                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="gate1BootstrapLabel">Off</span>
                 </div>
               </div>
-
-              <!-- Bessel: hidden when V3 selected (V3 forces level=0 in firmware too) -->
-              <div id="besselGroup">
-                <h3>Bessel Smoothing</h3>
-                <div class="config-item">
-                  <label for="besselLevel">Bessel:</label>
-                  <div class="input-with-value">
-                    <span id="besselLevelSpan" class="val">0</span>
-                    <div class="rssi-step-btns">
-                      <button class="rssi-step-btn" type="button" onclick="stepBessel(-1)">−</button>
-                      <button class="rssi-step-btn" type="button" onclick="stepBessel(1)">+</button>
-                    </div>
-                    <input type="range" min="0" max="10" step="1" id="besselLevel" value="0" oninput="updateBesselLevel(this.value)" />
-                  </div>
-                </div>
-                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                  Independent low-pass filter applied <em>after</em> the Filter Mode pipeline. <strong>0 = off</strong> (recommended starting point); higher values reduce noise and false positives but risk lag or missed detection on fast passes.
-                  Only increase in noisy environments. The calibration wizard will recommend a conservative value based on your narrowest measured peak.
-                </div>
-              </div>
-
-              <!-- Gate-1 Bootstrap: V1 only -->
-              <div id="gate1BootstrapGroup" style="display:none;">
-                <h3>Gate-1 Bootstrap (V1 only)</h3>
-                <div class="config-item">
-                  <label for="gate1BootstrapToggle">Gate-1 Bootstrap:</label>
-                  <div style="flex: 1;">
-                    <label class="switch">
-                      <input type="checkbox" id="gate1BootstrapToggle" onchange="document.getElementById('gate1BootstrapLabel').textContent=this.checked?'On':'Off'; stagedConfig['gate1Bootstrap']=this.checked?1:0; stagedDirty=true; updateSaveButton()">
-                      <span class="slider"></span>
-                    </label>
-                    <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="gate1BootstrapLabel">Off</span>
-                  </div>
-                </div>
-                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                  When <strong>on</strong>, V1 special-cases the first lap of a race: if the drone is already in the gate at start (RSSI ≥ enter), the first confirmed exit counts as Gate 1, with relaxed thresholds (~exit + 4) and a lower 2-sample debounce. When <strong>off</strong>, V1 treats Gate 1 like any other gate.
-                </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                When <strong>on</strong>, the first lap of a race is special-cased: if the drone is already in the gate at start (RSSI ≥ enter), the first confirmed exit counts as Gate 1, with relaxed thresholds (~exit + 4) and a lower 2-sample debounce. When <strong>off</strong>, Gate 1 behaves like any other gate.
               </div>
             </div>
 

@@ -148,8 +148,6 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["pwd"] = conf.password;
     config["wifiExtAntenna"] = conf.wifiExtAntenna;
     config["wifiTxPower"] = conf.wifiTxPower;
-    config["filterMode"] = conf.filterMode;
-    config["besselLevel"] = conf.besselLevel;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["v1Smoothing"] = conf.v1Smoothing;
     config["nodeMode"] = conf.nodeMode;
@@ -200,8 +198,6 @@ void Config::toJsonString(char* buf) {
     config["name"] = conf.pilotName;
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
-    config["filterMode"] = conf.filterMode;
-    config["besselLevel"] = conf.besselLevel;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["v1Smoothing"] = conf.v1Smoothing;
     config["nodeMode"] = conf.nodeMode;
@@ -412,8 +408,6 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("wifiTxPower"))    setU8("wifiTxPower", conf.wifiTxPower, 2, 21);
 
     // ===== Signal processing mode =====
-    if (source.containsKey("filterMode"))       setU8("filterMode",       conf.filterMode,       0, 2);
-    if (source.containsKey("besselLevel"))      setU8("besselLevel",      conf.besselLevel,      0, 10);
     if (source.containsKey("gate1Bootstrap"))   setU8("gate1Bootstrap",   conf.gate1Bootstrap,    0, 1);
     if (source.containsKey("v1Smoothing"))      setU8("v1Smoothing",      conf.v1Smoothing,       0, 10);
 
@@ -757,28 +751,12 @@ uint8_t Config::getWifiTxPower() {
     return conf.wifiTxPower;
 }
 
-uint8_t Config::getFilterMode() {
-    return conf.filterMode;
-}
-
-uint8_t Config::getBesselLevel() {
-    return conf.besselLevel;
-}
-
 uint8_t Config::getGate1Bootstrap() {
     return conf.gate1Bootstrap;
 }
 
 uint8_t Config::getV1Smoothing() {
     return conf.v1Smoothing;
-}
-
-void Config::setBesselLevel(uint8_t level) {
-    if (level > 10) level = 10;
-    if (conf.besselLevel != level) {
-        conf.besselLevel = level;
-        modified = true;
-    }
 }
 
 char* Config::getPilotName() {
@@ -1062,10 +1040,8 @@ void Config::setDefaults(void) {
     strlcpy(conf.password, "", sizeof(conf.password));  // Empty WiFi credentials
     conf.wifiExtAntenna = 1;  // External antenna by default (matches hardware)
     conf.wifiTxPower = 21;    // Maximum TX power by default
-    conf.filterMode = 0;          // V1 (verbatim upstream FPVGate) by default — smoothest peaks
-    conf.besselLevel = 0;         // Bessel post-stage off by default; calibration wizard will recommend
-    conf.gate1Bootstrap = 0;      // V1-only Gate-1 bootstrap, off by default
-    conf.v1Smoothing = 5;         // V1+V2 EMA smoothing — 5 maps to alpha 0.15 (upstream default)
+    conf.gate1Bootstrap = 0;      // Gate-1 bootstrap, off by default
+    conf.v1Smoothing = 5;         // EMA smoothing — 5 maps to alpha 0.15 (upstream default)
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));
