@@ -151,6 +151,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["filterMode"] = conf.filterMode;
     config["besselLevel"] = conf.besselLevel;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
+    config["v1Smoothing"] = conf.v1Smoothing;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -202,6 +203,7 @@ void Config::toJsonString(char* buf) {
     config["filterMode"] = conf.filterMode;
     config["besselLevel"] = conf.besselLevel;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
+    config["v1Smoothing"] = conf.v1Smoothing;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -413,6 +415,7 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("filterMode"))       setU8("filterMode",       conf.filterMode,       0, 2);
     if (source.containsKey("besselLevel"))      setU8("besselLevel",      conf.besselLevel,      0, 10);
     if (source.containsKey("gate1Bootstrap"))   setU8("gate1Bootstrap",   conf.gate1Bootstrap,    0, 1);
+    if (source.containsKey("v1Smoothing"))      setU8("v1Smoothing",      conf.v1Smoothing,       0, 10);
 
     // ===== Multi-node =====
     if (source.containsKey("nodeMode"))           setU8("nodeMode", conf.nodeMode, 0, 2);
@@ -766,6 +769,10 @@ uint8_t Config::getGate1Bootstrap() {
     return conf.gate1Bootstrap;
 }
 
+uint8_t Config::getV1Smoothing() {
+    return conf.v1Smoothing;
+}
+
 void Config::setBesselLevel(uint8_t level) {
     if (level > 10) level = 10;
     if (conf.besselLevel != level) {
@@ -1058,6 +1065,7 @@ void Config::setDefaults(void) {
     conf.filterMode = 0;          // V1 (verbatim upstream FPVGate) by default — smoothest peaks
     conf.besselLevel = 0;         // Bessel post-stage off by default; calibration wizard will recommend
     conf.gate1Bootstrap = 0;      // V1-only Gate-1 bootstrap, off by default
+    conf.v1Smoothing = 5;         // V1+V2 EMA smoothing — 5 maps to alpha 0.15 (upstream default)
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));

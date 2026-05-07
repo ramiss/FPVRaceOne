@@ -48,10 +48,32 @@ static const uint32_t kRaceDebugPeriodMs = 100;  // 10 Hz
 // Moving average window (must match rssi_window[] size in laptimer.h)
 static const uint8_t kMaWindow = 7;
 
-// EMA low-pass tuning:
-// alpha closer to 0 = stronger smoothing (slower response)
-// alpha closer to 1 = weaker smoothing (faster response)
-static const float kEmaAlpha = 0.15f;
+// EMA low-pass tuning (used by V1 + V2 pipelines).
+// alpha closer to 0 = stronger smoothing (slower response, more lag)
+// alpha closer to 1 = weaker smoothing (faster response, more noise)
+//
+// Exposed to the user as a 0..10 slider (`v1Smoothing` in config).  Level 5
+// is exactly the upstream FPVGate alpha (0.15) so the saved default produces
+// behaviour identical to the original pre-slider firmware.  Lower numbers
+// reduce lag at the cost of letting more noise through; higher numbers add
+// extra smoothing on top of upstream's design.
+static const float kEmaAlphaTable[11] = {
+    0.50f,  // 0  — almost no EMA; minimum lag, most noise
+    0.40f,  // 1
+    0.30f,  // 2
+    0.25f,  // 3
+    0.20f,  // 4
+    0.15f,  // 5  ── upstream default ──
+    0.12f,  // 6
+    0.10f,  // 7
+    0.07f,  // 8
+    0.05f,  // 9
+    0.03f,  // 10 — heaviest smoothing; noticeable lag, minimum noise
+};
+static inline float getEmaAlpha(uint8_t level) {
+    if (level > 10) level = 10;
+    return kEmaAlphaTable[level];
+}
 
 // NEW: reject one-sample "teleport" drops/rises with a step limiter.
 // This is NOT a low-pass; it only clamps absurd per-sample jumps.
@@ -371,11 +393,13 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         for (int i = 0; i < kMaWindow; i++) sum += rssi_window[i];
         ma = (uint8_t)(sum / kMaWindow);
 
-        // Stage 4: EMA
+        // Stage 4: EMA — alpha is user-tunable via the v1Smoothing slider.
+        // Level 5 (default) = 0.15 = upstream FPVGate behaviour.
+        const float emaAlpha = getEmaAlpha(conf->getV1Smoothing());
         if (isnan(v1Ema)) {
             v1Ema = (float)ma;
         } else {
-            v1Ema = (kEmaAlpha * (float)ma) + ((1.0f - kEmaAlpha) * v1Ema);
+            v1Ema = (emaAlpha * (float)ma) + ((1.0f - emaAlpha) * v1Ema);
         }
         uint8_t lp = (uint8_t)lroundf(v1Ema);
 

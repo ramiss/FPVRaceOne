@@ -2129,6 +2129,11 @@ function buildConfigSnapshotFromUI() {
       const el = document.getElementById('gate1BootstrapToggle');
       return (el && el.checked) ? 1 : 0;
     })(),
+    v1Smoothing: (() => {
+      const el = document.getElementById('v1Smoothing');
+      const v = el ? parseInt(el.value, 10) : 5;
+      return Number.isFinite(v) ? Math.min(10, Math.max(0, v)) : 5;
+    })(),
 
     // Multi-node
     nodeMode: (() => {
@@ -5165,6 +5170,11 @@ async function stopCalibrationWizard() {
     document.getElementById('wizardMarking').style.display = 'block';
 
     drawWizardChart();
+    // After auto-peak-detect runs inside drawWizardChart, evaluate whether the
+    // three detected peaks are reasonably consistent.  Surface a warning if
+    // not — the wizard keys Enter to the weakest peak, so a single off-line
+    // pass would loosen the calibration unnecessarily.
+    evaluatePeakSpreadAndWarn();
   } catch (error) {
     console.error('Error stopping calibration wizard:', error);
     hideWizardProcessing();
@@ -5558,15 +5568,22 @@ async function calculateThresholds() {
     windowMax(m.index - PEAK_WINDOW, m.index + PEAK_WINDOW)
   );
 
-  // Enter must be crossed by every gate pass, so it's keyed to the WEAKEST
-  // peak.  Place it at 93 % of that peak — ~7 % headroom for lap-to-lap
-  // variation, which maps to ~4–6 RSSI units on typical indoor setups.
+  // Enter is keyed to the WEAKEST peak observed during calibration and
+  // placed at 95 % of it — ~5 % headroom for lap-to-lap variation.
+  // Tight enough that neighbouring-gate RSSI lift in close-pattern layouts
+  // typically stays below threshold, while leaving enough margin that real
+  // passes with slightly different lines still trigger.  Pilots can nudge
+  // higher manually after calibration if their setup tolerates it.
   const minPeak = Math.min(...peakRssis);
-  let calculatedEnter = Math.round(minPeak * 0.93);
+  let calculatedEnter = Math.round(minPeak * 0.95);
 
-  // Exit needs enough separation to avoid false positives from noise.
-  // Real-world testing shows a minimum 10-unit spread is reliable.
-  const EXIT_GAP = 10;
+  // Exit is 7 RSSI units below Enter — tighter than upstream's 10 because
+  // tiny-whoop layouts have gates close enough together that the drone may
+  // not drop 10 units between passes.  7 still gives enough hysteresis to
+  // avoid state oscillation at the boundary while keeping the detection
+  // band tight to the lap timer's antenna.  Noise-floor check below raises
+  // Exit if ambient is close to threshold.
+  const EXIT_GAP = 7;
   let calculatedExit = calculatedEnter - EXIT_GAP;
 
   // Noise floor: 35th-percentile of the recording keeps exit above ambient.
@@ -5574,11 +5591,13 @@ async function calculateThresholds() {
   const noiseFloor = sorted[Math.floor(sorted.length * 0.35)];
   calculatedExit = Math.max(noiseFloor + 3, calculatedExit);
 
-  // Final clamp — enforce the minimum 10-unit spread even if noise floor pushed exit up.
+  // Final clamp — exit must stay above MIN_RSSI and at least 5 below enter
+  // (5-unit minimum hysteresis fallback for cases where the noise floor
+  // crowds Exit up close to Enter).
   const MIN_RSSI = 30;
   const MAX_RSSI = 255;
   calculatedEnter = clamp(calculatedEnter, MIN_RSSI, MAX_RSSI);
-  calculatedExit  = clamp(calculatedExit,  MIN_RSSI, calculatedEnter - 10);
+  calculatedExit  = clamp(calculatedExit,  MIN_RSSI, calculatedEnter - 5);
 
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit  = calculatedExit;
@@ -5653,6 +5672,87 @@ function applyCalculatedThresholds() {
   closeCalibrationWizard();
 }
 
+// Evaluates the three auto-detected peaks for amplitude consistency and
+// surfaces a warning banner if they differ by more than ~15 %.
+//
+// Threshold: weakest / strongest < 0.85 (i.e. >15 % spread relative to the
+// strongest peak).  Conservative on purpose — a false-positive warning is
+// cheap (the user can dismiss with one click) but a false-negative leaves
+// them with a sub-optimal calibration without ever knowing.
+//
+// Reads the auto-populated wizardState.markers; uses raw rssi values from
+// wizardState.data, not the smoothed display values, so the metric reflects
+// what the firmware actually saw.
+function evaluatePeakSpreadAndWarn() {
+  const banner = document.getElementById('wizardPeakSpreadWarning');
+  const detail = document.getElementById('wizardPeakSpreadDetail');
+  if (!banner) return;
+
+  // Default-hide so the warning never persists across re-runs of the wizard
+  // when the new recording is fine.
+  banner.style.display = 'none';
+
+  if (!Array.isArray(wizardState.markers) || wizardState.markers.length !== 3) {
+    return;  // Auto-detect didn't find 3 peaks — user will mark manually
+  }
+  if (!Array.isArray(wizardState.data) || wizardState.data.length === 0) {
+    return;
+  }
+
+  // Use a small window around each marker to find the true raw peak (handles
+  // smoothing offset between the display curve and the underlying samples).
+  const PEAK_WINDOW = 20;
+  const peakValues = wizardState.markers.map(m => {
+    const lo = Math.max(0, m.index - PEAK_WINDOW);
+    const hi = Math.min(wizardState.data.length - 1, m.index + PEAK_WINDOW);
+    let best = -Infinity;
+    for (let i = lo; i <= hi; i++) {
+      if (wizardState.data[i].rssi > best) best = wizardState.data[i].rssi;
+    }
+    return best;
+  });
+
+  const minPeak = Math.min(...peakValues);
+  const maxPeak = Math.max(...peakValues);
+  if (maxPeak <= 0) return;
+
+  const ratio = minPeak / maxPeak;
+  const spreadPct = Math.round((1 - ratio) * 100);
+
+  console.log('[Wizard] Peak spread check:',
+              { peaks: peakValues, ratio: ratio.toFixed(3), spreadPct });
+
+  // 0.85 ratio = 15 % spread.  Below that, surface the warning.
+  if (ratio < 0.85) {
+    if (detail) {
+      detail.textContent =
+        `your three calibration peaks differ by ${spreadPct}% ` +
+        `(weakest ${minPeak}, strongest ${maxPeak}).`;
+    }
+    banner.style.display = '';
+  }
+}
+
+function dismissPeakSpreadWarning() {
+  const banner = document.getElementById('wizardPeakSpreadWarning');
+  if (banner) banner.style.display = 'none';
+}
+
+// Tear down the in-progress recording, then immediately re-enter the wizard
+// at the recording step so the user can re-fly the calibration laps.
+async function restartCalibrationWizard() {
+  // Hide the warning so it doesn't flash through the new recording step.
+  dismissPeakSpreadWarning();
+  // Tell the device to drop out of CALIBRATION_WIZARD state cleanly.
+  // Best-effort — if the POST fails we still proceed; startCalibrationWizard
+  // will issue its own /calibration/start which the firmware will accept.
+  try {
+    await fetch('/calibration/stop', { method: 'POST' });
+  } catch (_) {}
+  // startCalibrationWizard resets wizardState and reshows wizardRecording.
+  startCalibrationWizard();
+}
+
 function cancelCalibrationWizard() {
   // stop loop immediately
   wizardState.recording = false;
@@ -5685,6 +5785,7 @@ function closeCalibrationWizard() {
   document.getElementById('wizardMarking').style.display = 'none';
   document.getElementById('wizardResults').style.display = 'none';
   hideWizardProcessing();
+  dismissPeakSpreadWarning();
 }
 
 // WiFi Settings Functions
@@ -5751,25 +5852,45 @@ function stepBessel(delta) {
   updateBesselLevel(v);
 }
 
-// Show/hide the Bessel slider and Gate-1 bootstrap toggle based on the
-// selected Filter Mode.  V1 (verbatim upstream FPVGate) hides the Bessel
-// slider — the firmware locks level=0 in V1 anyway — and shows the Gate-1
-// toggle.  V2 (FPVRaceOne) and V3 (RotorHazard) do the inverse.
+// V1+V2 pipeline EMA smoothing slider (0=lightest, 5=upstream default, 10=heaviest).
+function updateV1Smoothing(value) {
+  const v = Math.min(10, Math.max(0, parseInt(value, 10) || 0));
+  const slider = document.getElementById('v1Smoothing');
+  const span = document.getElementById('v1SmoothingSpan');
+  if (slider) slider.value = v;
+  if (span) span.textContent = v;
+  if (typeof autoSaveConfig === 'function') autoSaveConfig();
+}
+
+function stepV1Smoothing(delta) {
+  const slider = document.getElementById('v1Smoothing');
+  if (!slider) return;
+  const v = Math.min(10, Math.max(0, (parseInt(slider.value, 10) || 0) + delta));
+  updateV1Smoothing(v);
+}
+
+// Show/hide per-mode tuning controls based on the selected Filter Mode.
+//   V1 (FPVRaceOne)    : Pipeline Smoothing visible, Gate-1 visible, Bessel hidden
+//   V2 (Experimental 1): Pipeline Smoothing visible, Gate-1 hidden,  Bessel visible
+//   V3 (Experimental 2): Pipeline Smoothing hidden,  Gate-1 hidden,  Bessel visible
 function onFilterModeChange() {
   const sel = document.getElementById('filterModeSelect');
   if (!sel) return;
   const mode = parseInt(sel.value, 10);
-  const isUpstream  = (mode === 0);  // V1 = verbatim upstream FPVGate
-  const besselGroup = document.getElementById('besselGroup');
-  const gate1Group  = document.getElementById('gate1BootstrapGroup');
-  if (besselGroup) besselGroup.style.display = isUpstream ? 'none' : '';
-  if (gate1Group)  gate1Group.style.display  = isUpstream ? '' : 'none';
+  const isV1 = (mode === 0);
+  const isV3 = (mode === 2);
+  const v1SmoothingGroup = document.getElementById('v1SmoothingGroup');
+  const besselGroup      = document.getElementById('besselGroup');
+  const gate1Group       = document.getElementById('gate1BootstrapGroup');
+  if (v1SmoothingGroup) v1SmoothingGroup.style.display = isV3 ? 'none' : '';  // V1 + V2 only
+  if (besselGroup)      besselGroup.style.display      = isV1 ? 'none' : '';  // V2 + V3 only
+  if (gate1Group)       gate1Group.style.display       = isV1 ? '' : 'none';  // V1 only
 
   // Force the Bessel slider to 0 when V1 is selected so the saved config
   // matches the firmware's behaviour (firmware ignores Bessel in V1 mode,
   // but persisting 0 keeps the UI visually consistent if the user switches
   // away from V1 later).
-  if (isUpstream) {
+  if (isV1) {
     const slider = document.getElementById('besselLevel');
     const span   = document.getElementById('besselLevelSpan');
     if (slider && parseInt(slider.value, 10) !== 0) {
@@ -6880,6 +7001,13 @@ function openSettingsModal() {
         if (gate1Toggle && config.gate1Bootstrap !== undefined) {
           gate1Toggle.checked = (parseInt(config.gate1Bootstrap, 10) || 0) === 1;
           if (gate1Label) gate1Label.textContent = gate1Toggle.checked ? 'On' : 'Off';
+        }
+        const v1SmoothingSlider = document.getElementById('v1Smoothing');
+        const v1SmoothingSpan   = document.getElementById('v1SmoothingSpan');
+        if (v1SmoothingSlider && config.v1Smoothing !== undefined) {
+          const v = Math.min(10, Math.max(0, parseInt(config.v1Smoothing, 10)));
+          v1SmoothingSlider.value = Number.isFinite(v) ? v : 5;
+          if (v1SmoothingSpan) v1SmoothingSpan.textContent = v1SmoothingSlider.value;
         }
         // Apply visibility rules now that filterMode is set.
         if (typeof onFilterModeChange === 'function') onFilterModeChange();

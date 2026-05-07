@@ -124,7 +124,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 20
+#define CONFIG_VERSION 21
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -172,6 +172,7 @@ typedef struct {
     uint8_t filterMode;         // 0=V1 (verbatim upstream FPVGate, default), 1=V2 (FPVRaceOne Path B), 2=V3 (RotorHazard raw + Bessel + threshSmooth)
     uint8_t besselLevel;        // Independent Bessel post-stage (V2/V3 only): 0=off, 1..10 increasing smoothing
     uint8_t gate1Bootstrap;     // V1 only: 0=off (default), 1=on — special handling for first lap when drone is already in gate at race start
+    uint8_t v1Smoothing;        // V1+V2 EMA smoothing strength: 0=lightest, 5=upstream default (alpha 0.15), 10=heaviest. Only affects the V1/V2 pipeline EMA stage.
     uint8_t nodeMode;           // 0=single (default), 1=master, 2=client
     char masterSSID[33];        // SSID of master to connect to (client mode only)
     char masterPassword[33];    // Password for master AP (default "fpvraceone")
@@ -236,6 +237,7 @@ class Config {
     uint8_t getBesselLevel();
     void    setBesselLevel(uint8_t level);
     uint8_t getGate1Bootstrap();
+    uint8_t getV1Smoothing();
     char*   getPilotName();
     uint8_t getNodeMode();
     char*   getMasterSSID();

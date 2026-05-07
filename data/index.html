@@ -465,6 +465,22 @@
           <div id="wizardMarkingStatus" style="margin: 12px 0; padding: 8px; background-color: var(--bg-secondary); border-radius: 4px; font-weight: bold;">
             Mark Peak 1
           </div>
+
+          <!-- Shown when the 3 auto-detected peaks vary too much in amplitude.
+               Inconsistent peaks usually mean inconsistent flight lines through
+               the gate; the wizard biases off the WEAKEST peak so a single bad
+               pass would loosen the calibration unnecessarily. -->
+          <div id="wizardPeakSpreadWarning" style="display:none; margin: 12px 0; padding: 12px; background-color: rgba(255,165,0,0.12); border: 1px solid rgba(255,165,0,0.6); border-radius: 4px; font-size: 14px;">
+            <p style="margin: 0 0 8px 0;"><strong>⚠ Peaks vary significantly</strong> — <span id="wizardPeakSpreadDetail">your three calibration peaks differ by more than 15%.</span></p>
+            <p style="margin: 0 0 12px 0; color: var(--secondary-color);">
+              This usually means inconsistent flight lines through the gate. The wizard keys Enter to the <em>weakest</em> peak, so a single off-line pass will pull the threshold lower than necessary. For best results, restart and try to fly each pass through the same line at the same speed.
+            </p>
+            <div style="display:flex; gap: 8px;">
+              <button onclick="restartCalibrationWizard()" style="flex:1; padding:6px 12px;">Restart Calibration</button>
+              <button onclick="dismissPeakSpreadWarning()" style="flex:1; padding:6px 12px; background-color: var(--secondary-color);">Continue Anyway</button>
+            </div>
+          </div>
+
           <div style="position: relative;">
             <canvas id="wizardChart" style="cursor: crosshair; border: 2px solid var(--border-color); border-radius: 4px;"></canvas>
           </div>
@@ -1073,6 +1089,25 @@
                 <strong>V1 — FPVRaceOne (recommended)</strong>: full 5-stage signal-processing pipeline (Kalman → median → moving average → EMA → step limiter) with the optional Gate-1 bootstrap below and a 3-second ceiling-drift watchdog. Smoothest peaks; works well in most environments. No Bessel post-stage.<br>
                 <strong>V2 — Experimental 1</strong>: same 5-stage pipeline as V1 but with lighter Kalman gains and a simpler detection state machine (4-sample enter / 2-sample exit debounce). Bessel slider available for extra smoothing. Try this if V1 produces lag or misses fast passes.<br>
                 <strong>V3 — Experimental 2</strong>: raw RSSI passthrough with no pre-filter, relying entirely on the Bessel slider for smoothing. Lowest possible detection latency at Bessel = 0; useful for very clean signals or for measuring raw RX5808 output.
+              </div>
+
+              <!-- V1+V2 pipeline EMA smoothing: hidden when V3 selected (V3 has no pipeline) -->
+              <div id="v1SmoothingGroup">
+                <h3>Pipeline Smoothing</h3>
+                <div class="config-item">
+                  <label for="v1Smoothing">Smoothing:</label>
+                  <div class="input-with-value">
+                    <span id="v1SmoothingSpan" class="val">5</span>
+                    <div class="rssi-step-btns">
+                      <button class="rssi-step-btn" type="button" onclick="stepV1Smoothing(-1)">−</button>
+                      <button class="rssi-step-btn" type="button" onclick="stepV1Smoothing(1)">+</button>
+                    </div>
+                    <input type="range" min="0" max="10" step="1" id="v1Smoothing" value="5" oninput="updateV1Smoothing(this.value)" />
+                  </div>
+                </div>
+                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                  Tunes the EMA stage of the V1/V2 pipeline. <strong>5 (default) = upstream FPVGate behaviour</strong>. Lower values reduce signal lag at the cost of letting more noise through; higher values add extra smoothing on top of upstream's design. Doesn't apply in V3.
+                </div>
               </div>
 
               <!-- Bessel: hidden when V3 selected (V3 forces level=0 in firmware too) -->
