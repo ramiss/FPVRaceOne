@@ -298,7 +298,11 @@ env.AddCustomTarget(
 def _run_publish_script(env, prerelease=False):
     script = os.path.join(env.subst("$PROJECT_DIR"), "scripts", "publish_release.py")
     python = env.subst("$PYTHONEXE")
-    args = [python, script]
+    # `-u` forces unbuffered stdout/stderr.  Without it, Python detects that
+    # PIO's subprocess pipe isn't a TTY and switches to block-buffering — the
+    # summary block + Proceed prompt then sit in the buffer until after input()
+    # returns, so the user sees the prompt with no preceding context.
+    args = [python, "-u", script]
     if prerelease:
         args.append("--prerelease")
     # Inherit stdin/stdout/stderr so the user sees prompts and can answer them.
