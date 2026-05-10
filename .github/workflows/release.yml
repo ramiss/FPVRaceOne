@@ -48,8 +48,14 @@ jobs:
 
       - name: Install PlatformIO
         run: |
+          set -x
           python -m pip install --upgrade pip
-          pip install platformio
+          # Pin to a known-good PIO version.  Using `pip install platformio`
+          # without a constraint silently picks up whatever was released most
+          # recently, which has caused surprise behaviour changes (e.g. default
+          # target shifts) in CI.  Bump this deliberately when needed.
+          pip install "platformio>=6.1,<7.0"
+          pio --version
 
       - name: Determine version
         id: version
@@ -69,18 +75,31 @@ jobs:
 
       - name: Build firmware
         run: |
-          pio run -e seeed_xiao_esp32c6
-          echo "----- build output -----"
+          set -x
+          pio run -e seeed_xiao_esp32c6 -t buildprog
+          echo "----- contents of .pio/build/seeed_xiao_esp32c6/ -----"
           ls -la .pio/build/seeed_xiao_esp32c6/
+          # Hard fail if firmware.bin wasn't produced.  pio sometimes exits 0
+          # without emitting the binary (e.g. on a default-target change in a
+          # future pio version) and we'd rather catch that here with a clear
+          # message than silently fail at the cp step three steps later.
+          test -s .pio/build/seeed_xiao_esp32c6/firmware.bin \
+            || { echo "::error::firmware.bin missing or empty after pio run"; exit 1; }
 
       - name: Build filesystem image
         run: |
+          set -x
           pio run -e seeed_xiao_esp32c6 -t buildfs
-          echo "----- after buildfs -----"
+          echo "----- contents of .pio/build/seeed_xiao_esp32c6/ -----"
           ls -la .pio/build/seeed_xiao_esp32c6/
+          test -s .pio/build/seeed_xiao_esp32c6/littlefs.bin \
+            || { echo "::error::littlefs.bin missing or empty after pio buildfs"; exit 1; }
+          test -s .pio/build/seeed_xiao_esp32c6/firmware.bin \
+            || { echo "::error::firmware.bin disappeared during buildfs"; exit 1; }
 
       - name: Stage release assets
         run: |
+          set -x
           mkdir -p release-assets
           cp .pio/build/seeed_xiao_esp32c6/firmware.bin  release-assets/FPVRaceOne-firmware.bin
           cp .pio/build/seeed_xiao_esp32c6/littlefs.bin  release-assets/FPVRaceOne-littlefs.bin
@@ -90,12 +109,28 @@ jobs:
           stat --printf "firmware.bin: %s bytes\n" release-assets/FPVRaceOne-firmware.bin
           stat --printf "littlefs.bin: %s bytes\n" release-assets/FPVRaceOne-littlefs.bin
 
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "===== build dir tree ====="
+          find .pio/build -maxdepth 4 -type f -printf '%p (%s bytes)\n' 2>/dev/null | sort
+          echo ""
+          echo "===== generated headers ====="
+          test -f lib/CONFIG/firmware_version.h && cat lib/CONFIG/firmware_version.h || echo "(missing)"
+          test -f lib/WEBSERVER/build_timestamp.h && cat lib/WEBSERVER/build_timestamp.h || echo "(missing)"
+          echo ""
+          echo "===== platformio.ini + targets ====="
+          cat platformio.ini
+          ls -la targets/ && cat targets/*.ini
+
       - name: Upload build artifacts (always, for inspection)
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: FPVRaceOne-${{ steps.version.outputs.version }}
           path: release-assets/
           retention-days: 30
+          if-no-files-found: warn
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')

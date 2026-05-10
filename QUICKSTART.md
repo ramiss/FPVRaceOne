@@ -4,7 +4,8 @@ Get your FPVRaceOne lap timer up and running in minutes!
 
 ## What You Need
 
-A pre-flashed FPVRaceOne lap timer (ETSY link coming soon) and a phone, tablet, or laptop with WiFi.
+1. A pre-flashed FPVRaceOne lap timer (ETSY link coming soon) and a phone, tablet, or laptop with WiFi.
+2. Any USB power battery bank or supply (not included with FPVRaceOne). Or, if you want to power off your LiPo/Liion batteries then you can google search for "USB-C Power Supply Cable for GoPro" for a cheap (~$10) adapter option.
 
 ## First Connection
 
