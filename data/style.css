@@ -654,10 +654,20 @@ table tr.fastest-lap td {
   text-align: center;
 }
 
-#rssiChart {
-  width: 100%;
-  height: 350px;
+/* The chart height adapts to viewport so the threshold sliders and the
+ * Save / Wizard buttons below always remain in view without scrolling.
+ * - min 160 px: keeps peaks readable on tiny screens (e.g. landscape phone)
+ * - max 420 px: a comfortable ceiling on tall desktop monitors — bigger
+ *   charts just waste vertical space without adding signal information
+ * - 38 vh: scales between those bounds based on actual viewport height */
+.rssi-chart-wrap {
   margin-top: 8px;
+}
+
+#rssiChart {
+  display: block;
+  width: 100%;
+  height: clamp(160px, 38vh, 420px);
 }
 
 /* Toggle switch for dark mode */
@@ -1737,7 +1747,11 @@ footer {
 }
 
 #wizardChart {
+  display: block;
   width: 100%;
+  /* Same viewport-relative sizing as #rssiChart so the Undo / Calculate /
+   * Cancel buttons under the wizard chart stay in view on every device. */
+  height: clamp(180px, 42vh, 480px);
   background-color: var(--background-color);
 }
 
@@ -1914,9 +1928,14 @@ footer {
     white-space: nowrap;
   }
   
-  #rssiChart,
+  /* #rssiChart height is already clamp(160 / 38vh / 420) — leave it alone
+   * here so it can shrink to fit short landscape-phone viewports.  Other
+   * fixed-height chart containers still benefit from the cap. */
   .chart-container {
     height: 250px !important;
+    margin: 8px 0;
+  }
+  #rssiChart {
     margin: 8px 0;
   }
   

@@ -254,11 +254,7 @@
           <button id="startWizardButton" onclick="startCalibrationWizard()" style="width: 100%; padding: 12px; font-size: 16px; background-color: var(--primary-color);">Start Calibration Wizard</button>
         </div>
 
-        <div id="calibLiveBanner" style="margin: 0 0 8px 0; padding: 8px 12px; background-color: var(--bg-secondary); border-radius: 6px; font-size: 12px; color: var(--secondary-color);">
-          <span id="calibLiveBannerText">Live RSSI feed — final pipeline output (raw → Kalman → median-3 → MA → EMA → step limiter). This is what lap detection sees.</span>
-        </div>
-
-        <div>
+        <div class="rssi-chart-wrap">
           <canvas id="rssiChart"></canvas>
         </div>
         <div class="config-item">
@@ -1112,7 +1108,7 @@
                   <li>Tap <strong>Check for Updates</strong>. The device briefly joins your home WiFi to reach GitHub, then returns to AP mode.</li>
                   <li>If a newer release exists, you'll see a confirmation prompt with the version and release notes. Tap <strong>Update Now</strong>.</li>
                   <li>The device downloads and flashes the filesystem image, then the firmware image, then reboots once. The whole process usually takes 1–3 minutes.</li>
-                  <li>Your phone may briefly disconnect from <code>FPVRaceOne_XXXX</code> during the update — just reconnect when prompted.</li>
+                  <li>Your device may briefly disconnect from <code>FPVRaceOne_XXXX</code> during the update — just reconnect when prompted.</li>
                 </ol>
                 <p class="update-intro" style="margin-top: 12px;">
                   <strong>Safety:</strong> updates are blocked while a race is running. If a download fails, the device keeps the previous firmware — there is no risk of bricking.

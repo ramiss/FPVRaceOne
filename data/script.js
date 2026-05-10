@@ -5368,11 +5368,14 @@ function autoPopulateWizardPeaksIfEmpty(rawRssi, smoothedRssi) {
 function drawWizardChart() {
   const canvas = document.getElementById('wizardChart');
   const ctx = canvas.getContext('2d');
-  
-  // Set canvas size
-  canvas.width = canvas.offsetWidth;
-  canvas.height = 400;
-  
+
+  // Match the drawing buffer to the canvas's CSS-computed display size so
+  // the chart fills its container without distortion.  CSS clamps the
+  // height (see #wizardChart in style.css) so the bottom controls always
+  // remain in view on phones in portrait orientation.
+  canvas.width  = canvas.offsetWidth  || 600;
+  canvas.height = canvas.offsetHeight || 320;
+
   const width = canvas.width;
   const height = canvas.height;
   const padding = 40;
