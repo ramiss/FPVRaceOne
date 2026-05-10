@@ -63,6 +63,13 @@ public:
                _state == STATE_DOWNLOADING_FS || _state == STATE_DOWNLOADING_FW ||
                _state == STATE_REBOOTING;
     }
+    // Returns the cached result of the last successful check.  Used by the
+    // /api/update/status endpoint so the browser can recover from a dropped
+    // HTTP response on the original /api/update/check call (the device's AP
+    // retunes during home-WiFi association, briefly losing client connections
+    // while the check itself runs to completion server-side).
+    const UpdateInfo& getLastInfo() const { return _lastInfo; }
+    bool   hasLastInfo() const { return _lastInfoValid; }
 
 private:
     Config*           _config = nullptr;
@@ -77,6 +84,11 @@ private:
     bool    _pendingApply = false;
     String  _pendingFwUrl;
     String  _pendingFsUrl;
+
+    // Cached result of the last successful check.  Persists across the
+    // AP-retune disconnect that drops the original HTTP response.
+    UpdateInfo _lastInfo;
+    bool       _lastInfoValid = false;
 
     bool connectToHomeWifi(uint32_t timeoutMs, String& errorMessage);
     void disconnectFromHomeWifi();

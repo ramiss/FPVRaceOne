@@ -130,15 +130,21 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     WiFi.disconnect();
     WiFi.mode(WIFI_OFF);
 
-    // Determine initial WiFi mode based on node mode and config
+    // Determine initial WiFi mode based on node mode.
+    //
+    // Single + Master always boot AP-only.  Home WiFi credentials (conf.ssid /
+    // conf.pwd) are *not* used here even when present — they exist solely so
+    // OtaManager can briefly switch to AP+STA during a firmware-update check
+    // and then return to AP.  Booting straight into WIFI_STA based on those
+    // credentials would silently kill the AP and lock the user out (the device
+    // would only be reachable via the home router, which not every user has
+    // access to).
     uint8_t nodeMode = conf->getNodeMode();
     if (nodeMode == 2 && conf->getMasterSSID()[0] != 0) {
-        // Client mode: AP+STA (own AP for pilot + STA to master)
+        // Multi-node client: AP+STA (own AP for pilot phone + STA to master)
         changeMode = WIFI_AP_STA;
-    } else if (conf->getSsid()[0] == 0) {
-        changeMode = WIFI_AP;
     } else {
-        changeMode = WIFI_STA;
+        changeMode = WIFI_AP;
     }
     // Pre-expire the delay so the first handleWebUpdate() starts WiFi immediately
     // without waiting WIFI_RECONNECT_TIMEOUT_MS on every boot.
@@ -410,19 +416,6 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 DEBUG("[MULTINODE] Client AP: 192.168.4.1  Connecting to master: %s\n", conf->getMasterSSID());
                 break;
             }
-            case WIFI_STA:
-                DEBUG("Connecting to WiFi network\n");
-                wifiMode = WIFI_STA;
-                WiFi.setHostname(wifi_hostname);  // must be set before WiFi.mode()
-                WiFi.mode(WIFI_STA);
-                // Force HT20 and standard protocols for STA mode
-                esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
-                esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
-                changeTimeMs = currentTimeMs;
-                WiFi.setAutoReconnect(true);
-                WiFi.begin(conf->getSsid(), conf->getPassword());
-                startServices();
-                led->blink(200);
             default:
                 break;
         }
@@ -734,7 +727,11 @@ void Webserver::startServices() {
 
     // ── OTA: current status ─────────────────────────────────────────────────
     // Lets a browser that just (re)connected discover whether an update is
-    // mid-flight without waiting for the next SSE event.
+    // mid-flight without waiting for the next SSE event.  Also serves as the
+    // recovery path when the original /api/update/check HTTP response is lost
+    // to the AP-retune disconnect — when state is UP_TO_DATE or
+    // UPDATE_AVAILABLE, the cached UpdateInfo is included so the frontend can
+    // proceed exactly as if the original POST had returned it.
     server.on("/api/update/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
         String msg = otaManager.getStatusMessage();
         msg.replace("\\", "\\\\");
@@ -743,6 +740,20 @@ void Webserver::startServices() {
         body += "\"state\":"    + String((int)otaManager.getState())     + ",";
         body += "\"progress\":" + String(otaManager.getProgressPercent()) + ",";
         body += "\"message\":\"" + msg + "\"";
+        if (otaManager.hasLastInfo()) {
+            const OtaManager::UpdateInfo& info = otaManager.getLastInfo();
+            String notes = info.releaseNotes;
+            notes.replace("\\", "\\\\");
+            notes.replace("\"", "\\\"");
+            notes.replace("\n", "\\n");
+            notes.replace("\r", "");
+            body += ",\"currentVersion\":\""  + info.currentVersion  + "\"";
+            body += ",\"latestVersion\":\""   + info.latestVersion   + "\"";
+            body += ",\"available\":"         + String(info.available ? "true" : "false");
+            body += ",\"releaseNotes\":\""    + notes                + "\"";
+            body += ",\"firmwareUrl\":\""     + info.firmwareUrl     + "\"";
+            body += ",\"filesystemUrl\":\""   + info.filesystemUrl   + "\"";
+        }
         body += "}";
         request->send(200, "application/json", body);
     });

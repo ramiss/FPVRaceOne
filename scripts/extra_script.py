@@ -287,3 +287,25 @@ env.AddCustomTarget(
     title="Deploy All (FS + Firmware + WiFi)",
     description="Upload filesystem, upload firmware, connect WiFi — stops on any error"
 )
+
+# ── Publish a release ─────────────────────────────────────────────────────────
+
+def publish_release(source, target, env):
+    """Hand off to scripts/publish_release.py.  No build dependency — we are
+    just creating + pushing a git tag; CI does the actual artifact build."""
+    script = os.path.join(env.subst("$PROJECT_DIR"), "scripts", "publish_release.py")
+    python = env.subst("$PYTHONEXE")
+    # Inherit stdin/stdout/stderr so the user can see prompts and answer them.
+    result = subprocess.run([python, script])
+    if result.returncode != 0:
+        # Surface the failure code so PIO marks the target as failed.
+        import sys as _sys
+        _sys.exit(result.returncode)
+
+env.AddCustomTarget(
+    name="publish_release",
+    dependencies=None,
+    actions=publish_release,
+    title="Publish Release (tag + push)",
+    description="Tag the current commit and push to origin; GitHub Actions builds + publishes binaries"
+)

@@ -1,6 +1,8 @@
-# FPVGate Tools
+# FPVRaceOne Tools
 
-This folder contains Python utility scripts for voice generation and SD card management.
+Python utilities for generating the pre-recorded ElevenLabs voice files that ship in the LittleFS image.
+
+These scripts are needed only by maintainers regenerating the voice pack — end users should never have to run them. The Seeed XIAO ESP32-C6 build has no SD card, so audio is bundled into `data/sounds_<voice>/` and flashed as part of the filesystem image.
 
 ## Prerequisites
 
@@ -8,112 +10,25 @@ This folder contains Python utility scripts for voice generation and SD card man
 pip install -r ../requirements.txt
 ```
 
-## Voice Generation Scripts
+You'll also need an active **ElevenLabs API** subscription and an API key.
 
-### generate_voice_files.py
-Generates individual voice files using ElevenLabs API for a single voice.
+## Scripts
 
-**Usage:**
-```bash
-python generate_voice_files.py
-```
+| Script | Purpose |
+|--------|---------|
+| `generate_voice_files.py` | Interactive — generates one voice pack, prompting for the API key |
+| `generate_voice_files_auto.py` | Non-interactive — reads the API key from environment / config |
+| `generate_all_voices.py` | Generates all four voices (Sarah, Rachel, Adam, Antoni) in one run |
+| `regenerate_audio.py` | Scans existing folders and only regenerates missing / corrupted files (interactive) |
+| `regenerate_audio_auto.py` | Non-interactive variant of the above, useful for CI |
+| `upload_sounds_to_sd.py` | Legacy — uploads generated files to an ESP32 SD card. Not used on the current C6 hardware (kept for reference only) |
 
-**Features:**
-- Prompts for ElevenLabs API key
-- Generates MP3 files for lap times, numbers, and phrases
-- Saves files to `data/sounds_<voice_name>/`
+## Voice File Layout
 
----
-
-### generate_voice_files_auto.py
-Automated batch generation for multiple voices without prompts.
-
-**Usage:**
-```bash
-python generate_voice_files_auto.py
-```
-
-**Features:**
-- Reads API key from environment or config
-- Generates all voices in sequence
-- No user interaction required
-
----
-
-### generate_all_voices.py
-Master script to generate all available voices (Sarah, Rachel, Adam, Antoni).
-
-**Usage:**
-```bash
-python generate_all_voices.py
-```
-
-**Features:**
-- Generates complete voice packs for all voices
-- Creates separate folders for each voice
-- Batch processing for faster generation
-
----
-
-### regenerate_audio.py
-Regenerates missing or corrupted audio files for a specific voice.
-
-**Usage:**
-```bash
-python regenerate_audio.py
-```
-
-**Features:**
-- Scans existing voice folders
-- Identifies missing files
-- Regenerates only what's needed
-
----
-
-### regenerate_audio_auto.py
-Automated version of regenerate_audio.py for batch processing.
-
-**Usage:**
-```bash
-python regenerate_audio_auto.py
-```
-
-**Features:**
-- Non-interactive regeneration
-- Processes all voice folders
-- Useful for CI/CD pipelines
-
----
-
-## SD Card Management
-
-### upload_sounds_to_sd.py
-Uploads generated voice files to ESP32-S3 SD card via serial connection.
-
-**Usage:**
-```bash
-python upload_sounds_to_sd.py
-```
-
-**Features:**
-- Connects to ESP32-S3 over USB
-- Uploads voice files to SD card
-- Verifies successful transfer
-- Progress indicator for large batches
-
-**Requirements:**
-- ESP32-S3 connected via USB
-- SD card inserted in ESP32-S3
-- Serial drivers installed
-
----
-
-## Voice File Structure
-
-Generated voice files follow this naming convention:
+Each voice produces a folder under `data/`:
 
 ```
-sounds_<voice_name>/
+data/sounds_<voice_name>/
 ├── gate_1.mp3           # "Gate 1"
 ├── lap_1.mp3            # "Lap 1"
 ├── lap_2.mp3            # "Lap 2"
@@ -125,26 +40,26 @@ sounds_<voice_name>/
 └── seconds.mp3          # "seconds"
 ```
 
-## Notes
+Approximate sizes:
+- ~1–2 MB per voice pack uncompressed
+- Full voice generation pass takes a few minutes per voice depending on ElevenLabs latency
 
-- Voice generation requires an active ElevenLabs API subscription
-- Generated files are approximately 1-2MB per voice pack
-- SD card upload requires ~5-10 minutes for a full voice pack
-- All scripts support both Windows and Linux
+## After Regenerating
+
+The voice files are part of the LittleFS image. To get them onto the device:
+
+```bash
+# Build the filesystem image including the new audio
+pio run --target buildfs --environment seeed_xiao_esp32c6
+# Output: .pio/build/seeed_xiao_esp32c6/littlefs.bin
+```
+
+Then either flash directly with `pio run -t uploadfs -e seeed_xiao_esp32c6`, or attach `littlefs.bin` to a GitHub Release as `FPVRaceOne-littlefs.bin` so the in-app updater picks it up.
 
 ## Troubleshooting
 
-**Issue**: "Module not found" error  
-**Solution**: Install requirements with `pip install -r ../requirements.txt`
+**`ModuleNotFoundError`** — install dependencies: `pip install -r ../requirements.txt`
 
-**Issue**: SD upload fails  
-**Solution**: Check ESP32-S3 is connected and SD card is formatted as FAT32
+**Voice generation timeout** — check your ElevenLabs API key and that the account has remaining quota
 
-**Issue**: Voice generation timeout  
-**Solution**: Check your ElevenLabs API key and internet connection
-
-## See Also
-
-- [Voice Generation Guide](../docs/VOICE_GENERATION_README.md)
-- [Multi-Voice Setup](../docs/MULTI_VOICE_SETUP.md)
-- [SD Card Migration Guide](../docs/SD_CARD_MIGRATION_GUIDE.md)
+**Generated files sound robotic / wrong** — the runtime `PiperTTS` engine produces synthesis on-device and is independent of these pre-recorded files; for that voice, see `data/voices/` (Piper models) rather than this tool chain

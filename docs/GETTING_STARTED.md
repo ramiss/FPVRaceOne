@@ -13,7 +13,8 @@ Complete guide to setting up and configuring your FPVRaceOne lap timer.
 3. [Set Pilot Information](#set-pilot-information)
 4. [Run the Calibration Wizard](#run-the-calibration-wizard)
 5. [First Race](#first-race)
-6. [Troubleshooting](#troubleshooting)
+6. [Multi-Node Racing (Optional)](#multi-node-racing-optional)
+7. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -31,7 +32,7 @@ Complete guide to setting up and configuring your FPVRaceOne lap timer.
 
 ### USB (Optional)
 
-1. Download the [Electron desktop app](https://github.com/LouisHitchcock/FPVGate/releases)
+1. Download the [Electron desktop app](https://github.com/ramiss/FPVRaceOne/releases/latest)
 2. Connect the FPVRaceOne device via USB-C
 3. Launch the app and select your COM port
 4. All features work identically to WiFi mode with lower latency
@@ -86,29 +87,27 @@ Proper calibration is the most important step for accurate timing.
 
 1. Power on your drone and let the VTx warm up for 30 seconds
 2. Click **Record** in the wizard
-3. Fly your drone through the gate at race speed — at least 2–3 passes
+3. Fly your drone through the gate at race speed — **exactly 3 passes** is ideal
 4. Click **Stop Recording**
 
-The wizard displays the recorded RSSI signal on a chart and automatically calculates recommended **Enter** and **Exit** thresholds.
+The wizard auto-detects the three highest peaks and overlays them on the chart. If detection misses one, drag a marker manually.
 
-### Step 3: Review and Apply
+### Step 3: Review the Peak-Spread Check
 
-- Review the chart — you should see clean peaks for each gate pass
-- Adjust the calculated thresholds manually if needed:
-  - **Enter RSSI:** 3–5 points below the observed peak
-  - **Exit RSSI:** 8–10 points below Enter RSSI
-- Click **"Apply Thresholds"** — values are saved immediately
+If the three peaks differ in height by more than ~15 %, the wizard shows a warning recommending you re-fly. Equal-height peaks calibrate better — re-flying takes 30 seconds and is almost always worth it. If the spread is acceptable, just continue.
 
-**Good calibration example:**
-```
-Observed peak:  150
-Enter RSSI:     145  (5 below peak)
-Exit RSSI:      135  (10 below Enter)
-```
+### Step 4: Apply
 
-### Step 4: Verify
+The wizard calculates thresholds with conservative safety margins:
 
-Fly through the gate once more and check that the Calibration tab shows a single clean peak crossing both thresholds. Then head to the Race tab.
+- **Enter RSSI** ≈ 95 % of the *weakest* of the three peaks (~5 % headroom for lap-to-lap variation)
+- **Exit RSSI** = Enter − 7 (tight enough for tiny-whoop tracks where gates are close together; raised above the recording's noise floor if needed)
+
+Review the values, tweak manually if you have a specific reason, then tap **Apply Thresholds**. The values are saved immediately.
+
+### Step 5: Verify
+
+Watch the live RSSI chart on the Calibration tab while flying one or two more passes. You should see a clean peak well above Enter, then drop below Exit on the way out. If detection misses or fires twice, see *Missing Laps* / *False Laps* in the troubleshooting section.
 
 ---
 
@@ -122,6 +121,39 @@ Fly through the gate once more and check that the Calibration tab shows a single
 6. Click **"Stop Race"** when finished — the race is saved automatically
 
 **[Full racing guide →](USER_GUIDE.md#racing)**
+
+---
+
+## Multi-Node Racing (Optional)
+
+If you have a second device — or up to seven of them — pair them as a single race-directing network. No router, no extra hardware.
+
+### Set Up the Master
+
+1. Pick one device to be the race director
+2. Open **Settings → Multi-Node Timing**
+3. Set **Node Mode** = `Master` and tap **Apply Multi-Node & Reboot**
+4. After reboot, note the master's AP name (e.g. `FPVRaceOne_AB12CD`)
+
+### Set Up Each Client
+
+1. On the next device, open **Settings → Multi-Node Timing**
+2. Set **Node Mode** = `Client`
+3. Tap **Scan** to discover masters in range, or paste the master's SSID into **Master SSID**
+4. Tap **Apply Multi-Node & Reboot**
+5. After reboot, the client will join the master's WiFi automatically
+
+### Race
+
+- On the **master**, every connected client appears as a card on the Race tab with the pilot's name, lap count, and live state (● Running, ○ Stopped, ⚠ DNF)
+- Tap **Start All** to start every pilot at once; tap **Stop All** to end the heat
+- Each client also keeps its own local Start / Stop — useful for a pilot to drop out mid-heat (their card shows **DNF** on the master, the heat keeps going)
+
+### Tip — Solo Practice During a Heat
+
+If you want to keep practising while a director is running heats on the other pilots, enable **"Ignore Race Director Start/Stop if already racing"** on your client (Settings → Multi-Node). Now a director's Start All won't reset your practice run.
+
+**[Full multi-node guide →](USER_GUIDE.md#multi-node-timing)**
 
 ---
 

@@ -1568,17 +1568,26 @@ footer {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
+  align-items: stretch;       /* both <a> and <button> children fill cross axis */
 }
 
 .update-btn {
-  display: inline-block;
+  /* Use inline-flex + center alignment so an <a> and a <button> with the
+     same padding render at exactly the same height — a plain <button>'s
+     UA border + line-height would otherwise make it taller than an <a>. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   padding: 9px 18px;
+  border: none;
   border-radius: 4px;
   font-size: 14px;
   font-weight: bold;
+  line-height: 1.4;
   text-decoration: none;
   text-align: center;
   cursor: pointer;
+  box-sizing: border-box;
   transition: opacity 0.2s;
 }
 

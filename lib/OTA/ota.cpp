@@ -121,6 +121,10 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         return false;
     }
 
+    // Invalidate any previous cached result before we start.  If the check
+    // succeeds we'll repopulate `_lastInfo` below.
+    _lastInfoValid = false;
+
     setState(STATE_CONNECTING, "Connecting to home WiFi...");
     setProgress(10);
     if (!connectToHomeWifi(15000, err)) {
@@ -149,7 +153,29 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     }
 
     int code = http.GET();
+    if (code == 404) {
+        // /releases/latest returns 404 when the repo has zero published full
+        // releases (drafts and prereleases don't count toward `latest`).  This
+        // is a successful check with nothing to install — not a failure, and
+        // the UI must not say "failed" or the user will think the device is
+        // broken.  Report up-to-date with empty versions; frontend keys off
+        // the empty latestVersion string for the right wording.
+        http.end();
+        out.currentVersion = FIRMWARE_VERSION;
+        out.latestVersion  = "";
+        out.releaseNotes   = "";
+        out.firmwareUrl    = "";
+        out.filesystemUrl  = "";
+        out.available      = false;
+        _lastInfo      = out;
+        _lastInfoValid = true;
+        setState(STATE_UP_TO_DATE, "No releases published yet for this device's firmware repo.");
+        setProgress(100);
+        disconnectFromHomeWifi();
+        return true;
+    }
     if (code != 200) {
+        // Any other non-200 (rate limit, auth, server error) is a real failure.
         err = "GitHub API returned HTTP " + String(code);
         http.end();
         setState(STATE_ERROR, err);
@@ -193,10 +219,21 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
 
     out.available = compareSemver(out.currentVersion, out.latestVersion) < 0;
 
+    // Cache the result so /api/update/status can serve it even if the
+    // original /api/update/check HTTP response gets dropped during the
+    // AP-retune disconnect that happens when STA associates.
+    _lastInfo      = out;
+    _lastInfoValid = true;
+
     if (out.available) {
         setState(STATE_UPDATE_AVAILABLE, String("Update available: ") + out.latestVersion);
+    } else if (out.currentVersion == out.latestVersion) {
+        setState(STATE_UP_TO_DATE, String("You're on the latest release (") + out.latestVersion + ").");
     } else {
-        setState(STATE_UP_TO_DATE, String("Already on latest (") + out.currentVersion + ")");
+        // Same parsed semver but different version strings — running a dev build
+        // ahead of the latest tag.
+        setState(STATE_UP_TO_DATE, String("You're on a development build (") + out.currentVersion +
+                                   ") ahead of the latest release (" + out.latestVersion + ").");
     }
     setProgress(100);
 

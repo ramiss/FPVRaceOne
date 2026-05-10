@@ -83,3 +83,4 @@ tools/apply_frontend_defaults.html
 /.claude/settings.local.json
 /docs/FLASHING_OPTIONAL-Prev.md
 /docs/FLASHING_OPTIONAL.md
+/scripts/publish_release.py

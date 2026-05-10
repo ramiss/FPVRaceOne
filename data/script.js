@@ -2427,6 +2427,19 @@ function handleUpdateProgress(data) {
                 data.state === OTA_STATE.DOWNLOADING_FW ||
                 data.state === OTA_STATE.REBOOTING);
   setUpdateBusy(busy);
+
+  // Wake any in-flight checkForUpdates() awaiting a terminal state.  This is
+  // the recovery path when the original /api/update/check HTTP response was
+  // dropped by the AP-retune disconnect — SSE delivers the verdict instead.
+  if (_otaCheckResolver &&
+      (data.state === OTA_STATE.UP_TO_DATE ||
+       data.state === OTA_STATE.UPDATE_AVAILABLE ||
+       data.state === OTA_STATE.ERROR)) {
+    const r = _otaCheckResolver;
+    _otaCheckResolver = null;
+    r({ ok: data.state !== OTA_STATE.ERROR, state: data.state, message: data.message });
+  }
+
   if (data.state === OTA_STATE.REBOOTING) {
     // Device is about to drop the connection.  Show a clear note so the user
     // doesn't think the page is broken when SSE goes silent.
@@ -2436,61 +2449,122 @@ function handleUpdateProgress(data) {
   }
 }
 
+// Promise resolver/rejecter used by handleUpdateProgress() to wake up the
+// in-flight checkForUpdates() when SSE delivers a terminal state.  This is
+// what makes the flow resilient to the AP-retune disconnect that drops the
+// original /api/update/check HTTP response: even if the response is lost,
+// the SSE channel will eventually report state UP_TO_DATE / UPDATE_AVAILABLE
+// / ERROR and we wake the awaiter with the cached server-side info.
+let _otaCheckResolver = null;
+
+// Promise that resolves when SSE reports a terminal state (>= UPDATE_AVAILABLE).
+// Resolves to {ok: true,  state, message} on UP_TO_DATE / UPDATE_AVAILABLE.
+// Resolves to {ok: false, state, message} on ERROR.
+function _waitForCheckTerminal() {
+  return new Promise((resolve) => { _otaCheckResolver = resolve; });
+}
+
 async function checkForUpdates() {
   const ssidEl = document.getElementById('ssid');
   if (!ssidEl || !ssidEl.value.trim()) {
-    alert('Please set your Home WiFi SSID in WiFi & Connection settings first.');
+    alert('Please set your Home WiFi SSID under Settings → Firmware Update first — the device needs it to reach GitHub.');
     return;
   }
 
   setUpdateBusy(true, 'Checking…');
   showUpdateStatus('Connecting to home WiFi and contacting GitHub…', 10);
 
-  try {
-    const r = await fetch('/api/update/check', { method: 'POST' });
-    const data = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const msg = data.error || `HTTP ${r.status}`;
-      showUpdateStatus('Update check failed: ' + msg, 0);
-      setUpdateBusy(false);
-      return;
-    }
+  // Arm the SSE-driven fallback BEFORE we kick off the request.  If the HTTP
+  // response is lost to the AP-retune disconnect, the SSE channel will deliver
+  // the terminal state and we recover by reading /api/update/status.
+  const ssePromise = _waitForCheckTerminal();
+  let httpResult = null;   // resolved to {ok, data} or {ok: false, error} or null on network failure
 
-    _otaUpdateInfo = data;
+  // Fire and forget — but capture the result if it does come back.
+  fetch('/api/update/check', { method: 'POST' })
+    .then(async (r) => {
+      const data = await r.json().catch(() => ({}));
+      httpResult = r.ok ? { ok: true, data } : { ok: false, error: data.error || `HTTP ${r.status}` };
+    })
+    .catch((err) => {
+      // "Failed to fetch" / TypeError happens routinely during the AP retune
+      // when the device joins home WiFi.  This is NOT a failure — the check
+      // is still running on the device and the SSE channel will report the
+      // result.  Log for diagnostics, but don't show an error to the user.
+      console.log('[OTA] /api/update/check HTTP response lost (expected during AP retune):', err && err.message);
+      httpResult = null;
+    });
 
-    if (!data.available) {
-      showUpdateStatus(`You're on the latest version (${data.currentVersion}).`, 100);
-      setUpdateBusy(false);
-      return;
-    }
+  // Wait up to 60 s for SSE to deliver a terminal state.  If both the HTTP
+  // request and SSE fail to reach a verdict in that window, we give up.
+  const timeout = new Promise((resolve) =>
+    setTimeout(() => resolve({ ok: false, state: OTA_STATE.ERROR, message: 'Timed out waiting for the device to finish checking. Try again.' }), 60000)
+  );
+  const verdict = await Promise.race([ssePromise, timeout]);
 
-    // Build a confirmation modal.  Truncate release notes so the prompt is readable.
-    const notes = (data.releaseNotes || '').trim();
-    const notesShort = notes.length > 600 ? notes.substring(0, 600) + '…' : notes;
-    const message =
-      `A new version is available:\n\n` +
-      `  Current: ${data.currentVersion}\n` +
-      `  Latest:  ${data.latestVersion}\n\n` +
-      (notesShort ? `Release notes:\n${notesShort}\n\n` : '') +
-      `The device will:\n` +
-      `  1. Join your home WiFi\n` +
-      `  2. Download the filesystem and firmware images (~1–3 minutes)\n` +
-      `  3. Reboot once the update is complete\n\n` +
-      `Your phone may briefly disconnect — reconnect to FPVRaceOne_XXXX if so.\n\n` +
-      `Update now?`;
-
-    if (!confirm(message)) {
-      showUpdateStatus(`Update available: ${data.latestVersion} (declined)`, 100);
-      setUpdateBusy(false);
-      return;
-    }
-
-    await applyUpdate();
-  } catch (err) {
-    console.error('[OTA] Check failed:', err);
-    showUpdateStatus('Update check failed: ' + (err.message || err), 0);
+  // SSE has reported a terminal state OR we timed out.  Now decide what to do
+  // based on the cached UpdateInfo (preferred) or the HTTP response if we got
+  // one — they should agree, but the cached form survives a dropped HTTP.
+  //
+  // showUpdateStatus(...) is intentionally NOT called for success cases below:
+  // the SSE channel has already painted the right text into the panel via
+  // handleUpdateProgress(), and overwriting it from here causes a flicker
+  // where the panel briefly shows our text before the SSE text takes over.
+  if (verdict.state === OTA_STATE.ERROR) {
+    // The firmware reported a real error via SSE.  Panel already shows the
+    // firmware's error message.  Just clear the busy state.
     setUpdateBusy(false);
+    return;
   }
+
+  // Reach the cached info via /api/update/status.  Falls back to the HTTP
+  // response data if the status fetch itself fails (paranoid defence).
+  let info = null;
+  try {
+    const sr = await fetch('/api/update/status');
+    if (sr.ok) {
+      const sd = await sr.json();
+      if (sd && typeof sd.available === 'boolean') info = sd;
+    }
+  } catch (_) { /* fall through to httpResult below */ }
+  if (!info && httpResult && httpResult.ok) info = httpResult.data;
+
+  if (!info) {
+    showUpdateStatus('Could not retrieve update info from the device.', 0);
+    setUpdateBusy(false);
+    return;
+  }
+
+  _otaUpdateInfo = info;
+
+  if (!info.available) {
+    // Panel text was set by SSE — don't overwrite.  Just unbusy.
+    setUpdateBusy(false);
+    return;
+  }
+
+  // Update available — show the upgrade prompt.
+  const notes = (info.releaseNotes || '').trim();
+  const notesShort = notes.length > 600 ? notes.substring(0, 600) + '…' : notes;
+  const message =
+    `A new version is available:\n\n` +
+    `  Current: ${info.currentVersion}\n` +
+    `  Latest:  ${info.latestVersion}\n\n` +
+    (notesShort ? `Release notes:\n${notesShort}\n\n` : '') +
+    `The device will:\n` +
+    `  1. Join your home WiFi\n` +
+    `  2. Download the filesystem and firmware images (~1–3 minutes)\n` +
+    `  3. Reboot once the update is complete\n\n` +
+    `Your phone may briefly disconnect — reconnect to FPVRaceOne_XXXX if so.\n\n` +
+    `Update now?`;
+
+  if (!confirm(message)) {
+    showUpdateStatus(`Update available: ${info.latestVersion} (declined)`, 100);
+    setUpdateBusy(false);
+    return;
+  }
+
+  await applyUpdate();
 }
 
 async function applyUpdate() {

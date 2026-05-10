@@ -37,7 +37,7 @@ FPVRaceOne broadcasts its own WiFi Access Point on startup.
 
 Direct USB connection provides lower latency than WiFi.
 
-1. Download the [Electron desktop app](https://github.com/LouisHitchcock/FPVGate/releases)
+1. Download the [Electron desktop app](https://github.com/ramiss/FPVRaceOne/releases/latest)
 2. Connect FPVRaceOne via USB-C
 3. Launch the app and select your COM port
 4. All features work identically to WiFi mode
@@ -97,7 +97,6 @@ All configuration, organised into sections with a floating footer.
 |---------|-------------|
 | **Max Laps** | 0 = infinite; 1–50 = auto-stop when reached |
 | **Min Lap Time** | Reject gate triggers closer together than this (seconds) |
-| **Alarm Threshold** | Battery voltage alarm level (if battery monitoring enabled) |
 
 ### TTS Settings
 
@@ -148,34 +147,77 @@ Applies a chain of filters in sequence:
 
 ### LED Setup
 
-Configures the optional WS2812 gate LED strip (if connected via webhooks).
+Configures the on-device status LED (preset, brightness, colour). Used to indicate WiFi state, race state, and lap events.
 
-### Webhooks
+### Multi-Node Timing
 
-Send HTTP POST events to external devices (e.g. gate LED controllers) on race start, race stop, and each lap. Up to 10 target IP addresses. Each event type can be enabled or disabled independently.
+Network up to **8 FPVRaceOne devices** together — no router, no hub, no extra hardware. One device acts as the race-director **Master** and up to **7 Clients** join its WiFi. Lap events stream back to the master in real time so the director sees every pilot's race on a single screen.
 
-### Network / WiFi
+#### Roles
 
-Configure the device to connect to an existing WiFi network (station mode) in addition to broadcasting its own AP. Enter SSID and password, then click **"Apply WiFi & Reboot"**.
+| Mode | What it does |
+|------|--------------|
+| **Single** (default) | Standalone — no inter-device traffic |
+| **Master** | Hosts the AP that clients join. Renders the multi-node Race tab with a card per pilot. Broadcasts Start All / Stop All |
+| **Client** | Connects to a master AP. Forwards lap counts and times via 1 Hz heartbeats. Honours master Start / Stop unless overridden |
 
-### Device
+#### Settings (Settings → Multi-Node)
 
-| Option | Description |
-|--------|-------------|
-| **External Antenna** | Switch between internal and external WiFi antenna (requires reboot) |
-| **WiFi TX Power** | Transmit power in dBm, 2–21 (requires reboot) |
-| **RSSI Sensitivity** | Normal or High (1.5× boost) |
-| **Theme** | UI colour scheme (23 options) |
-| **Reboot** | Restart the device immediately |
+| Setting | Visible when | Description |
+|---------|--------------|-------------|
+| **Node Mode** | Always | Single / Master / Client. Changing this requires reboot — the **Apply Multi-Node & Reboot** button only enables when the mode changes |
+| **Master SSID** | Client | The master device's AP name (e.g. `FPVRaceOne_AB12CD`). Type it manually or use **Scan** to discover masters in range |
+| **Scan for Masters** | Client | Lists every `FPVRaceOne_*` AP within range — tap one to autofill |
+| **Ignore Race Director Start/Stop if already racing** | Client | When on, a master Start/Stop broadcast is ignored if the client is already mid-race locally. Lets a pilot keep practising while a heat is being run on the others |
 
-### OTA Updates
+#### Race-Directing Flow
 
-See **Settings → OTA** to upload new firmware or filesystem via ElegantOTA.
+1. **Master** Race tab shows a card per connected client: pilot name, running indicator, lap count, last lap time
+2. Tap **Start All** — every client starts simultaneously
+3. As pilots fly, each client streams its laps back. The master cards update live (Server-Sent Events, sub-second latency)
+4. Tap **Stop All** — every client stops cleanly
+5. If a pilot crashes out, they tap **Stop** on their own client. The master sees a **DNF** badge on that pilot's card; the rest of the heat continues uninterrupted
 
-- Firmware: upload `.pio/build/seeed_xiao_esp32c6/firmware.bin`
-- Filesystem: build with `pio run --target buildfs`, then upload `littlefs.bin`
+#### State Indicators on Master Cards
 
-Both are independent uploads and both should be updated after each release.
+| Indicator | Meaning |
+|-----------|---------|
+| ● **Running** | Client's lap timer is running |
+| ○ **Stopped** | Client is idle |
+| ⚠ **DNF** | Client pressed Stop locally during an active master-broadcast race |
+
+### Firmware Update
+
+The device updates itself from GitHub Releases.
+
+1. Enter your **Home WiFi** credentials (one-time, saved automatically)
+2. Tap **Check for Updates** — the device briefly joins your home network, queries GitHub, returns to AP mode
+3. If a newer release exists, you'll see the version + release notes — tap **Update Now**
+4. The device flashes the filesystem image, then the firmware image, then reboots once. Total time ~1–3 minutes
+5. Your phone may briefly disconnect from the device's AP during the update — reconnect when prompted
+
+**Safety:**
+- Updates are blocked while a race is running
+- Failed downloads keep the previous firmware — there is no risk of bricking
+- Manual flashing via PlatformIO / esptool is still available for first-time setup or recovery (see [FLASHING_OPTIONAL.md](FLASHING_OPTIONAL.md))
+
+### WiFi & Connection
+
+| Setting | Description |
+|---------|-------------|
+| **Antenna** | Switch between internal PCB antenna and external connector (takes effect on next boot) |
+| **TX Power** | WiFi transmit power in dBm, 2–21 (takes effect on next boot). Lower values reduce range and interference; raise it back to 21 for maximum AP range |
+
+The Home WiFi fields used by the firmware updater (Settings → Firmware Update) double as station-mode credentials — once entered, the device can join your home WiFi for OTA pulls.
+
+### System Settings
+
+| Section | Options |
+|---------|---------|
+| **Appearance** | Theme — pick from 23 colour schemes |
+| **Device** | Reboot button (required for antenna and TX power changes to take effect) |
+| **Race Tab** | "Always hide download reminder banner" — permanently dismiss the *races are lost on flash* banner once you've started downloading races regularly |
+| **Developer** | **Dev Mode (Simulate Laps)** — when on, tap a pilot's name on the Race tab to inject a random simulated lap. Useful for testing multi-node UI without real quads |
 
 ---
 
@@ -200,10 +242,16 @@ Enter must always be higher than Exit. The lap timestamp is recorded at the peak
 ### Using the Calibration Wizard
 
 1. Go to the **Calibration** tab and click **"Start Calibration Wizard"**
-2. Click **Record**, fly 2–3 gate passes at race speed, click **Stop**
-3. Review the chart — you should see a distinct peak per pass
-4. The wizard auto-calculates Enter and Exit thresholds
-5. Adjust manually if needed, then click **"Apply Thresholds"**
+2. Click **Record**, fly **3 gate passes** at race speed, click **Stop**
+3. The wizard auto-detects the three highest peaks and overlays markers — drag any marker if a peak was misidentified
+4. Click **Calculate** — the wizard shows the recommended **Enter** and **Exit** thresholds
+5. If the three peaks differ in height by >15 %, the wizard recommends a re-fly. Equal-height peaks calibrate better; re-flying takes 30 seconds and is almost always worth it
+6. Tap **Apply Thresholds** — values are saved immediately
+
+**How the thresholds are picked:**
+
+- **Enter** ≈ 95 % of the *weakest* of the three peaks — leaves about 5 % headroom for lap-to-lap variation. Tight enough that adjacent gates in close-pattern layouts typically don't trigger
+- **Exit** = Enter − 7 — tight enough for tiny-whoop tracks where gates are close together, but raised above the recording's 35th-percentile noise floor if needed for hysteresis
 
 ### Manual Threshold Adjustment
 
@@ -215,11 +263,10 @@ You can also **pause** the live chart to examine a specific moment, then **resum
 
 | Problem | Fix |
 |---------|-----|
-| Missing laps | Lower Enter RSSI by 5 points |
-| False / extra laps | Raise Exit RSSI by 5, or increase Min Lap Time |
-| Inconsistent detection | Ensure VTx has warmed up 30+ seconds |
-| Noisy signal (V1) | Try V2 with 50 Hz or 20 Hz cutoff |
-| Too much lag (V2) | Try V1, or use V2 at 100 Hz |
+| Missing laps | Lower Enter RSSI by 5 points; lower **Pipeline Smoothing** in Settings → Signal Processing for less lag |
+| False / extra laps | Raise Exit RSSI by 5, increase Min Lap Time, or raise **Pipeline Smoothing** to reject more noise |
+| Inconsistent detection | Ensure VTx has warmed up 30+ seconds; rerun the wizard with cleaner peaks |
+| Drone already in gate at start triggers spurious Lap 1 | Enable **Gate-1 Bootstrap** in Settings → Signal Processing |
 
 ---
 
@@ -304,9 +351,26 @@ Statistics and charts update immediately. Changes are saved automatically.
 
 ## Advanced Features
 
-### Signal Processing Mode
+### Pipeline Smoothing
 
-Switch between V1 and V2 in **Settings → Signal Processing**. See the [Settings](#signal-processing) section for a full comparison.
+The single Pipeline Smoothing slider in **Settings → Signal Processing** tunes the EMA stage of the detection pipeline:
+
+- **Level 5 (default)** = identical to upstream FPVGate behaviour
+- **Lower** = less smoothing, faster response, more noise passes through
+- **Higher** = more smoothing, slower response, more noise rejection
+
+Most pilots never need to touch this. Adjust it only if calibration consistently misses laps (lower it) or constantly fires twice (raise it).
+
+### Multi-Node Race Directing
+
+Pair two or more devices for head-to-head racing. See [Multi-Node](#multi-node) above. Common patterns:
+
+- **Solo practice while a master is broadcasting** — turn on *Skip Master Start* on the client so a director's Start All doesn't reset your local race
+- **Pilot drops out mid-heat** — the pilot presses Stop on their client; the master sees a **DNF** badge on that pilot's card and the rest of the race continues uninterrupted
+
+### Tracks & Distance
+
+In **Settings → Track Data**, define tracks with name, distance, tags, and an optional image. Select an active track and the race UI shows real-time distance travelled and (in finite-lap races) distance remaining. The track is recorded with the race for later review.
 
 ### Config Backup & Restore
 
@@ -318,7 +382,7 @@ Export your config before any firmware update.
 
 ### Theme Selection
 
-23 colour themes available in **Settings → Device → Theme**. The logo automatically switches between black and white versions for light and dark themes.
+Multiple colour themes are available in **Settings → Device → Theme**. The logo automatically switches between black and white versions for light and dark themes.
 
 ---
 
@@ -340,4 +404,4 @@ Export your config before any firmware update.
 
 ---
 
-**Questions or issues? [Open a GitHub issue](https://github.com/LouisHitchcock/FPVGate/issues)**
+**Questions or issues? [Open a GitHub issue](https://github.com/ramiss/FPVRaceOne/issues)**

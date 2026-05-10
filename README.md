@@ -1,10 +1,14 @@
 # FPVRaceOne
 
-**Personal FPV Lap Timer — Hardware coming soon!**
+**Personal FPV Lap Timer**
+A single node lap timer that can be networked for multi-pilot (multi-node) racing.
+Fly solo. Race together!
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions, small indoor tracks, and training. No transponders, no complex infrastructure — just plug in, calibrate, and fly.
+
+**Up to 8 devices can network together over WiFi for head-to-head racing** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required.
 
 ---
 
@@ -38,17 +42,14 @@ Exit  ├/──────────\─
       └─────────────── Time
 ```
 
-The time between consecutive peaks is your lap time. Two configurable signal processing pipelines let you tune the balance between responsiveness and noise rejection for your specific environment.
+The time between consecutive peaks is your lap time. The signal processing pipeline is tuned with sensible defaults out of the box, with a single Pipeline Smoothing slider for fine-tuning the balance between responsiveness and noise rejection.
 
 ---
 
 ## Key Features
 
-### Dual Connectivity
-- **WiFi Access Point** — works with any browser, no app required
-- Simultaneous WiFi AP + cellular internet on mobile devices (no captive DNS)
-- **USB Serial CDC** — zero-latency wired connection
-- Electron desktop app for Windows / Mac / Linux
+### Connectivity
+- **WiFi Access Point** — works with any browser on any device with wifi, no app required
 
 ### Signal Processing
 
@@ -59,16 +60,26 @@ A single 5-stage RSSI processing pipeline based on the upstream FPVGate algorith
 - 3-second ceiling-drift watchdog prevents phantom laps from RSSI drift
 - Tunable EMA smoothing slider (0–10, default 5 = upstream behaviour)
 
-### RSSI Calibration Wizard
+### RSSI Automatic Calibration Wizard
 - Guided fly-over recording with real-time RSSI chart
-- Automatic Enter / Exit threshold calculation from the recorded peaks
-- Visual calibration overview overlaid on the live scanner
-- Pause / resume live signal view for threshold fine-tuning
+- Automatic 3-peak detection with manual override
+- Enter / Exit threshold calculation with conservative safety margins (Enter ≈ 95 % of weakest peak, Exit ≈ 7 RSSI units below Enter, raised above the noise floor)
+- Peak-spread warning if the three peaks aren't reasonably equal — flagged for re-fly before applying
+- Live RSSI chart shows exactly what the lap detector sees (final pipeline output)
+
+### Multi-Node Racing — Built-In Race Directing
+
+Network **up to 8 devices** together with no router and no extra hardware. One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically.
+
+- **One-tap Start All / Stop All** — broadcast a synchronised race start to every pilot on the network
+- **Live per-pilot dashboard on the master** — each client renders as a card with pilot name, running indicator (●/○), live lap count, and last lap time, updated via Server-Sent Events with sub-second latency
+- **DNF tracking** — a pilot who taps Stop locally during a master race shows up as **DNF** on the director's screen; the rest of the heat continues uninterrupted
+- **Solo-practice override** — each client has an *Ignore Race Director Start/Stop if already racing* toggle so a director's broadcast doesn't kill an in-progress practice run
+- **Master discovery** — clients can scan for available masters in range and pick one from a list (no manual SSID typing required)
+- **Same UI on every device** — every client also runs as a fully featured standalone timer when no master is broadcasting
+- Master has the ability to modify each node's frequency / channel, pilot name and color.
 
 ### Voice Announcements
-- Pre-recorded ElevenLabs voices (4 voices included)
-- PiperTTS for low-latency on-device synthesis
-- Phonetic name support for accurate TTS pronunciation
 - Configurable announcement formats (full, lap time only, time only)
 
 ### Race Analysis
@@ -77,26 +88,12 @@ A single 5-stage RSSI processing pipeline based on the upstream FPVGate algorith
 - Fastest 3 consecutive laps (RaceGOW format)
 - Download race history to your device as JSON; re-import later
 - Marshalling mode — add, remove, or edit laps post-race
-- Detailed race analysis view
+- Detailed race analysis view with timeline and playback
 
-### Configuration & UX
-- **Unsaved-changes indicator** — Save Configuration button highlights orange (with pulse animation) when there are pending changes; returns to inactive when saved
-- Config backup and restore (download / import JSON)
-- OTA updates for both **firmware** and **filesystem** via ElegantOTA
-- Theme selector (multiple colour themes)
-- Mobile-responsive web interface
-
-### Webhooks & Integration
-- HTTP webhook support for external LED controllers and integrations
-- Configurable per-event triggers: race start, race stop, lap
-- Gate LED control with granular enable/disable per event
-- Up to 10 webhook endpoints
-
-### Developer Tools
-- Comprehensive self-test diagnostics (19 tests)
-- Serial monitor built into the web UI
-- USB transport abstraction layer
-- Open source — MIT License
+### Firmware Updates
+- **One-tap OTA from GitHub Releases** — built into the device. Enter your home WiFi once; the device joins, checks the latest release, downloads the firmware + filesystem images, flashes both, and reboots.
+- Updates are blocked while a race is running. Failed downloads keep the previous firmware, so the device can't be bricked from a flaky network.
+- Manual flashing via PlatformIO / esptool is still available — see [docs/FLASHING_OPTIONAL.md](docs/FLASHING_OPTIONAL.md).
 
 ---
 
@@ -133,7 +130,7 @@ A single 5-stage RSSI processing pipeline based on the upstream FPVGate algorith
 
 ### Hardware
 
-Pre-made and flashed hardware — link coming soon!
+Pre-made and flashed hardware — (ETSY LINK Coming Soon!)
 
 **[Detailed hardware setup →](docs/GETTING_STARTED.md)**
 
@@ -141,38 +138,29 @@ Pre-made and flashed hardware — link coming soon!
 
 1. Power on the device
 2. Connect your phone or laptop to the `FPVRaceOne_XXXX` network (password: `fpvraceone`)
-3. Open `http://192.168.4.1` in your browser
+3. Open `http://192.168.4.1` in your browser (`http://192.168.5.1` in Master mode)
 4. Go to **Settings → Set your VTx band and channel**
 5. Go to **Calibration → Run the wizard** to set RSSI thresholds
 6. Press **Start** and fly!
 
-### Connect via USB
-
-1. Download the [Electron app from releases](https://github.com/LouisHitchcock/FPVGate/releases)
-2. Connect the device via USB
-3. Launch the app and select your COM port
-4. All features work identically to WiFi mode
 
 **[Complete user guide →](docs/USER_GUIDE.md)**
 
 ---
 
-## OTA Updates
+## Firmware Updates
 
-FPVRaceOne supports over-the-air updates for both firmware and filesystem via **ElegantOTA**.
+FPVRaceOne updates itself from **GitHub Releases** — no PlatformIO, no cables, no flashing tools required for normal updates.
 
-1. Open `http://192.168.4.1/update` in your browser
-2. **Firmware update** — upload the `.bin` from `.pio/build/seeed_xiao_esp32c6/firmware.bin`
-3. **Filesystem update** — build the filesystem image first, then upload:
+1. Open the web UI → **Settings → Firmware Update**
+2. Enter your home WiFi credentials (one-time)
+3. Tap **Check for Updates** — the device briefly joins your home network, queries GitHub, then returns to AP mode
+4. If a newer release is available you'll see the version and release notes — tap **Update Now**
+5. The device flashes the filesystem, then the firmware, then reboots once. Total time ~1–3 minutes.
 
-```bash
-pio run --target buildfs --environment seeed_xiao_esp32c6
-# Output: .pio/build/seeed_xiao_esp32c6/littlefs.bin
-```
+Updates are automatically blocked while a race is running. If a download fails the device keeps the previous firmware, so a flaky network can't brick it.
 
-Select **Filesystem** in the ElegantOTA UI, upload `littlefs.bin`, and the device will reboot with updated web files.
-
-> Both firmware and filesystem must be updated after a release that changes either. They are independent uploads.
+For first-time flashing of new hardware (or recovery if the device won't boot), see [docs/FLASHING_OPTIONAL.md](docs/FLASHING_OPTIONAL.md).
 
 ---
 
@@ -197,18 +185,8 @@ Select **Filesystem** in the ElegantOTA UI, upload `littlefs.bin`, and the devic
 - Removed `vTaskDelay(50)` from debug logger — was stalling the RSSI loop by 50 ms on every threshold crossing event
 - Increased **SSE update rate** from 5 Hz to 20 Hz for more responsive live RSSI display
 - Moved webhook HTTP calls to Core 0 — prevents synchronous POST (up to 300 ms) from blocking the RSSI loop on Core 1
-- Added **Save Configuration dirty-state indicator** — button highlights orange with pulse animation when there are unsaved changes; returns to inactive after successful save
+- Added **Save Configuration indicator** — button highlights orange with pulse animation when there are unsaved changes;
 - Added `enterHoldSamples` and `exitConfirmSamples` to firmware config and settings UI (previously UI-only, not persisted)
-
-**v1.0.0**
-- Forked and ported from [FPVGate](https://github.com/LouisHitchcock/FPVGate) v1.4.1 by LouisHitchcock
-- Ported to Seeed XIAO ESP32-C6 hardware
-- Added all popular analog and digital VTx bands
-- Added USB CDC transport with Electron desktop app support
-- Removed SD card track management (no SD card on this hardware)
-- Removed captive DNS — allows simultaneous WiFi AP + cellular internet on mobile
-- Fixed frequency stuck on RaceBand Ch 1
-- Hides hardware features (LED, VBat, SD) when pins are not defined for the target board
 
 ---
 

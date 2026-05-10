@@ -15,7 +15,7 @@ In-depth technical documentation of all FPVRaceOne capabilities.
 5. [Voice Announcements](#voice-announcements)
 6. [Race Analysis](#race-analysis)
 7. [Race History & Data Management](#race-history--data-management)
-8. [Webhooks & Integration](#webhooks--integration)
+8. [Multi-Node Racing](#multi-node-racing)
 9. [Configuration Management](#configuration-management)
 10. [OTA Updates](#ota-updates)
 11. [Self-Test System](#self-test-system)
@@ -124,7 +124,7 @@ IDLE
 | RSSI sampling rate | ~10 ms | 100 Hz loop |
 | Peak detection | ±10 ms | Per-sample resolution |
 | System timer | < 1 ms | `millis()` |
-| V2 midpoint correction | Reduces systematic error | Timestamp shifted to peak centre |
+| Lap timestamp | At peak sample | Recorded at the sample where the peak was reached |
 
 ### Minimum Lap Time
 
@@ -137,14 +137,28 @@ Laps triggered within the minimum lap time are silently ignored. This prevents d
 ### Recording Phase
 
 - Firmware stores up to 5000 RSSI samples with millisecond timestamps in a dedicated calibration buffer
-- Samples are captured at the same rate as the live RSSI loop
-- Multiple fly-over passes can be recorded in a single session
+- The wizard records the **final pipeline output** (post Kalman → Median → MA → EMA → step limiter) — what the lap detector actually sees
+- One sample every 20 ms (~50 Hz)
+- Multiple fly-over passes can be recorded in a single session, but **3 passes is the sweet spot** for the threshold calculator
 
 ### Analysis Phase
 
-- The full recorded dataset is streamed to the browser in pages (500 samples/page) after recording stops
-- A chart renders all samples with the calculated Enter and Exit thresholds overlaid as horizontal lines
-- Thresholds are calculated from the observed peak and valley values
+After recording stops, the full dataset is streamed to the browser in pages (500 samples/page) and rendered on a chart.
+
+The wizard auto-detects the three highest peaks and overlays markers; any marker can be dragged manually to correct a missed detection.
+
+**Threshold calculation:**
+
+| Threshold | Formula | Reason |
+|-----------|---------|--------|
+| Enter RSSI | `round(0.95 × min(peakA, peakB, peakC))` | 5 % headroom keyed to the *weakest* peak so even the weakest pass triggers |
+| Exit RSSI | `Enter − 7`, raised above noise floor | Tight gap for tiny-whoop tracks; never below 35th-percentile noise + 3 |
+
+Both values are clamped to `[30, 255]` and Exit is forced ≥ 5 below Enter as a fallback hysteresis.
+
+### Peak-Spread Warning
+
+If the three peaks differ in height by more than ~15 % (weakest / strongest < 0.85), the wizard surfaces a non-blocking warning recommending a re-fly. False positives are cheap (the user can ignore and continue); false negatives leave the pilot with sub-optimal calibration without ever knowing.
 
 ### Overview Mode
 
@@ -229,7 +243,7 @@ Races are saved automatically when:
 
 ### Storage
 
-Races are stored in LittleFS (`/races.json`) and persist across reboots and firmware updates (as long as the filesystem is not erased).
+Races are stored as individual JSON files in LittleFS under `/races/race_<timestamp>.json` with an `/races/races_index.json` manifest. They persist across reboots and firmware updates as long as the filesystem partition isn't erased.
 
 ### JSON Format
 
@@ -264,20 +278,54 @@ Laps can be added or removed from any saved race after the fact. All statistics 
 
 ---
 
-## Webhooks & Integration
+## Multi-Node Racing
 
-HTTP POST webhooks are sent to configured IP addresses on race events.
+Network up to **8 FPVRaceOne devices** together — one **Master** + up to seven **Clients** — without a router. The master runs an Access Point that every client joins; lap events stream back over plain HTTP and Server-Sent Events.
 
-| Endpoint | Trigger |
-|----------|---------|
-| `/RaceStart` | Race starts |
-| `/RaceStop` | Race stops |
-| `/Lap` | Lap detected (or manually added) |
+### Roles
 
-- Up to 10 target IP addresses
-- Each event type can be independently enabled or disabled
-- A master **Gate LEDs Enabled** toggle controls whether any webhooks fire
-- Webhook HTTP calls run on Core 0 (WiFi/network core) and do not block the RSSI sampling loop on Core 1
+| Role | Behaviour |
+|------|-----------|
+| **Single** (default) | Standalone — no inter-device traffic |
+| **Master** | Race director. Hosts the WiFi AP that clients join; renders the multi-node Race tab; broadcasts Start All / Stop All |
+| **Client** | Joins the master's AP. Presents the same race UI as standalone, plus a card on the master with live state |
+
+Switching roles requires a reboot — the **Apply Multi-Node & Reboot** button only enables when Node Mode actually changes, so other multi-node settings can be tweaked without forcing a restart.
+
+### Discovery
+
+Clients can scan for available masters in range (`mnScanNetworks()`): every `FPVRaceOne_*` AP within signal is listed and tappable to autofill the Master SSID field.
+
+### Master Race Tab
+
+Each connected client appears as a card showing pilot name, running indicator, lap count, and last lap time. State updates stream from clients via 1 Hz heartbeats and are pushed to the browser as Server-Sent Events (`multiNodeState` event).
+
+| Indicator | Meaning |
+|-----------|---------|
+| ● **Running** | Client's lap timer is running |
+| ○ **Stopped** | Client is idle |
+| ⚠ **DNF** | Client pressed Stop locally during a master-broadcast race (early quit) |
+
+### Start / Stop Broadcast
+
+- **Start All** sends `POST /timer/masterStart` to every online client in parallel — sequential calls in firmware land within ~350 ms of each other (acceptable for current head-to-head precision; can be moved to true-parallel HTTP if tighter sync is needed later)
+- **Stop All** sends `POST /timer/masterStop`
+- Each client decides what to do with the broadcast based on its own *Ignore Race Director Start/Stop if already racing* toggle (default off → honour broadcast)
+- The client pushes `masterRaceState` SSE to its browser so the UI flips into race-running state — Start button looks pressed, Stop becomes the active button — same as if the pilot had pressed Start locally
+
+### Early Quit Notification
+
+When a client's pilot presses **Stop** locally during an active master-broadcast race, the client posts `/api/multinode/quit` to the master. The master sets `quitEarly = true` on that node and the card flips to **DNF** until the next master-broadcast Start All.
+
+This is what lets a director keep a heat running cleanly when one pilot crashes or batteries out — they tap Stop on their own device, the rest of the field continues racing without interruption, and the director sees exactly who DNF'd.
+
+### Solo-Practice Override
+
+Each client has an **Ignore Race Director Start/Stop if already racing** toggle (`mnSkipMasterStart` in config). When on:
+
+- A master Start All broadcast is silently ignored if the client's timer is already running locally
+- The pilot can keep practising while a director runs heats on the rest of the field
+- Toggle off to rejoin the directed race format
 
 ---
 
@@ -291,7 +339,7 @@ A backup is also written to LittleFS which can be restored if EEPROM is invalida
 
 ### Versioning
 
-`CONFIG_VERSION` is incremented whenever the config struct changes. The current version is **11**.
+`CONFIG_VERSION` is incremented whenever the config struct changes. When the stored version doesn't match firmware expectation, the device loads defaults (no destructive migration). The current version is defined in `lib/CONFIG/config.h`.
 
 ### Settings Save Behaviour
 
@@ -311,55 +359,55 @@ Key config fields stored per device:
 
 - Band, channel, frequency
 - Enter RSSI, Exit RSSI
-- Min lap time, max laps, alarm threshold
+- Min lap time, max laps
 - Announcer type, rate, voice, lap format, phonetic name
-- Pilot name, callsign, color
+- Pilot name, callsign, colour
 - LED preset, brightness, speed, colours, manual override
-- Webhooks enabled, IPs, per-event toggles, gate LEDs enabled
-- WiFi SSID, password, external antenna, TX power
+- WiFi (AP + home) SSID, password, external antenna, TX power
 - RSSI sensitivity
-- Filter mode (V1/V2), Bessel Hz cutoff
-- Enter Hold Samples, Exit Confirm Samples
-- Theme, voice enabled, lap format
+- Pipeline Smoothing level (`v1Smoothing`), Gate-1 Bootstrap toggle
+- Selected track ID
+- Multi-node: node mode, master SSID, skip-master-start toggle
+- Theme, selected voice
 
 ---
 
 ## OTA Updates
 
-Firmware and filesystem are updated independently via ElegantOTA at `http://192.168.4.1/update`.
+The device pulls release artefacts directly from GitHub Releases. There is no PlatformIO requirement and no manual upload step for normal updates.
 
-### Firmware
+### End-User Flow
 
-Build target: `pio run --environment seeed_xiao_esp32c6`  
-Output: `.pio/build/seeed_xiao_esp32c6/firmware.bin`
+1. **Settings → Firmware Update** — enter Home WiFi credentials (saved permanently after the first time)
+2. Tap **Check for Updates** — the device briefly drops the AP, joins the home network, hits `https://api.github.com/repos/<owner>/<repo>/releases/latest`, and reads the asset list
+3. If the published `tag_name` is newer than the installed `firmware_version.h` build, the user is prompted with the version + release notes
+4. Tap **Update Now** — the device downloads `FPVRaceOne-littlefs.bin`, flashes the LittleFS partition, then downloads `FPVRaceOne-firmware.bin`, flashes the OTA partition, and reboots once
+5. If any download fails, the previous firmware/filesystem is preserved — the device cannot be bricked from a flaky network
 
-Select **Firmware** in ElegantOTA and upload.
+### Release Asset Naming
 
-### Filesystem
+The CI workflow produces two binaries per release:
 
-Build target: `pio run --target buildfs --environment seeed_xiao_esp32c6`  
-Output: `.pio/build/seeed_xiao_esp32c6/littlefs.bin`
+- `FPVRaceOne-firmware.bin` — application image (flashed to OTA_0/1)
+- `FPVRaceOne-littlefs.bin` — filesystem image (flashed to LittleFS)
 
-Select **Filesystem** in ElegantOTA and upload.
+### Manual Flashing (Recovery)
 
-> Both should be updated after any release that changes either firmware logic or web UI files. They are completely independent uploads.
+For first-time setup of new hardware or recovery if the device won't boot, `pio run -e seeed_xiao_esp32c6 -t upload` and `-t uploadfs` are still supported. See [FLASHING_OPTIONAL.md](FLASHING_OPTIONAL.md).
+
+### Race-Time Safety
+
+Updates are blocked while a race is running. Attempting to start an update during a race returns an error.
 
 ---
 
 ## Self-Test System
 
-Access via **Settings → System Diagnostics → Run All Tests**.
+Access via **Settings → Diagnostics → Run All Tests**.
 
-19 tests covering hardware, storage, connectivity, and software:
+The self-test exercises hardware, storage, and software paths and reports pass/fail with detail text. Results can be downloaded as a diagnostic log to attach to a GitHub issue.
 
-| Category | Tests |
-|----------|-------|
-| Hardware | RX5808 RSSI module, buzzer |
-| Storage | EEPROM, LittleFS |
-| Connectivity | WiFi AP, USB CDC, transport layer |
-| Software | Configuration validity, lap timer, race history, webhooks, web server files, OTA partitions |
-
-Results show pass/fail per test with detail text. A diagnostic log can be downloaded for support.
+Categories covered include the RX5808 SPI driver, EEPROM, LittleFS, WiFi AP / station, USB CDC transport, lap timer, race history, web server file presence, and OTA partition health.
 
 ---
 
@@ -369,17 +417,18 @@ Results show pass/fail per test with detail text. A diagnostic log can be downlo
 
 ```
 src/
-└── main.cpp              — Entry point; Core 1 = RSSI loop, Core 0 = WiFi/webhooks
+└── main.cpp              — Entry point; sampling loop on Core 1, WiFi/HTTP on Core 0
 
 lib/
-├── CALIBRATION/          — Wizard recording and buffer management
 ├── CONFIG/               — Configuration struct, EEPROM, serialisation
-├── DEBUG/                — Debug logger (no vTaskDelay in hot path)
-├── KALMAN/               — Kalman filter (standard Q/R convention)
-├── LAPTIMER/             — V1/V2 pipeline, gate state machine, lap events
+├── DEBUG/                — Debug logger (web-streamed, no hot-path delays)
+├── KALMAN/               — Kalman filter
+├── LAPTIMER/             — Single 5-stage filter pipeline + gate state machine + lap events
 ├── RX5808/               — RX5808 SPI driver and ADC read
-├── WEBSERVER/            — ESPAsyncWebServer HTTP + SSE at 20 Hz
-├── WEBHOOKMANAGER/       — HTTP POST webhooks (Core 0)
+├── MULTINODE/            — Master/client coordination (heartbeats, broadcasts, quit notifications)
+├── RACEHISTORY/          — Per-race JSON storage with index file
+├── TRACKMANAGER/         — Track CRUD + distance integration
+├── WEBSERVER/            — ESPAsyncWebServer HTTP + SSE
 └── ...
 ```
 
@@ -388,8 +437,8 @@ lib/
 ```
 data/
 ├── index.html            — Single-page application
-├── style.css             — Responsive styles, 23 themes, save-button dirty state
-├── script.js             — UI logic, staged config, race control, calibration
+├── style.css             — Responsive styles, multiple themes, save-button dirty state
+├── script.js             — UI logic, staged config, race control, calibration, multi-node
 └── usb-transport.js      — USB Serial CDC communication layer
 ```
 
@@ -397,20 +446,26 @@ data/
 
 | Core | Responsibilities |
 |------|-----------------|
-| Core 1 (main loop) | RSSI sampling at 100 Hz, Kalman/Bessel filtering, gate detection, lap events |
-| Core 0 (parallel task) | WiFi stack, HTTP server, SSE streaming, webhook HTTP POST calls |
+| Core 1 (main loop) | RSSI sampling, full filter pipeline, gate detection, lap events, audio |
+| Core 0 (parallel task) | WiFi stack, HTTP server, SSE streaming, multi-node POSTs, OTA download |
 
-Webhook calls (up to 300 ms synchronous HTTP) were moved to Core 0 specifically to prevent them from stalling RSSI reads during lap events.
+Network calls run on Core 0 specifically so they never stall RSSI reads during lap events.
 
 ### SSE Streaming
 
-Live RSSI data is pushed to the browser via Server-Sent Events at **20 Hz** (50 ms interval). SSE is one-way (server → client) and avoids WebSocket overhead for the high-frequency RSSI feed.
+The browser receives several streams of Server-Sent Events:
+- Live RSSI samples (high-frequency)
+- Race state changes (`raceState`, `masterRaceState`)
+- Multi-node node updates (`multiNodeState`)
+- Debug log lines (when the diagnostics tab is open)
+
+SSE is one-way (server → client) and avoids WebSocket overhead for the high-frequency RSSI feed.
 
 ### Memory Layout (XIAO ESP32-C6)
 
 | Partition | Size | Contents |
 |-----------|------|----------|
-| Bootloader | 32 KB | ESP32 bootloader |
+| Bootloader | ~32 KB | ESP32 bootloader |
 | Partition table | 4 KB | Partition layout |
 | OTA_0 (App0) | 2 MB | Primary firmware |
 | OTA_1 (App1) | 2 MB | OTA update staging |
@@ -418,4 +473,4 @@ Live RSSI data is pushed to the browser via Server-Sent Events at **20 Hz** (50 
 
 ---
 
-**Questions or issues? [Open a GitHub issue](https://github.com/LouisHitchcock/FPVGate/issues)**
+**Questions or issues? [Open a GitHub issue](https://github.com/ramiss/FPVRaceOne/issues)**
