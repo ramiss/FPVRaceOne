@@ -7,6 +7,11 @@ Get your FPVRaceOne lap timer up and running in minutes!
 1. A pre-flashed FPVRaceOne lap timer (ETSY link coming soon) and a phone, tablet, or laptop with WiFi.
 2. Any USB power battery bank or supply (not included with FPVRaceOne). Or, if you want to power off your LiPo/Liion batteries then you can google search for "USB-C Power Supply Cable for GoPro" for a cheap (~$10) adapter option.
 
+Runtime estimates:
+1000 mAh USB power bank: roughly 1.5–2.5 hours
+2000 mAh: roughly 3–5 hours
+5000 mAh: roughly 8–12 hours
+
 ## First Connection
 
 1. **Power on** the device — wait ~10 seconds for the AP to come up
