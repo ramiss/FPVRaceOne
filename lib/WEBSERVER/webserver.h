@@ -59,5 +59,4 @@ class Webserver : public TransportInterface {
     bool sendRssi = false;
     uint32_t rssiSentMs = 0;
     uint32_t sseKeepaliveMs = 0;
-    uint32_t sseCleanupMs = 0;
 };

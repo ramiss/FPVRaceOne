@@ -2477,6 +2477,18 @@ async function checkForUpdates() {
   setUpdateBusy(true, 'Checking…');
   showUpdateStatus('Connecting to home WiFi and contacting GitHub…', 10);
 
+  // Scroll the status panel into view so the user can see progress without
+  // hunting for it.  The panel materialises below the fold for most window
+  // heights — `block: 'end'` reveals the bottom of the panel, which is what
+  // the user came here to read.  requestAnimationFrame ensures the panel's
+  // display:'' has been applied before the browser computes scroll offsets.
+  requestAnimationFrame(() => {
+    const panel = document.getElementById('updateStatusPanel');
+    if (panel && typeof panel.scrollIntoView === 'function') {
+      panel.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    }
+  });
+
   // Arm the SSE-driven fallback BEFORE we kick off the request.  If the HTTP
   // response is lost to the AP-retune disconnect, the SSE channel will deliver
   // the terminal state and we recover by reading /api/update/status.
@@ -2558,7 +2570,7 @@ async function checkForUpdates() {
     `  1. Join your home WiFi\n` +
     `  2. Download the filesystem and firmware images (~1–3 minutes)\n` +
     `  3. Reboot once the update is complete\n\n` +
-    `Your phone may briefly disconnect — reconnect to FPVRaceOne_XXXX if so.\n\n` +
+    `Your device may briefly disconnect — reconnect to FPVRaceOne_XXXX if so.\n\n` +
     `Update now?`;
 
   if (!confirm(message)) {

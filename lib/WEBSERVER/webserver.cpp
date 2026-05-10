@@ -237,25 +237,14 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         sseKeepaliveMs = currentTimeMs;
     }
 
-    // Evict zombie SSE connections left by browser page reloads on Windows.
-    // Windows OS ACKs incoming SSE data at the TCP level even after the tab is gone,
-    // so the keepalive ping never triggers AsyncTCP's ACK timeout for these sockets.
-    // Strategy: track when count *first* exceeds 1. Only close if it stays > 1 for
-    // 500 ms — a normal refresh drops back to 1 within ~100 ms via pagehide, so
-    // closing at 500 ms still gives pagehide time to fire without waiting so long
-    // that events.close() kills the new connection while the page is still loading.
-    if (servicesStarted) {
-        if (events.count() > 1) {
-            if (sseCleanupMs == 0) {
-                sseCleanupMs = currentTimeMs;          // record when overflow first seen
-            } else if (currentTimeMs - sseCleanupMs > 500) {
-                sseCleanupMs = 0;                      // reset so we re-arm after close
-                events.close();
-            }
-        } else {
-            sseCleanupMs = 0;                          // count normal — disarm
-        }
-    }
+    // [Previously: closed all SSE clients when events.count() > 1 for >500 ms
+    //  to evict Windows-Chrome-refresh zombies that AsyncTCP's ACK timeout
+    //  can't detect.  That heuristic broke multi-client racing — two
+    //  legitimate viewers would both get kicked, reconnect, and loop forever
+    //  with a "WiFi disconnected — reconnecting" banner flashing on each.
+    //  Removed.  Genuine dead connections still time out via AsyncTCP's
+    //  CONFIG_ASYNC_TCP_MAX_ACK_TIME (3 s, set in platformio.ini); Windows
+    //  refresh zombies just linger briefly but cause no functional issue.]
 
     // Push multiNodeClientState SSE to client browser when connection state changes
     if (servicesStarted && multiNode && multiNode->isClientMode() &&

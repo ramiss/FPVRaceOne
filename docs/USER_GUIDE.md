@@ -194,7 +194,7 @@ The device updates itself from GitHub Releases.
 2. Tap **Check for Updates** — the device briefly joins your home network, queries GitHub, returns to AP mode
 3. If a newer release exists, you'll see the version + release notes — tap **Update Now**
 4. The device flashes the filesystem image, then the firmware image, then reboots once. Total time ~1–3 minutes
-5. Your phone may briefly disconnect from the device's AP during the update — reconnect when prompted
+5. Your device may briefly disconnect from the device's AP during the update — reconnect when prompted
 
 **Safety:**
 - Updates are blocked while a race is running

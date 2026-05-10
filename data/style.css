@@ -1573,12 +1573,14 @@ footer {
 
 .update-btn {
   /* Use inline-flex + center alignment so an <a> and a <button> with the
-     same padding render at exactly the same height — a plain <button>'s
-     UA border + line-height would otherwise make it taller than an <a>. */
+     same padding render at exactly the same height.  We also pin a
+     min-height and disable the UA `appearance` to make sure neither
+     element falls back to a browser-default size box. */
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 9px 18px;
+  min-height: 38px;
+  padding: 0 18px;
   border: none;
   border-radius: 4px;
   font-size: 14px;
@@ -1588,6 +1590,8 @@ footer {
   text-align: center;
   cursor: pointer;
   box-sizing: border-box;
+  -webkit-appearance: none;
+  appearance: none;
   transition: opacity 0.2s;
 }
 
