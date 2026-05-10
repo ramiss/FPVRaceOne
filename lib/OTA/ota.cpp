@@ -144,7 +144,21 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
     http.setTimeout(10000);
 
-    String apiUrl = String("https://api.github.com/repos/") + UPDATE_REPO + "/releases/latest";
+    // Two endpoints, two response shapes:
+    //   * /releases/latest — single object, server-side filters out drafts AND
+    //     prereleases.  Returns HTTP 404 if no qualifying release exists.
+    //   * /releases?per_page=10 — array of recent releases, includes drafts
+    //     and prereleases.  Always 200 (with possibly empty array).
+    const bool includePre = _config && _config->getOtaIncludePrereleases();
+    String apiUrl = String("https://api.github.com/repos/") + UPDATE_REPO;
+    if (includePre) {
+        // 10 entries is plenty — the first non-draft is what we want.  Drafts
+        // are extremely rare in practice (only created via the web UI), so
+        // even one entry would usually suffice; 10 buys headroom.
+        apiUrl += "/releases?per_page=10";
+    } else {
+        apiUrl += "/releases/latest";
+    }
     if (!http.begin(client, apiUrl)) {
         err = "HTTP client init failed";
         setState(STATE_ERROR, err);
@@ -153,13 +167,10 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     }
 
     int code = http.GET();
-    if (code == 404) {
-        // /releases/latest returns 404 when the repo has zero published full
-        // releases (drafts and prereleases don't count toward `latest`).  This
-        // is a successful check with nothing to install — not a failure, and
-        // the UI must not say "failed" or the user will think the device is
-        // broken.  Report up-to-date with empty versions; frontend keys off
-        // the empty latestVersion string for the right wording.
+    // Stable channel only: 404 means no qualifying full release exists.
+    // Pre-release channel uses the array endpoint, which never 404s for an
+    // existing repo — an empty array is handled below.
+    if (code == 404 && !includePre) {
         http.end();
         out.currentVersion = FIRMWARE_VERSION;
         out.latestVersion  = "";
@@ -186,7 +197,9 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     String body = http.getString();
     http.end();
 
-    DynamicJsonDocument doc(8192);
+    // Larger doc to fit a 10-entry releases array.  Stable channel uses far
+    // less; sizing for the worst case keeps the code paths uniform.
+    DynamicJsonDocument doc(16384);
     DeserializationError jerr = deserializeJson(doc, body);
     if (jerr) {
         err = String("JSON parse error: ") + jerr.c_str();
@@ -195,13 +208,45 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         return false;
     }
 
+    // Pick the release object to inspect.  In stable mode the response is a
+    // single object.  In prerelease mode it's an array; pick the first
+    // non-draft entry (drafts are private placeholders, never installable).
+    JsonObject release;
+    if (includePre) {
+        JsonArray arr = doc.as<JsonArray>();
+        for (JsonObject r : arr) {
+            if (!r["draft"].as<bool>()) {
+                release = r;
+                break;
+            }
+        }
+        if (release.isNull()) {
+            // Empty array, or every entry was a draft.  Treat as "no releases
+            // yet" — same UX as the stable channel's 404 path.
+            out.currentVersion = FIRMWARE_VERSION;
+            out.latestVersion  = "";
+            out.releaseNotes   = "";
+            out.firmwareUrl    = "";
+            out.filesystemUrl  = "";
+            out.available      = false;
+            _lastInfo      = out;
+            _lastInfoValid = true;
+            setState(STATE_UP_TO_DATE, "No releases published yet for this device's firmware repo.");
+            setProgress(100);
+            disconnectFromHomeWifi();
+            return true;
+        }
+    } else {
+        release = doc.as<JsonObject>();
+    }
+
     out.currentVersion = FIRMWARE_VERSION;
-    out.latestVersion  = doc["tag_name"].as<String>();
-    out.releaseNotes   = doc["body"].as<String>();
+    out.latestVersion  = release["tag_name"].as<String>();
+    out.releaseNotes   = release["body"].as<String>();
     out.firmwareUrl    = "";
     out.filesystemUrl  = "";
 
-    JsonArray assets = doc["assets"].as<JsonArray>();
+    JsonArray assets = release["assets"].as<JsonArray>();
     for (JsonObject asset : assets) {
         String name = asset["name"].as<String>();
         String aurl = asset["browser_download_url"].as<String>();

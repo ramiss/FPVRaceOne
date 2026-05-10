@@ -289,23 +289,43 @@ env.AddCustomTarget(
 )
 
 # ── Publish a release ─────────────────────────────────────────────────────────
+#
+# Two targets share the same publish_release.py script.  The script reads
+# either `--prerelease` from argv or RELEASE_PRERELEASE=1 from the env to
+# decide which mode it's in.  The CI workflow then keys off the presence of
+# a `-` in the pushed tag to set GitHub's Pre-release flag automatically.
 
-def publish_release(source, target, env):
-    """Hand off to scripts/publish_release.py.  No build dependency — we are
-    just creating + pushing a git tag; CI does the actual artifact build."""
+def _run_publish_script(env, prerelease=False):
     script = os.path.join(env.subst("$PROJECT_DIR"), "scripts", "publish_release.py")
     python = env.subst("$PYTHONEXE")
-    # Inherit stdin/stdout/stderr so the user can see prompts and answer them.
-    result = subprocess.run([python, script])
+    args = [python, script]
+    if prerelease:
+        args.append("--prerelease")
+    # Inherit stdin/stdout/stderr so the user sees prompts and can answer them.
+    result = subprocess.run(args)
     if result.returncode != 0:
         # Surface the failure code so PIO marks the target as failed.
         import sys as _sys
         _sys.exit(result.returncode)
+
+def publish_release(source, target, env):
+    _run_publish_script(env, prerelease=False)
+
+def publish_prerelease(source, target, env):
+    _run_publish_script(env, prerelease=True)
 
 env.AddCustomTarget(
     name="publish_release",
     dependencies=None,
     actions=publish_release,
     title="Publish Release (tag + push)",
-    description="Tag the current commit and push to origin; GitHub Actions builds + publishes binaries"
+    description="Tag a stable vMAJOR.MINOR.PATCH and push; CI publishes a full GitHub Release"
+)
+
+env.AddCustomTarget(
+    name="publish_prerelease",
+    dependencies=None,
+    actions=publish_prerelease,
+    title="Publish Pre-release (beta tag + push)",
+    description="Tag with a -beta.N suffix and push; CI publishes with the Pre-release flag set"
 )

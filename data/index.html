@@ -1138,6 +1138,22 @@
                 Saved automatically. Only used during firmware checks — the device drops back to AP mode after the update completes (or fails).
               </div>
 
+              <h3>Channel</h3>
+              <div class="config-item">
+                <label for="otaIncludePrereleasesToggle">Include pre-releases:</label>
+                <div style="flex: 1;">
+                  <label class="switch">
+                    <input type="checkbox" id="otaIncludePrereleasesToggle" onchange="document.getElementById('otaIncludePrereleasesLabel').textContent=this.checked?'On':'Off'; stagedConfig['otaIncludePrereleases']=this.checked?1:0; stagedDirty=true; updateSaveButton()">
+                    <span class="slider"></span>
+                  </label>
+                  <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="otaIncludePrereleasesLabel">Off</span>
+                </div>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 16px;">
+                <strong>Off</strong> (default): only stable releases are offered — devices stay on the production channel.
+                <strong>On</strong>: also offer beta / pre-release builds (e.g. <code>v1.1.0-beta.1</code>). Useful for testing upcoming features before they're promoted to stable.
+              </div>
+
               <h3>Update</h3>
               <div class="update-actions">
                 <a href="https://github.com/ramiss/FPVRaceOne/releases/latest"

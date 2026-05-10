@@ -124,7 +124,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 22
+#define CONFIG_VERSION 23
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -176,6 +176,7 @@ typedef struct {
     char masterPassword[33];    // Password for master AP (default "fpvraceone")
     uint8_t mnSkipMasterStart;  // 1=skip master Start All if race already running on this node
     uint8_t devMode;            // 0=off, 1=dev mode (simulate laps by clicking pilot name)
+    uint8_t otaIncludePrereleases;  // 0=stable only (default), 1=also offer beta / pre-release builds in Check for Updates
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -242,6 +243,8 @@ class Config {
     void    setMnSkipMasterStart(bool skip);
     uint8_t getDevMode();
     void    setDevMode(uint8_t mode);
+    bool    getOtaIncludePrereleases();
+    void    setOtaIncludePrereleases(bool include);
 
     // added because we use multiple bands with the same channels and revere freq lookup no longer works
     void setBandIndex(uint8_t band);

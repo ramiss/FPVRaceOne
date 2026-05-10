@@ -155,6 +155,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
     config["devMode"] = conf.devMode;
+    config["otaIncludePrereleases"] = conf.otaIncludePrereleases;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -205,6 +206,7 @@ void Config::toJsonString(char* buf) {
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
     config["devMode"] = conf.devMode;
+    config["otaIncludePrereleases"] = conf.otaIncludePrereleases;
 
     #ifdef PIN_VBAT
         config["hasVbat"] = true;
@@ -417,6 +419,10 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("masterPassword"))     setStr("masterPassword", conf.masterPassword, sizeof(conf.masterPassword));
     if (source.containsKey("mnSkipMasterStart"))  setU8("mnSkipMasterStart", conf.mnSkipMasterStart, 0, 1);
     if (source.containsKey("devMode"))            setU8("devMode", conf.devMode, 0, 1);
+
+    // ===== OTA =====
+    if (source.containsKey("otaIncludePrereleases"))
+        setU8("otaIncludePrereleases", conf.otaIncludePrereleases, 0, 1);
 }
 
 
@@ -806,6 +812,18 @@ void Config::setDevMode(uint8_t mode) {
     }
 }
 
+bool Config::getOtaIncludePrereleases() {
+    return conf.otaIncludePrereleases != 0;
+}
+
+void Config::setOtaIncludePrereleases(bool include) {
+    uint8_t val = include ? 1 : 0;
+    if (conf.otaIncludePrereleases != val) {
+        conf.otaIncludePrereleases = val;
+        modified = true;
+    }
+}
+
 void Config::setBandIndex(uint8_t band) {
   if (conf.bandIndex != band) {
     conf.bandIndex = band;
@@ -1047,6 +1065,7 @@ void Config::setDefaults(void) {
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));
     conf.mnSkipMasterStart = 0;
     conf.devMode = 0;
+    conf.otaIncludePrereleases = 0;  // Stable releases only by default
     modified = true;
     write();
 }

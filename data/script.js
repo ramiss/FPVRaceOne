@@ -2126,6 +2126,9 @@ function buildConfigSnapshotFromUI() {
     mnSkipMasterStart: document.getElementById('mnSkipMasterStartToggle')?.checked ? 1 : 0,
     devMode: document.getElementById('devModeToggle')?.checked ? 1 : 0,
 
+    // OTA
+    otaIncludePrereleases: document.getElementById('otaIncludePrereleasesToggle')?.checked ? 1 : 0,
+
   };
 
   return cfg;
@@ -6908,6 +6911,13 @@ function openSettingsModal() {
           if (devModeLabel) devModeLabel.textContent = config.devMode ? 'On' : 'Off';
           const _pnd = document.getElementById('pilotNameDisplay');
           if (_pnd) _pnd.style.cursor = config.devMode ? 'pointer' : 'default';
+        }
+
+        const otaPreToggle = document.getElementById('otaIncludePrereleasesToggle');
+        const otaPreLabel  = document.getElementById('otaIncludePrereleasesLabel');
+        if (otaPreToggle && config.otaIncludePrereleases !== undefined) {
+          otaPreToggle.checked = !!config.otaIncludePrereleases;
+          if (otaPreLabel) otaPreLabel.textContent = config.otaIncludePrereleases ? 'On' : 'Off';
         }
 
         // All UI fields populated — now unlock staging so user changes can be tracked

@@ -105,6 +105,12 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # Tags with a `-` after the version triple (e.g. v0.1.2-beta.1)
+          # are pushed by the `publish_prerelease` PIO target.  Flag them as
+          # GitHub Pre-releases so they're excluded from /releases/latest —
+          # the device's "Check for Updates" only sees them as upgrades when
+          # the user is on a same-or-older non-stable build.
+          prerelease: ${{ contains(steps.version.outputs.tag, '-') }}
           files: |
             release-assets/FPVRaceOne-firmware.bin
             release-assets/FPVRaceOne-littlefs.bin
