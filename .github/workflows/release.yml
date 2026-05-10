@@ -73,22 +73,46 @@ jobs:
           echo "tag=$REF_NAME"     >> "$GITHUB_OUTPUT"
           echo "Building FIRMWARE_VERSION=$VERSION (tag=$REF_NAME)"
 
-      - name: Build firmware + filesystem
+      - name: Build firmware
         run: |
           set -x
-          # IMPORTANT: build firmware and filesystem in ONE pio invocation.
-          # Running them as two separate `pio run` calls broke on Linux —
-          # the second invocation (buildfs) was wiping the env's build
-          # directory before producing only littlefs.bin, leaving CI with no
-          # firmware.bin.  In a single invocation SCons resolves both targets
-          # in one session and the artifacts accumulate as expected.
-          pio run -e seeed_xiao_esp32c6 -t buildprog -t buildfs
+          # No -t: invokes the default target which is the firmware build.
+          # The platform has no `build` or `buildprog` name to pass via -t —
+          # passing one would either be silently ignored (which is exactly
+          # what happened on a previous attempt with `-t buildprog`) or skip
+          # the firmware build entirely.
+          pio run -e seeed_xiao_esp32c6
           echo "----- contents of .pio/build/seeed_xiao_esp32c6/ -----"
           ls -la .pio/build/seeed_xiao_esp32c6/
           test -s .pio/build/seeed_xiao_esp32c6/firmware.bin \
-            || { echo "::error::firmware.bin missing or empty after pio run"; exit 1; }
+            || { echo "::error::firmware.bin missing or empty after firmware build"; exit 1; }
+          # Stash firmware.bin in /tmp so the next step (buildfs) can't lose it.
+          # On Linux, `pio run -t buildfs` was observed to clean the env build
+          # dir before producing littlefs.bin — wiping firmware.bin in the
+          # process.  Stashing and restoring around buildfs is the most robust
+          # defence without having to surgically rework extra_script.py.
+          cp .pio/build/seeed_xiao_esp32c6/firmware.bin /tmp/fw-stash.bin
+          echo "Stashed firmware.bin to /tmp/fw-stash.bin"
+
+      - name: Build filesystem image
+        run: |
+          set -x
+          pio run -e seeed_xiao_esp32c6 -t buildfs
+          echo "----- contents of .pio/build/seeed_xiao_esp32c6/ -----"
+          ls -la .pio/build/seeed_xiao_esp32c6/
           test -s .pio/build/seeed_xiao_esp32c6/littlefs.bin \
-            || { echo "::error::littlefs.bin missing or empty after pio run"; exit 1; }
+            || { echo "::error::littlefs.bin missing or empty after pio buildfs"; exit 1; }
+          # Restore firmware.bin if buildfs cleaned it.  We verify the stash
+          # exists first so the "::error::" message in the next test reflects
+          # the right failure mode if something has gone really sideways.
+          if [ ! -s .pio/build/seeed_xiao_esp32c6/firmware.bin ]; then
+            test -s /tmp/fw-stash.bin \
+              || { echo "::error::firmware.bin gone AND stash missing — build is in an unrecoverable state"; exit 1; }
+            cp /tmp/fw-stash.bin .pio/build/seeed_xiao_esp32c6/firmware.bin
+            echo "Restored firmware.bin from /tmp/fw-stash.bin (buildfs wiped it)"
+          fi
+          test -s .pio/build/seeed_xiao_esp32c6/firmware.bin \
+            || { echo "::error::firmware.bin still missing after restore attempt"; exit 1; }
 
       - name: Stage release assets
         run: |
