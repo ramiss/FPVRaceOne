@@ -34,7 +34,7 @@
 #include "racehistory.h"
 #include "storage.h"
 #include "selftest.h"
-#include "rx5808.h"
+#include "RX5808.h"
 #include "trackmanager.h"
 
 #ifdef ESP32S3
