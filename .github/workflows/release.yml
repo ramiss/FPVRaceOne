@@ -73,29 +73,22 @@ jobs:
           echo "tag=$REF_NAME"     >> "$GITHUB_OUTPUT"
           echo "Building FIRMWARE_VERSION=$VERSION (tag=$REF_NAME)"
 
-      - name: Build firmware
+      - name: Build firmware + filesystem
         run: |
           set -x
-          pio run -e seeed_xiao_esp32c6 -t buildprog
+          # IMPORTANT: build firmware and filesystem in ONE pio invocation.
+          # Running them as two separate `pio run` calls broke on Linux —
+          # the second invocation (buildfs) was wiping the env's build
+          # directory before producing only littlefs.bin, leaving CI with no
+          # firmware.bin.  In a single invocation SCons resolves both targets
+          # in one session and the artifacts accumulate as expected.
+          pio run -e seeed_xiao_esp32c6 -t buildprog -t buildfs
           echo "----- contents of .pio/build/seeed_xiao_esp32c6/ -----"
           ls -la .pio/build/seeed_xiao_esp32c6/
-          # Hard fail if firmware.bin wasn't produced.  pio sometimes exits 0
-          # without emitting the binary (e.g. on a default-target change in a
-          # future pio version) and we'd rather catch that here with a clear
-          # message than silently fail at the cp step three steps later.
           test -s .pio/build/seeed_xiao_esp32c6/firmware.bin \
             || { echo "::error::firmware.bin missing or empty after pio run"; exit 1; }
-
-      - name: Build filesystem image
-        run: |
-          set -x
-          pio run -e seeed_xiao_esp32c6 -t buildfs
-          echo "----- contents of .pio/build/seeed_xiao_esp32c6/ -----"
-          ls -la .pio/build/seeed_xiao_esp32c6/
           test -s .pio/build/seeed_xiao_esp32c6/littlefs.bin \
-            || { echo "::error::littlefs.bin missing or empty after pio buildfs"; exit 1; }
-          test -s .pio/build/seeed_xiao_esp32c6/firmware.bin \
-            || { echo "::error::firmware.bin disappeared during buildfs"; exit 1; }
+            || { echo "::error::littlefs.bin missing or empty after pio run"; exit 1; }
 
       - name: Stage release assets
         run: |
