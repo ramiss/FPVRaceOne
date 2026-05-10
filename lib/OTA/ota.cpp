@@ -19,20 +19,154 @@ static String stripVersionPrefix(const String& s) {
     return s;
 }
 
-// Returns -1 if a < b, 0 if equal, +1 if a > b.  Compares major.minor.patch
-// numerically; missing components are treated as 0.  Pre-release suffixes
-// (e.g. "1.2.3-rc1") are ignored — sscanf stops at the first non-numeric.
+static bool isAllDigits(const String& s) {
+    if (s.length() == 0) return false;
+    for (size_t i = 0; i < s.length(); i++) {
+        if (s[i] < '0' || s[i] > '9') return false;
+    }
+    return true;
+}
+
+// `git describe --tags --always --dirty` produces strings like
+// "1.2.3-87-g51aa636-dirty" for "87 commits past v1.2.3, working tree dirty".
+// For OTA precedence we want to compare against the *base tag* (1.2.3 here),
+// because the -N-gSHA-dirty suffix is git artefact, not a semver prerelease.
+// Without this, a dev build of v0.1.2-beta.1 would look (under semver rules)
+// "newer" than v0.1.2-beta.5 — `1-dirty` is alphanumeric, `5` is numeric,
+// and per semver §11 alphanumeric > numeric.  That's clearly wrong for our
+// usage where the dev build is in fact behind the published beta.
+//
+// Strips, in order:
+//   1. trailing "-dirty"
+//   2. trailing "-N-gHEX" where N is digits and HEX is hex chars (≥1)
+static String stripGitDescribeNoise(const String& s) {
+    String r = s;
+
+    // 1. Trim "-dirty" suffix.
+    if (r.length() >= 6 && r.endsWith("-dirty")) {
+        r = r.substring(0, r.length() - 6);
+    }
+
+    // 2. Trim trailing "-N-gHEX" where N is digits and HEX is 1+ hex chars.
+    int lastDash = r.lastIndexOf('-');
+    if (lastDash > 0) {
+        String last = r.substring(lastDash + 1);
+        if (last.length() >= 2 && (last[0] == 'g' || last[0] == 'G')) {
+            bool allHex = true;
+            for (size_t i = 1; i < last.length(); i++) {
+                char c = last[i];
+                if (!((c >= '0' && c <= '9') ||
+                      (c >= 'a' && c <= 'f') ||
+                      (c >= 'A' && c <= 'F'))) {
+                    allHex = false;
+                    break;
+                }
+            }
+            if (allHex) {
+                int prevDash = r.lastIndexOf('-', lastDash - 1);
+                if (prevDash >= 0) {
+                    String n = r.substring(prevDash + 1, lastDash);
+                    if (isAllDigits(n)) {
+                        r = r.substring(0, prevDash);
+                    }
+                }
+            }
+        }
+    }
+
+    return r;
+}
+
+// Compare two prerelease identifier strings ("beta.1" vs "beta.5", "rc.2"
+// vs "beta.5", etc.) per SemVer §11.4.  Identifiers are split on ".";
+// numeric identifiers compare numerically and have lower precedence than
+// alphanumeric ones; fewer identifiers lose to a larger set if all earlier
+// ones match.  Returns -1/0/+1.
+static int comparePrereleaseIds(const String& a, const String& b) {
+    int i = 0, j = 0;
+    const int la = (int)a.length();
+    const int lb = (int)b.length();
+    while (i < la || j < lb) {
+        int endI = a.indexOf('.', i);
+        if (endI < 0 || endI > la) endI = la;
+        int endJ = b.indexOf('.', j);
+        if (endJ < 0 || endJ > lb) endJ = lb;
+
+        bool aDone = (i >= la);
+        bool bDone = (j >= lb);
+        if (aDone && bDone) return 0;
+        if (aDone) return -1;   // fewer identifiers => lower precedence
+        if (bDone) return 1;
+
+        String idA = a.substring(i, endI);
+        String idB = b.substring(j, endJ);
+
+        bool aNum = isAllDigits(idA);
+        bool bNum = isAllDigits(idB);
+
+        int cmp = 0;
+        if (aNum && bNum) {
+            long va = idA.toInt();
+            long vb = idB.toInt();
+            cmp = (va < vb) ? -1 : (va > vb ? 1 : 0);
+        } else if (aNum && !bNum) {
+            cmp = -1;   // numeric has lower precedence than alphanumeric
+        } else if (!aNum && bNum) {
+            cmp = 1;
+        } else {
+            int s = strcmp(idA.c_str(), idB.c_str());
+            cmp = (s < 0) ? -1 : (s > 0 ? 1 : 0);
+        }
+        if (cmp != 0) return cmp;
+
+        i = endI + 1;
+        j = endJ + 1;
+    }
+    return 0;
+}
+
+// Returns -1 if a < b, 0 if equal, +1 if a > b.  Implements SemVer 2.0
+// precedence rules:
+//   * MAJOR.MINOR.PATCH compared numerically (missing components = 0)
+//   * Build metadata after `+` is ignored (we never emit any)
+//   * Prerelease handling:
+//       - a version WITHOUT prerelease > the same version WITH prerelease
+//         (e.g. 1.0.0 > 1.0.0-beta.5)
+//       - prereleases compared identifier-by-identifier per comparePrereleaseIds
+//   * git-describe noise (-N-gSHA, -dirty) is stripped first so dev builds
+//     compare against their underlying tag, not a misleading longer suffix.
 static int compareSemver(const String& a, const String& b) {
-    String sa = stripVersionPrefix(a);
-    String sb = stripVersionPrefix(b);
+    String sa = stripGitDescribeNoise(stripVersionPrefix(a));
+    String sb = stripGitDescribeNoise(stripVersionPrefix(b));
+
+    // Drop build metadata (anything after '+'); it has no effect on precedence.
+    int plusA = sa.indexOf('+');
+    if (plusA >= 0) sa = sa.substring(0, plusA);
+    int plusB = sb.indexOf('+');
+    if (plusB >= 0) sb = sb.substring(0, plusB);
+
+    // Split into core "X.Y.Z" and optional prerelease tail (everything after
+    // the first '-' in the cleaned-up string).
+    int dashA = sa.indexOf('-');
+    int dashB = sb.indexOf('-');
+    String coreA = (dashA >= 0) ? sa.substring(0, dashA) : sa;
+    String coreB = (dashB >= 0) ? sb.substring(0, dashB) : sb;
+    String preA  = (dashA >= 0) ? sa.substring(dashA + 1) : String("");
+    String preB  = (dashB >= 0) ? sb.substring(dashB + 1) : String("");
+
     int aMaj = 0, aMin = 0, aPat = 0;
     int bMaj = 0, bMin = 0, bPat = 0;
-    sscanf(sa.c_str(), "%d.%d.%d", &aMaj, &aMin, &aPat);
-    sscanf(sb.c_str(), "%d.%d.%d", &bMaj, &bMin, &bPat);
+    sscanf(coreA.c_str(), "%d.%d.%d", &aMaj, &aMin, &aPat);
+    sscanf(coreB.c_str(), "%d.%d.%d", &bMaj, &bMin, &bPat);
     if (aMaj != bMaj) return aMaj < bMaj ? -1 : 1;
     if (aMin != bMin) return aMin < bMin ? -1 : 1;
     if (aPat != bPat) return aPat < bPat ? -1 : 1;
-    return 0;
+
+    // Cores match — apply prerelease precedence.
+    if (preA.length() == 0 && preB.length() == 0) return 0;
+    if (preA.length() == 0) return  1;   // stable > prerelease
+    if (preB.length() == 0) return -1;   // prerelease < stable
+    return comparePrereleaseIds(preA, preB);
 }
 
 void OtaManager::init(Config* config, LapTimer* timer, AsyncEventSource* events) {
@@ -262,7 +396,13 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         return false;
     }
 
-    out.available = compareSemver(out.currentVersion, out.latestVersion) < 0;
+    // Single semver comparison drives both the `available` flag and the
+    // displayed message — using the result rather than string equality means
+    // an exact-tag match like "0.1.2-beta.5" vs "v0.1.2-beta.5" is recognised
+    // as equivalent (the `v` prefix would otherwise wrongly trip the "dev
+    // build ahead" branch).
+    const int cmp = compareSemver(out.currentVersion, out.latestVersion);
+    out.available = (cmp < 0);
 
     // Cache the result so /api/update/status can serve it even if the
     // original /api/update/check HTTP response gets dropped during the
@@ -270,13 +410,13 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     _lastInfo      = out;
     _lastInfoValid = true;
 
-    if (out.available) {
+    if (cmp < 0) {
         setState(STATE_UPDATE_AVAILABLE, String("Update available: ") + out.latestVersion);
-    } else if (out.currentVersion == out.latestVersion) {
+    } else if (cmp == 0) {
         setState(STATE_UP_TO_DATE, String("You're on the latest release (") + out.latestVersion + ").");
     } else {
-        // Same parsed semver but different version strings — running a dev build
-        // ahead of the latest tag.
+        // Running version's semver is strictly newer than the latest published
+        // release — local dev build past the most recent tag.
         setState(STATE_UP_TO_DATE, String("You're on a development build (") + out.currentVersion +
                                    ") ahead of the latest release (" + out.latestVersion + ").");
     }
