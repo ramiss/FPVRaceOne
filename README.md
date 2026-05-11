@@ -1,6 +1,7 @@
 # FPVRaceOne
 
 **Personal FPV Lap Timer**
+
 A single node lap timer that can be networked for multi-pilot (multi-node) racing.
 Fly solo. Race together!
 
@@ -150,17 +151,19 @@ Pre-made and flashed hardware — (ETSY LINK Coming Soon!)
 
 ## Firmware Updates
 
-FPVRaceOne updates itself from **GitHub Releases** — no PlatformIO, no cables, no flashing tools required for normal updates.
+FPVRaceOne can check for and automatically updates itself from **GitHub Releases** — no PlatformIO, no cables, no flashing tools required for normal updates.
 
 1. Open the web UI → **Settings → Firmware Update**
 2. Enter your home WiFi credentials (one-time)
 3. Tap **Check for Updates** — the device briefly joins your home network, queries GitHub, then returns to AP mode
 4. If a newer release is available you'll see the version and release notes — tap **Update Now**
 5. The device flashes the filesystem, then the firmware, then reboots once. Total time ~1–3 minutes.
+6. Hard reload your browser to guarantee new changes are loaded (Ctrl+Shift+R on Windows/Linux, Cmd+Shift+R on Mac. Tap-and-hold the refresh button on mobile Chrome to get "Hard reload")
 
-Updates are automatically blocked while a race is running. If a download fails the device keeps the previous firmware, so a flaky network can't brick it.
+Updates are automatically blocked while a race is running. 
 
-For first-time flashing of new hardware (or recovery if the device won't boot), see [docs/FLASHING_OPTIONAL.md](docs/FLASHING_OPTIONAL.md).
+If a download fails the device keeps the previous firmware, so a flaky network can't brick it.
+
 
 ---
 
@@ -193,6 +196,8 @@ For first-time flashing of new hardware (or recovery if the device won't boot), 
 ## Credits
 
 FPVRaceOne is derived from [FPVGate](https://github.com/LouisHitchcock/FPVGate) v1.2.0 by LouisHitchcock, which is itself a heavily modified fork of [PhobosLT](https://github.com/phobos-/PhobosLT) by phobos-. The original project provided the foundation for RSSI-based lap timing on ESP32.
+
+Note that prior or alternate versions of FPVGate will not flash to FPVRaceOne official hardware.
 
 ---
 

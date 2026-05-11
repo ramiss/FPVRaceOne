@@ -2447,7 +2447,7 @@ function handleUpdateProgress(data) {
     // Device is about to drop the connection.  Show a clear note so the user
     // doesn't think the page is broken when SSE goes silent.
     setTimeout(() => {
-      showUpdateStatus('Device is rebooting. Reconnect to FPVRaceOne_XXXX, then refresh this page in 30–60 seconds.', 100);
+      showUpdateStatus('Device is rebooting. Reconnect to FPVRaceOne_XXXX, then hard refresh this page (Ctrl-Shift-R) in 30–60 seconds.', 100);
     }, 500);
   }
 }
@@ -2489,45 +2489,88 @@ async function checkForUpdates() {
     }
   });
 
-  // Arm the SSE-driven fallback BEFORE we kick off the request.  If the HTTP
-  // response is lost to the AP-retune disconnect, the SSE channel will deliver
-  // the terminal state and we recover by reading /api/update/status.
-  const ssePromise = _waitForCheckTerminal();
-  let httpResult = null;   // resolved to {ok, data} or {ok: false, error} or null on network failure
+  // Clear any stale resolver from a previous in-flight check.
+  _otaCheckResolver = null;
 
-  // Fire and forget — but capture the result if it does come back.
+  // Three independent paths can deliver the verdict, whichever wins:
+  //   1. SSE event reaches a terminal state.  Fastest when it works.
+  //   2. The original POST /api/update/check returns successfully.  Often
+  //      lost to the AP-retune disconnect, but worth listening for.
+  //   3. Polling GET /api/update/status every 2 s.  Wins when *both* SSE and
+  //      the original POST get dropped — a real, reproducible scenario on
+  //      the second-and-later check: home WiFi credentials are cached after
+  //      the first check, so STA joins in <500 ms.  The whole check then
+  //      finishes before the browser's EventSource has noticed the AP-retune
+  //      disconnect, so terminal-state events fire into a dead socket.
+  // Plus a 60 s timeout backstop.
+  const ssePromise = _waitForCheckTerminal();
+  let httpResult = null;   // {ok, data} | {ok:false, error} | null
+
+  // Path 2: fire-and-forget.  Captured for use as a fallback info source.
   fetch('/api/update/check', { method: 'POST' })
     .then(async (r) => {
       const data = await r.json().catch(() => ({}));
       httpResult = r.ok ? { ok: true, data } : { ok: false, error: data.error || `HTTP ${r.status}` };
     })
     .catch((err) => {
-      // "Failed to fetch" / TypeError happens routinely during the AP retune
-      // when the device joins home WiFi.  This is NOT a failure — the check
-      // is still running on the device and the SSE channel will report the
-      // result.  Log for diagnostics, but don't show an error to the user.
       console.log('[OTA] /api/update/check HTTP response lost (expected during AP retune):', err && err.message);
       httpResult = null;
     });
 
-  // Wait up to 60 s for SSE to deliver a terminal state.  If both the HTTP
-  // request and SSE fail to reach a verdict in that window, we give up.
-  const timeout = new Promise((resolve) =>
-    setTimeout(() => resolve({ ok: false, state: OTA_STATE.ERROR, message: 'Timed out waiting for the device to finish checking. Try again.' }), 60000)
-  );
-  const verdict = await Promise.race([ssePromise, timeout]);
+  // Path 3: poll /api/update/status every 2 s.  The status endpoint reports
+  // current state + cached UpdateInfo for terminal states, so a hit here is
+  // fully sufficient to drive the rest of the flow.
+  let pollTimer = null;
+  let pollInflight = false;
+  const pollPromise = new Promise((resolve) => {
+    pollTimer = setInterval(async () => {
+      if (pollInflight) return;   // skip if previous tick still pending
+      pollInflight = true;
+      try {
+        const r = await fetch('/api/update/status');
+        if (r.ok) {
+          const s = await r.json();
+          if (s) {
+            const isTerminal = s.state === OTA_STATE.UP_TO_DATE ||
+                               s.state === OTA_STATE.UPDATE_AVAILABLE ||
+                               s.state === OTA_STATE.ERROR;
+            // For UP_TO_DATE / UPDATE_AVAILABLE require the cached UpdateInfo
+            // to be present too — guards against a tiny race where state has
+            // been set but `_lastInfoValid` hasn't been flipped yet.  ERROR
+            // never carries info, so it's accepted on state alone.
+            const usable = (s.state === OTA_STATE.ERROR) ||
+                           (typeof s.available === 'boolean');
+            if (isTerminal && usable) {
+              resolve({ ok: s.state !== OTA_STATE.ERROR, state: s.state, message: s.message });
+            }
+          }
+        }
+      } catch (_) { /* poll error — keep trying */ }
+      pollInflight = false;
+    }, 2000);
+  });
 
-  // SSE has reported a terminal state OR we timed out.  Now decide what to do
-  // based on the cached UpdateInfo (preferred) or the HTTP response if we got
-  // one — they should agree, but the cached form survives a dropped HTTP.
-  //
-  // showUpdateStatus(...) is intentionally NOT called for success cases below:
-  // the SSE channel has already painted the right text into the panel via
-  // handleUpdateProgress(), and overwriting it from here causes a flicker
-  // where the panel briefly shows our text before the SSE text takes over.
+  // Path 4: timeout backstop.
+  const timeout = new Promise((resolve) =>
+    setTimeout(() => resolve({
+      ok: false,
+      state: OTA_STATE.ERROR,
+      message: 'Timed out waiting for the device to finish checking. Try again.',
+    }), 60000)
+  );
+
+  const verdict = await Promise.race([ssePromise, pollPromise, timeout]);
+
+  // Tear down resources.
+  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  _otaCheckResolver = null;   // drop any pending SSE resolver
+
   if (verdict.state === OTA_STATE.ERROR) {
-    // The firmware reported a real error via SSE.  Panel already shows the
-    // firmware's error message.  Just clear the busy state.
+    // Surface the error text in the panel.  When SSE delivered the error its
+    // message is already there; when the timeout fired, we need to write the
+    // timeout message ourselves — otherwise "Querying GitHub..." stays on
+    // screen forever (which is exactly the bug we're fixing).
+    if (verdict.message) showUpdateStatus(verdict.message, 0);
     setUpdateBusy(false);
     return;
   }

@@ -31,18 +31,21 @@ FPVRaceOne broadcasts its own WiFi Access Point on startup.
 3. Password: **`fpvraceone`**
 4. Open a browser and go to **`http://192.168.4.1`**
 
-> No captive portal — your phone or laptop can stay connected to FPVRaceOne WiFi while maintaining a cellular internet connection.
+> No captive portal — your phone or laptop can stay connected to FPVRaceOne WiFi while maintaining a cellular internet connection. (Note: Samsung devices do not allow wifi to a non-internet AP and cellular at the same time).
 
-### USB
 
-Direct USB connection provides lower latency than WiFi.
+### Status LEDs
 
-1. Download the [Electron desktop app](https://github.com/ramiss/FPVRaceOne/releases/latest)
-2. Connect FPVRaceOne via USB-C
-3. Launch the app and select your COM port
-4. All features work identically to WiFi mode
+Two small LEDs are visible through the holes on the underside of the case, just to one side of the USB-C connector — one yellow, one red.
 
-**USB advantages:** Zero WiFi latency, works completely offline, WiFi AP remains available for additional viewers.
+| LED | What it means |
+|-----|---------------|
+| **Yellow** | Web server status. **Off** during boot. **Slow blink (~1 Hz)** once the WiFi AP is up and the web UI is ready for clients. Off again only if the firmware has stopped serving — almost always a sign to check the serial monitor. |
+| **Red** | Not used. **Briefly on** at every power-up, then **off**. |
+
+So the quick health check after power-up: red flickers once, yellow comes on blinking after a couple of seconds → device is ready to accept WiFi connections at `http://192.168.4.1` (or `http://192.168.5.1` in Master mode).
+
+If the yellow LED is **solid on** more than ~5 seconds after power-up, or **never starts blinking**, the firmware hung before bringing the web server up — try a power cycle, and check the serial monitor over USB if it persists.
 
 ---
 

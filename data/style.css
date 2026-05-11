@@ -667,7 +667,13 @@ table tr.fastest-lap td {
 #rssiChart {
   display: block;
   width: 100%;
-  height: clamp(160px, 38vh, 420px);
+  height: clamp(160px, 32vh, 380px);
+}
+
+@media (max-height: 720px) {
+  #rssiChart {
+    height: clamp(140px, 28vh, 280px);
+  }
 }
 
 /* Toggle switch for dark mode */
@@ -1581,28 +1587,36 @@ footer {
   align-items: stretch;       /* both <a> and <button> children fill cross axis */
 }
 
-.update-btn {
-  /* Use inline-flex + center alignment so an <a> and a <button> with the
-     same padding render at exactly the same height.  We also pin a
-     min-height and disable the UA `appearance` to make sure neither
-     element falls back to a browser-default size box. */
+.update-btn,
+a.update-btn,
+button.update-btn {
+  /* Pin BOTH a fixed height and a min-height to bulletproof against any
+     UA-default sizing on either <a> or <button>.  Selector includes the
+     explicit `a.update-btn`/`button.update-btn` forms so this rule has
+     equal or higher specificity than any later element-typed override. */
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: 38px;
+  height: 40px;
+  min-height: 40px;
+  max-height: 40px;
   padding: 0 18px;
+  margin: 0;
   border: none;
   border-radius: 4px;
+  font-family: inherit;
   font-size: 14px;
   font-weight: bold;
-  line-height: 1.4;
+  line-height: 1;
   text-decoration: none;
   text-align: center;
   cursor: pointer;
   box-sizing: border-box;
   -webkit-appearance: none;
+  -moz-appearance: none;
   appearance: none;
   transition: opacity 0.2s;
+  vertical-align: middle;
 }
 
 .update-btn:hover {
@@ -1749,10 +1763,20 @@ footer {
 #wizardChart {
   display: block;
   width: 100%;
-  /* Same viewport-relative sizing as #rssiChart so the Undo / Calculate /
-   * Cancel buttons under the wizard chart stay in view on every device. */
-  height: clamp(180px, 42vh, 480px);
+  /* Tuned tight so the surrounding stack (instructions, status banner,
+   * 3-button row, page header) always fits on a portrait phone (~700 px
+   * inner height) without forcing the user to scroll to reach the buttons. */
+  height: clamp(140px, 32vh, 380px);
   background-color: var(--background-color);
+}
+
+/* Pull the chart-buttons row out of the page flow on short viewports so
+ * the Undo / Calculate / Cancel buttons are always visible at the bottom
+ * of the screen — the chart above just gets a hard ceiling. */
+@media (max-height: 720px) {
+  #wizardChart {
+    height: clamp(120px, 28vh, 280px);
+  }
 }
 
 @media (max-width: 150px) {
