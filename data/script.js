@@ -3982,7 +3982,13 @@ function createBarItemWithColor(label, time, maxTime, displayTime, colorIndex) {
 
 // Race History Functions
 let raceHistoryData = [];
-let raceHistoryPersistent = true; // false when SD-less RAM-only mode
+// Defaulting to `false` (RAM-only) means the "race history is not saved"
+// banner is visible on first paint for new users.  /races returns
+// `persistent: true` only when the firmware has an SD card or a dedicated
+// race-storage partition — current C6 hardware has neither, so the default
+// here already matches reality.  Setting this to `true` would briefly hide
+// the banner before /races came back and corrected it.
+let raceHistoryPersistent = false;
 let ledConnected = false;
 let currentDetailRace = null;
 
@@ -4928,39 +4934,45 @@ function clearAllRaces() {
 
 // Config Download/Import Functions
 function downloadConfig() {
+  // Warn if there are unsaved staged changes — the export reflects what's
+  // *committed to firmware*, so unsaved UI tweaks will not be in the file.
+  if (typeof stagedDirty !== 'undefined' && stagedDirty) {
+    if (!confirm(
+        'You have unsaved configuration changes. The downloaded file will ' +
+        'reflect the device\'s currently SAVED state, not your unsaved edits.\n\n' +
+        'Cancel and click Save Configuration first, or proceed to download the saved snapshot.'
+    )) {
+      return;
+    }
+  }
+
   fetch('/config')
     .then(response => response.json())
     .then(config => {
-      // Add all client-side settings
+      // `config` is what /config returns — i.e. every field Config::toJson()
+      // serialises, which covers the entire laptimer_config_t struct.  Type
+      // and naming are authoritative (uint32 colours stay uint32; hex strings
+      // stay strings).  We only *add* a small set of browser-only fields that
+      // the firmware doesn't know about — never override anything from /config
+      // (the previous version did, which broke round-tripping for fields with
+      //  a DOM-string vs firmware-uint32 mismatch like pilotColor and the
+      //  LED fade/strobe colours).
       const fullConfig = {
-        ...config,
-        // Theme
-        theme: localStorage.getItem('theme') || 'oceanic',
-        // Audio settings
-        audioEnabled: audioEnabled,
-        lapFormat: localStorage.getItem('lapFormat') || 'full',
-        selectedVoice: localStorage.getItem('selectedVoice') || 'default',
-        ttsEngine: localStorage.getItem('ttsEngine') || 'piper',
-        // Pilot frontend settings
-        pilotColor: localStorage.getItem('pilotColor') || '#0080FF',
-        // LED settings (get from current UI state)
-        ledPreset: parseInt(document.getElementById('ledPreset')?.value || 2),
-        ledSolidColor: document.getElementById('ledSolidColor')?.value || '#FF00FF',
-        ledFadeColor: document.getElementById('ledFadeColor')?.value || '#0080FF',
-        ledStrobeColor: document.getElementById('ledStrobeColor')?.value || '#FFFFFF',
-        ledSpeed: parseInt(document.getElementById('ledSpeed')?.value || 5),
-        ledManualOverride: document.getElementById('ledManualOverride')?.checked || false,
-        // Battery monitoring
-        batteryMonitoring: document.getElementById('batteryMonitorToggle')?.checked !== false,
-        timestamp: new Date().toISOString()
+        ...config,                                                    // authoritative firmware state
+        // Browser-only state not stored on the device:
+        audioEnabled,                                                 // current Enable Voice state in this tab
+        ttsEngine: localStorage.getItem('ttsEngine') || 'piper',      // TTS engine choice (not in firmware config)
+        // Metadata:
+        timestamp: new Date().toISOString(),
+        exportSchemaVersion: 1,
       };
-      
+
       const dataStr = JSON.stringify(fullConfig, null, 2);
       const dataBlob = new Blob([dataStr], { type: 'application/json' });
       const url = URL.createObjectURL(dataBlob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = `fpvgate-config-${new Date().toISOString().slice(0,10)}.json`;
+      link.download = `fpvraceone-config-${new Date().toISOString().slice(0,10)}.json`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
@@ -4968,131 +4980,71 @@ function downloadConfig() {
     })
     .catch(error => {
       console.error('Error downloading config:', error);
-      alert('Error downloading configuration');
+      alert('Error downloading configuration: ' + (error.message || error));
     });
 }
 
 function importConfig(input) {
   const file = input.files[0];
   if (!file) return;
-  
+
   const reader = new FileReader();
   reader.onload = function(e) {
+    let config;
     try {
-      const config = JSON.parse(e.target.result);
-      
-      // Apply backend config
-      fetch('/config', {
-        method: 'POST',
-        headers: {
-          'Accept': 'application/json',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          freq: config.freq,
-          minLap: config.minLap,
-          alarm: config.alarm,
-          anType: config.anType,
-          anRate: config.anRate,
-          enterRssi: config.enterRssi,
-          exitRssi: config.exitRssi,
-          maxLaps: config.maxLaps,
-          name: config.name || '',
-          ssid: config.ssid || '',
-          pwd: config.pwd || '',
-          // LED settings
-          ledMode: config.ledMode,
-          ledBrightness: config.ledBrightness,
-          ledColor: config.ledColor,
-          ledPreset: config.ledPreset,
-          ledSpeed: config.ledSpeed,
-          ledFadeColor: config.ledFadeColor,
-          ledStrobeColor: config.ledStrobeColor,
-          ledManualOverride: config.ledManualOverride,
-          // Track settings
-          tracksEnabled: config.tracksEnabled,
-          selectedTrackId: config.selectedTrackId,
-          // Webhook settings
-          webhooksEnabled: config.webhooksEnabled,
-          webhookCount: config.webhookCount,
-          webhookIPs: config.webhookIPs,
-          gateLEDsEnabled: config.gateLEDsEnabled,
-          webhookRaceStart: config.webhookRaceStart,
-          webhookRaceStop: config.webhookRaceStop,
-          webhookLap: config.webhookLap,
-          // Operation mode
-          opMode: config.opMode
-        })
-      })
-      .then(response => response.json())
-      .then(data => {
-        console.log('Config imported:', data);
-        
-        // Apply all client-side settings
-        // Theme
-        if (config.theme) {
-          localStorage.setItem('theme', config.theme);
-        }
-        // Audio settings
-        if (config.lapFormat) {
-          localStorage.setItem('lapFormat', config.lapFormat);
-        }
-        if (config.selectedVoice) {
-          localStorage.setItem('selectedVoice', config.selectedVoice);
-        }
-        if (config.ttsEngine) {
-          localStorage.setItem('ttsEngine', config.ttsEngine);
-        }
-        // Pilot frontend settings
-        if (config.pilotColor) {
-          localStorage.setItem('pilotColor', config.pilotColor);
-        }
-        // LED settings
-        if (config.ledPreset !== undefined) {
-          const ledPresetSelect = document.getElementById('ledPreset');
-          if (ledPresetSelect) ledPresetSelect.value = config.ledPreset;
-        }
-        if (config.ledSolidColor) {
-          const ledSolidColor = document.getElementById('ledSolidColor');
-          if (ledSolidColor) ledSolidColor.value = config.ledSolidColor;
-        }
-        if (config.ledFadeColor) {
-          const ledFadeColor = document.getElementById('ledFadeColor');
-          if (ledFadeColor) ledFadeColor.value = config.ledFadeColor;
-        }
-        if (config.ledStrobeColor) {
-          const ledStrobeColor = document.getElementById('ledStrobeColor');
-          if (ledStrobeColor) ledStrobeColor.value = config.ledStrobeColor;
-        }
-        if (config.ledSpeed !== undefined) {
-          const ledSpeed = document.getElementById('ledSpeed');
-          if (ledSpeed) ledSpeed.value = config.ledSpeed;
-        }
-        if (config.ledManualOverride !== undefined) {
-          const ledManualOverride = document.getElementById('ledManualOverride');
-          if (ledManualOverride) ledManualOverride.checked = config.ledManualOverride;
-        }
-        // Battery monitoring
-        if (config.batteryMonitoring !== undefined) {
-          const batteryToggle = document.getElementById('batteryMonitorToggle');
-          if (batteryToggle) batteryToggle.checked = config.batteryMonitoring;
-        }
-        
-        alert('Configuration imported successfully! Page will reload.');
-        // Reload config to update UI
-        setTimeout(() => location.reload(), 500);
-      })
-      .catch(error => {
-        console.error('Error importing config:', error);
-        alert('Error importing configuration');
-      });
+      config = JSON.parse(e.target.result);
     } catch (error) {
       console.error('Error parsing config JSON:', error);
-      alert('Invalid configuration file');
+      alert('Invalid configuration file — could not parse JSON.');
+      input.value = '';
+      return;
     }
+
+    // Send the ENTIRE imported config object to the firmware.  Config::fromJson
+    // is defensive: it wraps every field in `if (source.containsKey(...))`, so
+    // unknown / browser-only keys (timestamp, audioEnabled, ttsEngine,
+    // ledSolidColor, batteryMonitoring) are silently ignored.
+    //
+    // This avoids the old cherry-pick approach that silently dropped any
+    // firmware field whose JSON name wasn't on the hard-coded allow-list —
+    // including (most recently) gate1Bootstrap, v1Smoothing, nodeMode,
+    // masterSSID, masterPassword, mnSkipMasterStart, otaIncludePrereleases,
+    // wifiExtAntenna, wifiTxPower, pilotColor, theme, voiceEnabled.
+    fetch('/config', {
+      method: 'POST',
+      headers: {
+        'Accept': 'application/json',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(config),
+    })
+    .then(response => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then(data => {
+      console.log('[ConfigImport] Firmware applied:', data);
+
+      // Mirror the small set of fields the browser also caches in
+      // localStorage.  We reload right after, so the page will re-fetch the
+      // authoritative values from /config — this just avoids a brief flash
+      // of the previous theme / voice / lap-format on first paint.
+      if (config.theme)         localStorage.setItem('theme',         config.theme);
+      if (config.lapFormat)     localStorage.setItem('lapFormat',     config.lapFormat);
+      if (config.selectedVoice) localStorage.setItem('selectedVoice', config.selectedVoice);
+      if (config.ttsEngine)     localStorage.setItem('ttsEngine',     config.ttsEngine);
+      if (config.pilotColor)    localStorage.setItem('pilotColor',    config.pilotColor);
+
+      alert('Configuration imported successfully — page will reload to apply.');
+      setTimeout(() => location.reload(), 500);
+    })
+    .catch(error => {
+      console.error('[ConfigImport] Error applying config:', error);
+      alert('Error importing configuration: ' + (error.message || error));
+    });
   };
   reader.readAsText(file);
-  input.value = ''; // Reset file input
+  input.value = '';   // reset so re-selecting the same file triggers another onchange
 }
 
 // Calibration Wizard

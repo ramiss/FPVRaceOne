@@ -34,27 +34,13 @@ FPVRaceOne creates its own WiFi network — no router required.
 | SSID | `FPVRaceOne_XXXX` (last 4 MAC digits) |
 | Security | WPA2-PSK |
 | Default password | `fpvraceone` |
-| IP address | `192.168.4.1` (static) |
+| IP address | `192.168.4.1` (Single / Client), `192.168.5.1` (Master) |
 | Band | 2.4 GHz |
 | Max clients | 8 simultaneous |
 
-No captive DNS — connected devices retain their cellular internet connection.
+No captive DNS — connected devices retain their cellular internet connection on most platforms (Samsung devices block this and force a choice).
 
-### USB Serial CDC
-
-Direct connection via USB-C for zero-latency operation.
-
-| Property | Value |
-|----------|-------|
-| Interface | USB Serial CDC |
-| Protocol | JSON over serial |
-| Latency | < 5 ms (vs 20–30 ms WiFi) |
-
-Commands are sent as JSON objects; events are broadcast with an `EVENT:` prefix.
-
-### Hybrid Mode
-
-USB and WiFi operate simultaneously. A race director can control the timer via USB (low latency) while spectators view live data via WiFi.
+The USB-C connector on the device is used for **power and flashing only** — there is no user-facing USB control protocol in the current firmware.
 
 ---
 
@@ -170,29 +156,16 @@ If the three peaks differ in height by more than ~15 % (weakest / strongest < 0.
 
 ## Voice Announcements
 
-### TTS Engines
+Lap announcements are spoken by the **browser** that's logged into the web UI, not by the device. The web app uses the standard **Web Speech API** (`SpeechSynthesisUtterance`) so the actual voice quality and accent depends on the OS the browser is running on — modern Chrome/Edge/Safari all ship a usable English voice.
 
-#### ElevenLabs (Pre-recorded)
-
-High-quality neural TTS pre-generated as MP3 files stored in LittleFS.
-
-**Voices:** Sarah (energetic), Rachel (calm), Adam (deep male), Antoni (friendly male)
-
-**Fallback:** If audio files are missing or unreadable, the system automatically falls back to PiperTTS.
-
-#### PiperTTS (Real-time)
-
-Fast lightweight neural synthesis — no pre-recorded files required.
-
-- ~200 ms faster than ElevenLabs (no file I/O)
-- Slightly more synthetic character
-- Suitable when LittleFS space is limited or for custom pilot names
+Implication: whichever device has the web UI open with "Enable Voice" turned on is the speaker. The race director's laptop is usually the right choice; pilot phones can stay silent so the gate doesn't sound like a chorus.
 
 ### Announcement Formats
 
 | Format | Example |
 |--------|---------|
-| Full (name + lap + time) | "Louis Lap 5, 12.34" |
+| Pilot + Lap + Time | "Louis Lap 5, 12.34" |
+| Pilot + Time | "Louis, 12.34" |
 | Lap + Time | "Lap 5, 12.34" |
 | Time Only | "12.34" |
 
@@ -200,15 +173,15 @@ Fast lightweight neural synthesis — no pre-recorded files required.
 
 | Type | Behaviour |
 |------|-----------|
-| None | Silent — only buzzer for race start |
-| Beep | Short beep per lap, no speech |
-| Lap Time | Announces every lap (recommended) |
-| 2 Consecutive | Announces every 2 laps as a pair |
-| 3 Consecutive | Announces every 3 laps (RaceGOW format) |
+| None | Silent — only the firmware-driven start/stop beeps |
+| Beep | Short beep on each lap, no speech |
+| Lap Time | Speaks every lap |
+| 2 Consecutive | Speaks the combined time of the last two laps |
+| 3 Consecutive | Speaks the combined time of the last three laps (RaceGOW format) |
 
 ### Phonetic Name
 
-If the Phonetic Name field is populated, it is used in place of the Pilot Name for TTS. This allows correct pronunciation of non-phonetic names without affecting the display name.
+If the Phonetic Name field is populated, it is used in place of the Pilot Name for the announcement. This lets you get correct pronunciation of non-phonetic spellings ("Louie" for "Louis", "Ree-shar" for "Richard") without changing the display name shown elsewhere.
 
 ---
 
@@ -234,16 +207,20 @@ The fastest lap row is highlighted gold in the lap table.
 
 ## Race History & Data Management
 
-### Automatic Saving
+### Automatic Capture
 
-Races are saved automatically when:
-- "Stop Race" is clicked
-- "Clear Laps" is clicked (if laps exist)
-- Max lap count is reached (auto-stop)
+Races are added to the in-memory log when:
+- **Stop Race** is clicked
+- **Clear Laps** is clicked (if laps exist)
+- The Max-laps auto-stop fires
 
 ### Storage
 
-Races are stored as individual JSON files in LittleFS under `/races/race_<timestamp>.json` with an `/races/races_index.json` manifest. They persist across reboots and firmware updates as long as the filesystem partition isn't erased.
+Race history on the current hardware is **session-scoped (RAM-only)**. The XIAO ESP32-C6 build does not reserve a LittleFS slot for race storage — saved laps live in the web UI's state and a parallel in-firmware buffer, both of which clear on reboot.
+
+The web UI surfaces this with a yellow banner reminding the user to **download** the session JSON before unplugging. Once downloaded, the JSON file is the durable record; re-import to view or re-edit later.
+
+A persistent-storage path exists in the firmware code (`RaceHistory::saveRace`, `/races/race_<id>.json` layout) and is exercised by builds that have either an SD card or a dedicated LittleFS race partition. Neither is present on the C6 product configuration.
 
 ### JSON Format
 
@@ -366,9 +343,9 @@ Key config fields stored per device:
 - WiFi (AP + home) SSID, password, external antenna, TX power
 - RSSI sensitivity
 - Pipeline Smoothing level (`v1Smoothing`), Gate-1 Bootstrap toggle
-- Selected track ID
 - Multi-node: node mode, master SSID, skip-master-start toggle
-- Theme, selected voice
+- OTA: home WiFi credentials, include-prereleases toggle
+- Theme, selected voice (voice field is currently unused at runtime)
 
 ---
 
@@ -407,7 +384,7 @@ Access via **Settings → Diagnostics → Run All Tests**.
 
 The self-test exercises hardware, storage, and software paths and reports pass/fail with detail text. Results can be downloaded as a diagnostic log to attach to a GitHub issue.
 
-Categories covered include the RX5808 SPI driver, EEPROM, LittleFS, WiFi AP / station, USB CDC transport, lap timer, race history, web server file presence, and OTA partition health.
+Categories covered include the RX5808 SPI driver, EEPROM, LittleFS, WiFi AP / station, lap timer, race history, web server file presence, and OTA partition health.
 
 ---
 
@@ -426,11 +403,12 @@ lib/
 ├── LAPTIMER/             — Single 5-stage filter pipeline + gate state machine + lap events
 ├── RX5808/               — RX5808 SPI driver and ADC read
 ├── MULTINODE/            — Master/client coordination (heartbeats, broadcasts, quit notifications)
-├── RACEHISTORY/          — Per-race JSON storage with index file
-├── TRACKMANAGER/         — Track CRUD + distance integration
+├── OTA/                  — GitHub-Releases-driven over-the-air update flow
 ├── WEBSERVER/            — ESPAsyncWebServer HTTP + SSE
 └── ...
 ```
+
+Other library directories (`RACEHISTORY`, `TRACKMANAGER`, `USB`, …) compile in but are inert on the current C6 product configuration — they're carried for future hardware revisions that may have an SD card, dedicated race-history partition, or a need for a host-side USB control protocol.
 
 ### Web Interface
 
@@ -439,7 +417,8 @@ data/
 ├── index.html            — Single-page application
 ├── style.css             — Responsive styles, multiple themes, save-button dirty state
 ├── script.js             — UI logic, staged config, race control, calibration, multi-node
-└── usb-transport.js      — USB Serial CDC communication layer
+├── audio-announcer.js    — Browser Web Speech API wrapper for lap announcements
+└── smoothie.js           — Live RSSI chart library
 ```
 
 ### Two-Core Architecture

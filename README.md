@@ -81,15 +81,17 @@ Network **up to 8 devices** together with no router and no extra hardware. One d
 - Master has the ability to modify each node's frequency / channel, pilot name and color.
 
 ### Voice Announcements
-- Configurable announcement formats (full, lap time only, time only)
+- Spoken laps using your **browser's** built-in voice (Web Speech API) — no audio files on the device, so the announcer follows whichever device has the web UI open
+- Configurable announcement format (pilot + lap + time, pilot + time, lap + time, time only)
+- Per-pass beep or full speech, 2-lap and 3-lap consecutive variants
 
 ### Race Analysis
 - Real-time lap tracking with gap-to-best analysis
 - Fastest lap highlighting
 - Fastest 3 consecutive laps (RaceGOW format)
-- Download race history to your device as JSON; re-import later
-- Marshalling mode — add, remove, or edit laps post-race
-- Detailed race analysis view with timeline and playback
+- Interactive race timeline + playback for every saved session
+- Marshalling mode — add, remove, or edit laps after the race ended
+- Download the session as JSON; re-import later. **Race history lives in RAM only on the current hardware — download to keep**.
 
 ### Firmware Updates
 - **One-tap OTA from GitHub Releases** — built into the device. Enter your home WiFi once; the device joins, checks the latest release, downloads the firmware + filesystem images, flashes both, and reboots.

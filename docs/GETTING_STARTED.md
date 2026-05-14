@@ -28,14 +28,9 @@ Complete guide to setting up and configuring your FPVRaceOne lap timer.
 3. Password: **`fpvraceone`**
 4. Open a browser and go to: **`http://192.168.4.1`**
 
-> Your device can connect to FPVRaceOne WiFi and maintain cellular internet simultaneously — no captive portal is used.
+> Your device can connect to FPVRaceOne WiFi and maintain cellular internet simultaneously on most platforms — no captive portal is used. (Samsung phones force a choice between local WiFi and cellular data; everything else lets both coexist.)
 
-### USB (Optional)
-
-1. Download the [Electron desktop app](https://github.com/ramiss/FPVRaceOne/releases/latest)
-2. Connect the FPVRaceOne device via USB-C
-3. Launch the app and select your COM port
-4. All features work identically to WiFi mode with lower latency
+The USB-C connector on the device is used for **power** and for **manual flashing** if needed. There is no user-facing USB control protocol in the current firmware — all racing, calibration, and configuration happens through the WiFi web UI.
 
 ---
 
@@ -68,7 +63,7 @@ In the **Pilot Info** section:
 | **Phonetic Name** | How TTS pronounces your name (e.g. "Louie" for "Louis") |
 | **Pilot Color** | Your racing color, used in race history and display |
 
-In the **TTS Settings** section, choose your **Announcer Type**, **Voice**, and **Lap Announcement Format**.
+In the **TTS Settings** section, choose your **Announcer Type** and **Lap Announcement Format**. Lap announcements are spoken by the browser's built-in voice, so the actual voice depends on the device you have the web UI open on — no audio files live on the device itself.
 
 All settings in the Settings panel are **staged** until you click **Save Configuration** (the button highlights orange when there are unsaved changes).
 
@@ -195,9 +190,9 @@ If you want to keep practising while a director is running heats on the other pi
 
 ### Voice Announcements Not Working
 
-- In Settings → TTS, click **Enable Audio** and test with **Generate Audio**
-- Check that your browser has not blocked autoplay audio
-- Try switching to **PiperTTS** which does not require pre-recorded files
+- In Settings → TTS, click **Enable Voice** and then **Test Voice** to hear a sample announcement
+- Check that your browser has not blocked autoplay audio (Chrome and Safari often require an initial user interaction on the page before audio plays)
+- The announcement is spoken by the **browser's** built-in voice (Web Speech API), so the voice depends on the device the web UI is open on. On phones, system text-to-speech needs to be enabled in the OS settings; on desktops Chrome/Edge/Safari all ship a usable English voice out of the box
 
 ---
 

@@ -45,8 +45,6 @@ Two small LEDs are visible through the holes on the underside of the case, just 
 
 So the quick health check after power-up: red flickers once, yellow comes on blinking after a couple of seconds → device is ready to accept WiFi connections at `http://192.168.4.1` (or `http://192.168.5.1` in Master mode).
 
-If the yellow LED is **solid on** more than ~5 seconds after power-up, or **never starts blinking**, the firmware hung before bringing the web server up — try a power cycle, and check the serial monitor over USB if it persists.
-
 ---
 
 ## Web Interface Overview
@@ -75,14 +73,16 @@ RSSI threshold setup and the calibration wizard.
 
 ### Race History Tab
 
-Archive of all saved races.
+Session-scoped log of races completed since the last power-up.
 
-- Race list with dates, pilot info, and summary stats
-- Expand any race for full lap-by-lap analysis and charts
+- Race list with timestamps, pilot info, and summary stats
+- Expand any race for full lap-by-lap analysis + interactive timeline / playback
 - Edit race names and tags
-- Marshalling mode — add, remove, or edit laps post-race
-- Download individual races or full history as JSON
-- Import races from a backup file
+- Marshalling mode — add, remove, or edit laps after the race ended
+- Download individual races or the whole session as JSON
+- Import races from a previously-downloaded JSON
+
+> **Races are not persisted across power cycles** on the current hardware (no SD card, no flash slot reserved for race storage). Once you're done racing, **download** the session JSON to keep the data — the next reboot starts with an empty list.
 
 ### Settings Tab
 
@@ -103,15 +103,18 @@ All configuration, organised into sections with a floating footer.
 
 ### TTS Settings
 
+Lap announcements are spoken by your **browser's** built-in voice (Web Speech API) — the device itself doesn't carry any audio files, so the voice you hear is whichever one your phone or laptop's OS provides for English.
+
 | Setting | Options |
 |---------|---------|
-| **Announcer Type** | None / Beep / Lap Time / 2 Consecutive / 3 Consecutive |
-| **Voice** | Sarah (ElevenLabs) / Rachel / Adam / Antoni / PiperTTS |
-| **Lap Announcement Format** | Full (name + lap + time) / Lap + Time / Time Only |
+| **Announcer Type** | None / Beep / Lap Time / 2 Consecutive Laps / 3 Consecutive Laps |
+| **Lap Announcement Format** | Pilot + Lap + Time / Pilot + Time / Lap + Time / Time Only |
 | **Announcer Rate** | 0.1–2.0× playback speed |
 
-**Enable Audio** / **Disable Audio** buttons toggle voice announcements.  
-**Generate Audio** plays a test announcement with your current pilot name.
+**Enable Voice** / **Disable Voice** buttons toggle announcements.  
+**Test Voice** plays a sample announcement with your current pilot name.
+
+Because the audio comes from the browser, **the device that's logged in to the web UI is the one that speaks** — handy if you want the race director's laptop to call out laps while pilot phones stay silent (just don't enable voice on the pilot pages).
 
 ### Pilot Info
 
@@ -326,11 +329,11 @@ The fastest lap row is highlighted in **gold** in the lap table.
 
 ## Race History
 
-All races are saved automatically. Navigate to the **Race History** tab to review them.
+Each race you finish is logged to the **Race History** tab automatically. The log lives in RAM only — power-cycling the device clears it, so **download what you want to keep** before unplugging.
 
 ### Viewing and Editing
 
-- Click any race card to expand the full lap table, statistics, and charts
+- Click any race card to expand the full lap table, statistics, charts, and the interactive timeline
 - Click **Edit** to add a name or tag to the race
 - Click **Download** to save the race as a JSON file
 
@@ -341,14 +344,12 @@ Edit laps after a race is complete:
 - **Add a lap** — Click between two existing laps, enter the lap time in seconds
 - **Remove a lap** — Click the remove button next to any lap and confirm
 
-Statistics and charts update immediately. Changes are saved automatically.
-
-> Export a race before making significant edits — changes are permanent.
+Statistics and charts update immediately. Changes are saved into the same in-memory record (so they survive subsequent edits, but still won't survive a reboot — download first).
 
 ### Export / Import
 
-- **Download All Races** — Saves your full history as a single JSON file
-- **Import Races** — Merge races from a backup; duplicates are skipped automatically
+- **Download All Races** — Saves the current session's history as a single JSON file
+- **Import Races** — Loads a previously-downloaded JSON. On hardware without persistent storage (i.e. this one), importing **replaces** the in-memory history rather than merging
 
 ---
 
@@ -370,10 +371,6 @@ Pair two or more devices for head-to-head racing. See [Multi-Node](#multi-node) 
 
 - **Solo practice while a master is broadcasting** — turn on *Skip Master Start* on the client so a director's Start All doesn't reset your local race
 - **Pilot drops out mid-heat** — the pilot presses Stop on their client; the master sees a **DNF** badge on that pilot's card and the rest of the race continues uninterrupted
-
-### Tracks & Distance
-
-In **Settings → Track Data**, define tracks with name, distance, tags, and an optional image. Select an active track and the race UI shows real-time distance travelled and (in finite-lap races) distance remaining. The track is recorded with the race for later review.
 
 ### Config Backup & Restore
 
@@ -401,9 +398,9 @@ Multiple colour themes are available in **Settings → Device → Theme**. The l
 - Keep the timer module away from other strong RF sources (video transmitters on the bench, etc.)
 
 **For racing:**
-- Use USB connection for the lowest possible control latency
-- Enable voice announcements for faster lap awareness without looking at the screen
-- Export your race history before flashing a firmware update
+- Enable voice announcements on the race director's device so laps are called out without anyone watching the screen
+- Download your race session JSON before unplugging the device — race history is not retained across power cycles
+- Export your config too if you've spent time fine-tuning, especially before a firmware update
 
 ---
 

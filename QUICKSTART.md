@@ -100,8 +100,8 @@ Updates are blocked during a race; failed downloads keep the previous firmware.
 
 - **Race History** — Races are not saved on the device. Download from memory as JSON for import later.
 - **Marshalling Mode** — Add or edit laps after a race finishes (Race History → expand a race → edit)
+- **Voice announcements** — Spoken by the browser, not the device. Enable on the race director's laptop / phone for hands-free lap callouts
 - **Config Backup** — Settings footer has Download / Import buttons (good idea before major firmware updates)
-- **USB / Electron app** — Available from the [Releases page](https://github.com/ramiss/FPVRaceOne/releases/latest) for zero-latency local control
 
 ## Troubleshooting
 

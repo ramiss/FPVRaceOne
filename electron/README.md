@@ -1,80 +1,45 @@
 # FPVRaceOne Desktop App (Electron)
 
-Native desktop application for the FPVRaceOne Lap Timer. Same UI as the web interface, with the option to connect over USB for zero-latency local control.
+> **Status: experimental / not actively maintained.**
+>
+> This Electron wrapper was scaffolded against an earlier USB-CDC protocol
+> that is **not currently active in the firmware**. The C6 product
+> configuration uses the WiFi web UI for all racing, calibration, and
+> configuration — USB-C is used for power and manual flashing only.
+>
+> The code in this folder is preserved so the USB transport path can be
+> re-enabled in a future hardware revision without rebuilding the project
+> structure from scratch, but it should **not** be presented to end users
+> as a supported way to use FPVRaceOne today.
+>
+> Use the web UI at `http://192.168.4.1` (or `http://192.168.5.1` in
+> Master mode) instead.
 
-The app loads `data/index.html` (the same single-page web interface that runs on the device) and provides a Node.js-side serial transport so the page can talk to the device over USB CDC instead of HTTP.
+## What it was intended to do
 
-## Features
+Load `data/index.html` (the same single-page web interface that runs on the
+device) inside Electron, and have it talk to the device over USB Serial CDC
+via a Node.js-side `serialport` bridge. The transport abstraction in
+`data/usb-transport.js` was meant to make WiFi and USB indistinguishable to
+the rest of the front-end code.
 
-- **WiFi or USB** — toggle in-app; auto-detect the FPVRaceOne USB device
-- **Same UI** — uses the device's own `data/` folder; what you see in the browser is what you see here
-- **Cross-platform** — Windows, macOS, Linux
+## Reviving this path (developer notes)
 
-WiFi mode is HTTP + Server-Sent Events to `http://192.168.4.1`. USB mode is JSON-over-serial through `serialport`. The transport layer (`data/usb-transport.js`) abstracts both behind one API so feature code doesn't care which is active.
+1. Re-enable the USB CDC command handler in `lib/USB/usb.cpp` end-to-end
+   testing and confirm the JSON command set in `processCommand()` still
+   matches what `data/usb-transport.js` emits.
+2. Sanity-check that the firmware's WiFi-driven flows (multi-node,
+   OTA, SSE keepalives) still operate when the same device is being
+   driven over USB simultaneously.
+3. Update the install/run steps below as needed.
 
-## Setup
+## Install / run (legacy)
 
 ```bash
 cd electron
-npm install
-```
-
-Installs:
-- `electron` — desktop runtime
-- `serialport` — native USB serial
-- `electron-builder` — installer / packager
-
-## Run
-
-```bash
+npm install      # electron, serialport, electron-builder
 npm start
 ```
-
-Loads `../data/index.html`. Edit any file under `data/` and restart with `npm start` to see changes.
-
-## Build
-
-```bash
-npm run build:win    # Windows installer (NSIS)
-npm run build -- --mac
-npm run build -- --linux
-```
-
-Output goes to `electron/dist/`. The Windows installer creates a Start menu entry and a desktop shortcut.
-
-## WiFi vs USB
-
-| | WiFi | USB |
-|--|------|-----|
-| Latency | ~50–100 ms | ~10 ms |
-| Setup | Connect to `FPVRaceOne_XXXX` AP | Plug in USB-C |
-| Auto-detect | No (fixed IP) | Yes |
-| Firmware OTA | ✅ | ❌ (requires WiFi for GitHub fetch) |
-| Multi-Node race directing | ✅ (master needs the AP) | ⚠ master role only meaningful over WiFi |
-| All other features | ✅ | ✅ |
-
-## Troubleshooting
-
-**"Cannot find FPVRaceOne device"** — confirm the device is plugged in via USB. On Windows it should appear in Device Manager as an Espressif or USB Serial device.
-
-**"Permission denied" on serial port** — close any other program using the COM port (Arduino IDE, PuTTY, screen, …) and reconnect.
-
-**WiFi not connecting** — make sure your computer is on the `FPVRaceOne_XXXX` network. Switch to USB mode if you can't reach the AP.
-
-**Changes don't show up after editing `data/`** — fully quit the app (Ctrl+C in the terminal) and run `npm start` again. Electron caches HTML/JS aggressively.
-
-**Reinstall from scratch:**
-```bash
-cd electron
-rm -rf node_modules
-npm install
-```
-
-## Keyboard Shortcuts
-
-- **Ctrl+R** — refresh
-- **F11** — toggle fullscreen
-- **F12** — toggle DevTools
 
 ## License
 
