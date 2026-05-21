@@ -359,7 +359,7 @@ Statistics and charts update immediately. Changes are saved into the same in-mem
 
 The single Pipeline Smoothing slider in **Settings → Signal Processing** tunes the EMA stage of the detection pipeline:
 
-- **Level 5 (default)** = identical to upstream FPVGate behaviour
+- **Level 5 (default)**
 - **Lower** = less smoothing, faster response, more noise passes through
 - **Higher** = more smoothing, slower response, more noise rejection
 

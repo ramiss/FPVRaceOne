@@ -333,3 +333,27 @@ env.AddCustomTarget(
     title="Publish Pre-release (beta tag + push)",
     description="Tag with a -beta.N suffix and push; CI publishes with the Pre-release flag set"
 )
+
+# ── Flash the latest published release onto the device ──────────────────────
+#
+# Downloads the firmware + filesystem assets directly from the GitHub
+# Releases page and writes them to the device, giving you byte-for-byte
+# parity with what an OTA `Check for Updates` would deliver.  Useful for
+# pre-release acceptance testing on hardware, or for resetting a test
+# device back to the published baseline after local experimentation.
+
+def flash_published_release(source, target, env):
+    script = os.path.join(env.subst("$PROJECT_DIR"), "scripts", "flash_published_release.py")
+    python = env.subst("$PYTHONEXE")
+    result = subprocess.run([python, "-u", script])
+    if result.returncode != 0:
+        import sys as _sys
+        _sys.exit(result.returncode)
+
+env.AddCustomTarget(
+    name="flash_published_release",
+    dependencies=None,
+    actions=flash_published_release,
+    title="Flash Published Release (GitHub binaries)",
+    description="Download the latest GitHub Release's firmware + filesystem and flash them — matches OTA output exactly"
+)

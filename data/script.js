@@ -4145,15 +4145,19 @@ function renderRaceHistory() {
   raceHistoryData.forEach((race, index) => {
     const date = new Date(race.timestamp * 1000);
     const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
-    const fastestLap = (race.fastestLap / 1000).toFixed(2);
+    const fastestLapStr = formatMsDisplay(race.fastestLap);
     // Lap count should exclude Gate 1 (first entry)
     const actualLapCount = race.lapTimes.length > 0 ? race.lapTimes.length - 1 : 0;
-    // Calculate total race time (sum of all times)
-    const totalTime = race.lapTimes.reduce((sum, t) => sum + t, 0) / 1000;
+    // Calculate total race time (ms — convert to formatMsDisplay)
+    const totalMs = race.lapTimes.reduce((sum, t) => sum + t, 0);
     const name = race.name || '';
     const tag = race.tag || '';
     const pilotName = race.pilotName || race.pilotCallsign || '';
-    const freqDisplay = race.frequency ? `${race.band}${race.channel} (${race.frequency}MHz)` : '';
+    // Channel display: separate band from channel index with a space + parens,
+    // otherwise "DJI03/04-10/20" + channel "2" reads as "DJI03/04-10/202".
+    const freqDisplay = race.frequency
+      ? `${race.band} (${race.channel}) (${race.frequency}MHz)`
+      : '';
     const trackDisplay = race.trackName ? race.trackName : '';
     const distanceDisplay = race.totalDistance ? `${race.totalDistance.toFixed(1)}m` : '';
 
@@ -4176,8 +4180,8 @@ function renderRaceHistory() {
         </div>
         <div class="race-item-stats">
           <div class="race-item-stat">Laps: <strong>${actualLapCount}</strong></div>
-          <div class="race-item-stat">Fastest: <strong>${fastestLap}s</strong></div>
-          <div class="race-item-stat">Total Time: <strong>${totalTime.toFixed(2)}s</strong></div>
+          <div class="race-item-stat">Fastest: <strong>${fastestLapStr}</strong></div>
+          <div class="race-item-stat">Total Time: <strong>${formatMsDisplay(totalMs)}</strong></div>
           ${distanceDisplay ? '<div class="race-item-stat">Distance: <strong>' + distanceDisplay + '</strong></div>' : ''}
         </div>
       </div>
@@ -4205,14 +4209,14 @@ function viewRaceDetails(index) {
   const date = new Date(race.timestamp * 1000);
   const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
 
-  // Calculate total race time
-  const totalTime = race.lapTimes.reduce((sum, t) => sum + t, 0) / 1000;
+  // Sum of all lap times in ms — formatMsDisplay handles the MM:SS:CSs split.
+  const totalMs = race.lapTimes.reduce((sum, t) => sum + t, 0);
 
   document.getElementById('raceDetailsTitle').textContent = `Race - ${dateStr}`;
-  document.getElementById('detailFastest').textContent = (race.fastestLap / 1000).toFixed(2) + 's';
-  document.getElementById('detailMedian').textContent = (race.medianLap / 1000).toFixed(2) + 's';
-  document.getElementById('detailBest3').textContent = (race.best3LapsTotal / 1000).toFixed(2) + 's';
-  document.getElementById('detailTotalTime').textContent = totalTime.toFixed(2) + 's';
+  document.getElementById('detailFastest').textContent   = formatMsDisplay(race.fastestLap);
+  document.getElementById('detailMedian').textContent    = formatMsDisplay(race.medianLap);
+  document.getElementById('detailBest3').textContent     = formatMsDisplay(race.best3LapsTotal);
+  document.getElementById('detailTotalTime').textContent = formatMsDisplay(totalMs);
 
   // Keep race details in its original position (below the race list) and always visible
   const detailsDiv = document.getElementById('raceDetails');
@@ -4293,12 +4297,13 @@ function renderRaceTimeline(race) {
     }
     
     eventDiv.style.left = `${event.percentage}%`;
-    eventDiv.title = `${event.label} - ${event.time.toFixed(2)}s`;
-    
+    const eventTimeStr = formatMsDisplay(Math.round(event.time * 1000));
+    eventDiv.title = `${event.label} - ${eventTimeStr}`;
+
     eventDiv.innerHTML = `
       <div class="timeline-flag ${event.type}"></div>
       <div class="timeline-label">${event.label}</div>
-      <div class="timeline-time">${event.time.toFixed(2)}s</div>
+      <div class="timeline-time">${eventTimeStr}</div>
     `;
     
     container.appendChild(eventDiv);
@@ -4316,7 +4321,7 @@ function renderRaceTimeline(race) {
       const lapTimeDiv = document.createElement('div');
       lapTimeDiv.className = 'timeline-lap-time';
       lapTimeDiv.style.left = `${midPoint}%`;
-      lapTimeDiv.textContent = `${lapTime.toFixed(2)}s`;
+      lapTimeDiv.textContent = formatMsDisplay(Math.round(lapTime * 1000));
       lapTimeDiv.title = `Time between ${prevEvent.label} and ${currentEvent.label}`;
       container.appendChild(lapTimeDiv);
     }
@@ -4524,20 +4529,22 @@ function renderDetailHistory() {
       label = `Lap ${actualIndex}`;
     }
     
+    const timeStr = formatMsDisplay(Math.round(time * 1000));
+
     // Add distance info if available: "Lap x - y/z m"
     if (hasTrackData && actualIndex > 0) {
-      label = `${time.toFixed(2)}s\n${label} - ${perLapDistance.toFixed(0)}m`;
+      label = `${timeStr}\n${label} - ${perLapDistance.toFixed(0)}m`;
     } else if (hasTrackData && actualIndex === 0) {
-      label = `${time.toFixed(2)}s\nGate 1 (Start)`;
+      label = `${timeStr}\nGate 1 (Start)`;
     } else if (actualIndex === 0) {
       label = 'Gate 1';
     }
-    
-    const displayTime = hasTrackData ? '' : `${time.toFixed(2)}s`; // Don't show time in bar if it's in label
+
+    const displayTime = hasTrackData ? '' : timeStr; // Don't show time in bar if it's in label
     html += createBarItemWithColor(label, time, maxTime, displayTime, index);
   });
   html += '</div>';
-  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total Race Time: ${totalTime.toFixed(2)}s</p>`;
+  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total Race Time: ${formatMsDisplay(Math.round(totalTime * 1000))}</p>`;
   
   document.getElementById('detailContent').innerHTML = html;
 }
