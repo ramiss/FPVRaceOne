@@ -1,5 +1,4 @@
 #include "laptimer.h"
-#include "trackmanager.h"
 #include "webhook.h"
 
 #include "debug.h"
@@ -79,10 +78,6 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     buz = buzzer;
     led = l;
     webhooks = webhook;
-
-    selectedTrack = nullptr;
-    totalDistanceTravelled = 0.0f;
-    distanceRemaining = 0.0f;
 
     // Apply the upstream Kalman gains once at construction.  These never
     // change at runtime since there's only one filter mode now.
@@ -168,9 +163,6 @@ void LapTimer::start() {
     prevAvgRssi = 0;
     lastRaceDebugPrintMs = 0;
 
-    totalDistanceTravelled = 0.0f;
-    distanceRemaining = 0.0f;
-
     buz->beep(500);
     led->on(500);
 
@@ -213,8 +205,6 @@ void LapTimer::stop() {
     enterHoldStartMs = 0;
     gate1Armed = false;
 
-    totalDistanceTravelled = 0.0f;
-    distanceRemaining = 0.0f;
     // lapCount and lapTimes are intentionally preserved so they survive page refresh
     // after the race ends. They are reset when the next race starts().
     buz->beep(500);
@@ -596,25 +586,6 @@ void LapTimer::finishLap() {
     snapshot.lapCount  = lapCount;
 #endif
 
-    if (selectedTrack && selectedTrack->distance > 0) {
-        totalDistanceTravelled += selectedTrack->distance;
-
-        uint8_t maxLaps = conf->getMaxLaps();
-        if (maxLaps > 0) {
-            int lapsCompleted = lapCount + 1;
-            if (lapCountWraparound) {
-                lapsCompleted = LAPTIMER_LAP_HISTORY + (lapCount + 1);
-            }
-            int lapsRemaining = maxLaps - lapsCompleted;
-            distanceRemaining = (lapsRemaining > 0) ? (lapsRemaining * selectedTrack->distance) : 0.0f;
-        } else {
-            distanceRemaining = 0.0f;
-        }
-
-        DEBUG("Distance: Travelled = %.2f m, Remaining = %.2f m\n",
-              totalDistanceTravelled, distanceRemaining);
-    }
-
     if ((lapCount + 1) % LAPTIMER_LAP_HISTORY == 0) {
         lapCountWraparound = true;
     }
@@ -708,27 +679,4 @@ uint32_t LapTimer::getCalibrationTimestamp(uint16_t index) {
         return calibrationTimestamps[index];
     }
     return 0;
-}
-
-void LapTimer::setTrack(Track* track) {
-    selectedTrack = track;
-    totalDistanceTravelled = 0.0f;
-    distanceRemaining = 0.0f;
-    if (track) {
-        DEBUG("Track selected: %s (%.2f m)\n", track->name.c_str(), track->distance);
-    } else {
-        DEBUG("Track deselected\n");
-    }
-}
-
-float LapTimer::getTotalDistance() {
-    return totalDistanceTravelled;
-}
-
-float LapTimer::getDistanceRemaining() {
-    return distanceRemaining;
-}
-
-Track* LapTimer::getSelectedTrack() {
-    return selectedTrack;
 }

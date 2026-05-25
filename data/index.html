@@ -521,9 +521,6 @@
             <div class="settings-nav-item" onclick="switchSettingsSection('pilot')">
               <span>Pilot Info</span>
             </div>
-            <div class="settings-nav-item" onclick="switchSettingsSection('tracks')">
-              <span>Track Data</span>
-            </div>
             <div class="settings-nav-item" onclick="switchSettingsSection('led')">
               <span>LED Setup</span>
             </div>
@@ -716,47 +713,6 @@
                   <option value="#FF69B4">Hot Pink</option>
                 </select>
                 <span id="colorPreview" style="display: inline-block; width: 30px; height: 30px; margin-left: 10px; border: 2px solid var(--border-color); border-radius: 4px; background-color: #0080FF;"></span>
-              </div>
-            </div>
-
-            <!-- Tracks Section -->
-            <div id="settings-tracks" class="settings-section">
-              <h2>Track Data</h2>
-              
-              <div class="config-item">
-                <label for="tracksEnabled">Enable Track Feature:</label>
-                <div style="flex: 1;">
-                  <label class="switch">
-                    <input type="checkbox" id="tracksEnabled" onchange="toggleTracksEnabled(this.checked)">
-                    <span class="slider"></span>
-                  </label>
-                </div>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                Enable to create tracks and track distance during races
-              </div>
-
-              <div id="tracksContent" style="display: none;">
-                <h3>Manage Tracks</h3>
-                
-                <div style="margin-bottom: 16px;">
-                  <button onclick="openCreateTrackModal()" style="width: 100%;">Create New Track</button>
-                </div>
-
-                <div id="tracksList" style="margin-top: 16px;">
-                  <p style="color: var(--secondary-color); text-align: center;">No tracks created yet</p>
-                </div>
-
-                <h3>Selected Track</h3>
-                <div class="config-item">
-                  <label for="selectedTrack">Active Track:</label>
-                  <select id="selectedTrack" onchange="selectTrack()">
-                    <option value="0">None</option>
-                  </select>
-                </div>
-                <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                  Selected track will be used for distance calculation in races
-                </div>
               </div>
             </div>
 
@@ -1326,32 +1282,6 @@
       </div>
     </div>
 
-    <!-- Track Create/Edit Modal -->
-    <div id="trackModal" class="modal" style="display: none;">
-      <div class="modal-content">
-        <h3 id="trackModalTitle">Create Track</h3>
-        <div class="config-item">
-          <label for="trackName">Track Name:</label>
-          <input type="text" id="trackName" maxlength="50" placeholder="e.g. My Local Track" />
-        </div>
-        <div class="config-item">
-          <label for="trackDistance">Distance (meters):</label>
-          <input type="number" id="trackDistance" step="0.1" min="0" placeholder="e.g. 150.5" />
-        </div>
-        <div class="config-item">
-          <label for="trackTags">Tags:</label>
-          <input type="text" id="trackTags" maxlength="100" placeholder="e.g. outdoor, technical, fast" />
-        </div>
-        <div class="config-item" style="align-items: flex-start;">
-          <label for="trackNotes">Notes:</label>
-          <textarea id="trackNotes" maxlength="200" rows="3" placeholder="Optional notes about the track..." style="flex: 1; padding: 8px; background-color: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 4px; color: var(--primary-color); font-family: inherit; resize: vertical;"></textarea>
-        </div>
-        <div style="display: flex; gap: 12px; margin-top: 16px;">
-          <button onclick="saveTrack()" id="saveTrackBtn">Save Track</button>
-          <button onclick="closeTrackModal()" style="background-color: var(--secondary-color);">Cancel</button>
-        </div>
-      </div>
-    </div>
   </body>
 </html>
 

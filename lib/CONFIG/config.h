@@ -124,7 +124,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 23
+#define CONFIG_VERSION 24
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -150,8 +150,6 @@ typedef struct {
     uint32_t ledStrobeColor;   // RGB for STROBE preset
     uint8_t ledManualOverride; // Manual override flag (0=off, 1=on)
     uint8_t operationMode;     // 0=WiFi, 1=RotorHazard (software switch)
-    uint8_t tracksEnabled;     // Track feature enabled (0=disabled, 1=enabled)
-    uint32_t selectedTrackId;  // Currently selected track (0=none)
     uint8_t webhooksEnabled;   // Webhooks enabled (0=disabled, 1=enabled)
     char webhookIPs[10][16];   // Up to 10 webhook IPs (xxx.xxx.xxx.xxx format)
     uint8_t webhookCount;      // Number of configured webhooks
@@ -213,8 +211,6 @@ class Config {
     uint32_t getLedFadeColor();
     uint32_t getLedStrobeColor();
     uint8_t getLedManualOverride();
-    uint8_t getTracksEnabled();
-    uint32_t getSelectedTrackId();
     uint8_t getWebhooksEnabled();
     uint8_t getWebhookCount();
     const char* getWebhookIP(uint8_t index);
@@ -263,8 +259,6 @@ class Config {
     void setLedFadeColor(uint32_t color);
     void setLedStrobeColor(uint32_t color);
     void setLedManualOverride(uint8_t override);
-    void setTracksEnabled(uint8_t enabled);
-    void setSelectedTrackId(uint32_t trackId);
     void setWebhooksEnabled(uint8_t enabled);
     bool addWebhookIP(const char* ip);
     bool removeWebhookIP(const char* ip);

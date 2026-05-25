@@ -126,8 +126,6 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["ledStrobeColor"] = conf.ledStrobeColor;
     config["ledManualOverride"] = conf.ledManualOverride;
     config["opMode"] = conf.operationMode;
-    config["tracksEnabled"] = conf.tracksEnabled;
-    config["selectedTrackId"] = conf.selectedTrackId;
     config["webhooksEnabled"] = conf.webhooksEnabled;
     config["webhookCount"] = conf.webhookCount;
     JsonArray webhooks = config.createNestedArray("webhookIPs");
@@ -194,8 +192,6 @@ void Config::toJsonString(char* buf) {
     config["ledStrobeColor"] = conf.ledStrobeColor;
     config["ledManualOverride"] = conf.ledManualOverride;
     config["opMode"] = conf.operationMode;
-    config["tracksEnabled"] = conf.tracksEnabled;
-    config["selectedTrackId"] = conf.selectedTrackId;
     config["name"] = conf.pilotName;
     config["ssid"] = conf.ssid;
     config["pwd"] = conf.password;
@@ -327,10 +323,6 @@ void Config::fromJson(JsonObject source) {
 
     // ===== System =====
     if (source.containsKey("opMode")) setU8("opMode", conf.operationMode, 0, 1);
-
-    // ===== Tracks =====
-    if (source.containsKey("tracksEnabled")) setBool01("tracksEnabled", conf.tracksEnabled);
-    if (source.containsKey("selectedTrackId")) setU32("selectedTrackId", conf.selectedTrackId);
 
     // ===== Gate LED options + webhook event toggles =====
     if (source.containsKey("gateLEDsEnabled"))  setBool01("gateLEDsEnabled", conf.gateLEDsEnabled);
@@ -502,14 +494,6 @@ void Config::fromJson(JsonObject source) {
     }
     if (source.containsKey("opMode") && source["opMode"] != conf.operationMode) {
         conf.operationMode = source["opMode"];
-        modified = true;
-    }
-    if (source.containsKey("tracksEnabled") && source["tracksEnabled"] != conf.tracksEnabled) {
-        conf.tracksEnabled = source["tracksEnabled"];
-        modified = true;
-    }
-    if (source.containsKey("selectedTrackId") && source["selectedTrackId"] != conf.selectedTrackId) {
-        conf.selectedTrackId = source["selectedTrackId"];
         modified = true;
     }
     if (source.containsKey("gateLEDsEnabled") && source["gateLEDsEnabled"] != conf.gateLEDsEnabled) {
@@ -688,14 +672,6 @@ uint8_t Config::getLedManualOverride() {
 
 uint8_t Config::getOperationMode() {
     return conf.operationMode;
-}
-
-uint8_t Config::getTracksEnabled() {
-    return conf.tracksEnabled;
-}
-
-uint32_t Config::getSelectedTrackId() {
-    return conf.selectedTrackId;
 }
 
 uint8_t Config::getWebhooksEnabled() {
@@ -916,20 +892,6 @@ void Config::setLedManualOverride(uint8_t override) {
     }
 }
 
-void Config::setTracksEnabled(uint8_t enabled) {
-    if (conf.tracksEnabled != enabled) {
-        conf.tracksEnabled = enabled;
-        modified = true;
-    }
-}
-
-void Config::setSelectedTrackId(uint32_t trackId) {
-    if (conf.selectedTrackId != trackId) {
-        conf.selectedTrackId = trackId;
-        modified = true;
-    }
-}
-
 void Config::setWebhooksEnabled(uint8_t enabled) {
     if (conf.webhooksEnabled != enabled) {
         conf.webhooksEnabled = enabled;
@@ -1039,8 +1001,6 @@ void Config::setDefaults(void) {
     conf.ledStrobeColor = 0xFFFFFF;  // White for strobe
     conf.ledManualOverride = 0;  // Manual override off by default
     conf.operationMode = 0;  // WiFi mode by default
-    conf.tracksEnabled = 0;  // Tracks enabled by default
-    conf.selectedTrackId = 0;  // No track selected by default (will be set on first track creation)
     conf.webhooksEnabled = 0;  // Webhooks disabled by default (no IPs configured)
     conf.webhookCount = 0;  // No webhooks configured
     memset(conf.webhookIPs, 0, sizeof(conf.webhookIPs));  // Clear all webhook IPs

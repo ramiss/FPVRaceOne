@@ -46,7 +46,6 @@ class SelfTest {
     TestResult testRaceHistory(RaceHistory* history);
     TestResult testWebServer();
     TestResult testOTA();
-    TestResult testTrackManager();
     TestResult testWebhooks();
     TestResult testTransport();
     

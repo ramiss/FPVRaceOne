@@ -6,7 +6,6 @@
 #include "laptimer.h"
 #include "buzzer.h"
 #include "racehistory.h"
-#include "trackmanager.h"
 #include "webhook.h"
 #include <EEPROM.h>
 #include <LittleFS.h>
@@ -614,28 +613,6 @@ TestResult SelfTest::testUSB() {
     return result;
 }
 #endif
-
-TestResult SelfTest::testTrackManager() {
-    TestResult result;
-    result.name = "Track Manager";
-    uint32_t start = millis();
-    
-    // Check if tracks file exists
-    bool tracksFileExists = storage->exists("/tracks.json");
-    
-    // Check track manager functionality via storage
-    if (!storage) {
-        result.passed = false;
-        result.details = "Storage not available";
-        result.duration_ms = millis() - start;
-        return result;
-    }
-    
-    result.passed = true;
-    result.details = tracksFileExists ? "Tracks file found" : "No tracks configured yet";
-    result.duration_ms = millis() - start;
-    return result;
-}
 
 TestResult SelfTest::testWebhooks() {
     TestResult result;

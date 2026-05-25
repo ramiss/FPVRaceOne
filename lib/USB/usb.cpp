@@ -7,9 +7,9 @@
 extern RgbLed* g_rgbLed;
 #endif
 
-void USBTransport::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, 
-                        Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor, 
-                        SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr) {
+void USBTransport::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor,
+                        Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor,
+                        SelfTest *test, RX5808 *rx5808) {
     conf = config;
     timer = lapTimer;
     monitor = batMonitor;
@@ -19,8 +19,8 @@ void USBTransport::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batM
     storage = stor;
     selftest = test;
     rx = rx5808;
-    trackManager = trackMgr;
-    
+
+
     rssiStreamingEnabled = false;
     lastRssiSentMs = 0;
     cmdBufferPos = 0;

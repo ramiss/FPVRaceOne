@@ -159,19 +159,6 @@ async function fetchWithRetry(url, options, maxAttempts = 3, delayMs = 1000) {
   throw new Error(`fetchWithRetry: ${url} failed after ${maxAttempts} attempts`);
 }
 
-// Track data for current race
-var currentTrackId = 0;
-var currentTrackName = '';
-var currentTotalDistance = 0;
-var currentDistanceRemaining = 0;
-var distancePollingInterval = null;
-
-// Per-lap distance tracking
-var currentLapDistance = 0.0;       // Distance travelled in current lap (meters)
-var currentLapStartTime = 0;        // When current lap started (ms)
-var lastCompletedLapTime = 0;       // Duration of previous lap (ms)
-var trackLapLength = 0.0;           // Length of one lap (meters)
-
 var timerInterval;
 var lapTimerStartMs = 0;            // Start time for current lap timer
 const timer = document.getElementById("timer");
@@ -1174,22 +1161,6 @@ async function saveVoiceEnabledImmediate(enabled) {
   return json;
 }
 
-function setTrackDataSettingsVisible(visible) {
-  const navItems = document.querySelectorAll('.settings-nav-item');
-
-  navItems.forEach(item => {
-    const onclick = item.getAttribute('onclick') || '';
-    if (onclick.includes("switchSettingsSection('tracks')")) {
-      item.style.display = visible ? '' : 'none';
-    }
-  });
-
-  // If Track Data is currently selected and we hide it, switch away
-  if (!visible && typeof switchSettingsSection === 'function') {
-    switchSettingsSection('system');
-  }
-}
-
 function getRssiCanvasCtx() {
   const canvas = document.getElementById('rssiChart');
   if (!canvas) return null;
@@ -2009,11 +1980,6 @@ function buildConfigSnapshotFromUI() {
   const ledFadeColorInt = parseColor(ledFadeColorInput, '#00FF00');
   const ledStrobeColorInt = parseColor(ledStrobeColorInput, '#FFFFFF');
 
-  // Tracks
-  const tracksEnabledToggle = document.getElementById('tracksEnabled');
-  const selectedTrackSelect = document.getElementById('selectedTrack');
-  const selectedTrackId = selectedTrackSelect ? parseInt(selectedTrackSelect.value, 10) : 0;
-
   // Webhooks
   const webhooksEnabledToggle = document.getElementById('webhooksEnabled');
 
@@ -2069,10 +2035,6 @@ function buildConfigSnapshotFromUI() {
     ledFadeColor: ledFadeColorInt,
     ledStrobeColor: ledStrobeColorInt,
     ledManualOverride: (ledManualOverrideToggle && ledManualOverrideToggle.checked) ? 1 : 0,
-
-    // Tracks
-    tracksEnabled: (tracksEnabledToggle && tracksEnabledToggle.checked) ? 1 : 0,
-    selectedTrackId: Number.isFinite(selectedTrackId) ? selectedTrackId : 0,
 
     // Webhooks
     webhooksEnabled: (webhooksEnabledToggle && webhooksEnabledToggle.checked) ? 1 : 0,
@@ -2825,13 +2787,9 @@ function addLap(lapStr) {
   const newLap = parseFloat(lapStr);
   lapNo += 1;
   lapTimes.push(newLap);
-  
-  // Track lap timing for distance estimation
-  lastCompletedLapTime = newLap * 1000; // Convert to milliseconds
-  currentLapStartTime = Date.now();     // Reset lap start time
+
   lapTimerStartMs = Date.now();         // Reset lap timer
-  currentLapDistance = 0.0;             // Reset distance counter
-  
+
   // Calculate total time so far
   const totalMs = Math.round(lapTimes.reduce((sum, time) => sum + time, 0) * 1000);
 
@@ -2984,11 +2942,8 @@ function startRaceDisplayOnly(offsetMs = 0) {
     timer.innerHTML = `${m}:${s}:${ms}s`;
   }, 10);
 
-  currentLapStartTime  = Date.now();
   lapTimerStartMs      = Date.now();
-  lastCompletedLapTime = 0;
-  currentLapDistance   = 0.0;
-  startDistancePolling();
+  startLapTimerDisplay();
 }
 
 // Stop the visual race display without sending /timer/stop to the server.
@@ -3000,7 +2955,7 @@ function stopRaceDisplayOnly() {
   startRaceButton.disabled = false;
   startRaceButton.classList.remove('active');
   addLapButton.disabled    = true;
-  stopDistancePolling();
+  stopLapTimerDisplay();
   updateRaceDataButtonsVisibility();
 }
 
@@ -3496,14 +3451,9 @@ async function startRace() {
   stopRaceButton.disabled = false;
   addLapButton.disabled = false;
 
-  // Initialize lap timing for distance estimation
-  currentLapStartTime = Date.now();
   lapTimerStartMs = Date.now();
-  lastCompletedLapTime = 0;
-  currentLapDistance = 0.0;
 
-  // Start polling distance if tracks enabled
-  startDistancePolling();
+  startLapTimerDisplay();
 }
 
 function stopRace() {
@@ -3543,8 +3493,7 @@ function stopRace() {
   // which process() forwards to the master. No JS call needed here.
   if (mnMasterRaceActive) mnMasterRaceActive = false;
 
-  // Stop distance polling
-  stopDistancePolling();
+  stopLapTimerDisplay();
 
   // Show Download/Transfer buttons now that race is stopped
   updateRaceDataButtonsVisibility();
@@ -3619,11 +3568,6 @@ function downloadCurrentRaceData() {
   const bandValue = bandSelect.options[bandSelect.selectedIndex].value;
   const channelValue = parseInt(channelSelect.options[channelSelect.selectedIndex].value);
 
-  let totalRaceDistance = 0;
-  if (trackLapLength > 0 && lapTimes.length > 0) {
-    totalRaceDistance = trackLapLength * lapTimes.length;
-  }
-
   const raceData = {
     timestamp: Math.floor(Date.now() / 1000),
     lapTimes: lapTimes.map(t => Math.round(t * 1000)),
@@ -3633,10 +3577,7 @@ function downloadCurrentRaceData() {
     pilotName: pilotNameInput.value || '',
     frequency: frequency,
     band: bandValue,
-    channel: channelValue,
-    trackId: currentTrackId || 0,
-    trackName: currentTrackName || '',
-    totalDistance: totalRaceDistance
+    channel: channelValue
   };
 
   // Create download
@@ -4012,12 +3953,6 @@ function saveCurrentRace() {
   const bandValue = bandSelect.options[bandSelect.selectedIndex].value;
   const channelValue = parseInt(channelSelect.options[channelSelect.selectedIndex].value);
 
-  // Calculate total race distance: track length per lap × number of laps
-  let totalRaceDistance = 0;
-  if (trackLapLength > 0 && lapTimes.length > 0) {
-    totalRaceDistance = trackLapLength * lapTimes.length;
-  }
-
   const raceData = {
     timestamp: Math.floor(Date.now() / 1000),
     lapTimes: lapTimes.map(t => Math.round(t * 1000)), // Convert to milliseconds
@@ -4027,10 +3962,7 @@ function saveCurrentRace() {
     pilotName: pilotNameInput.value || '',
     frequency: frequency,
     band: bandValue,
-    channel: channelValue,
-    trackId: currentTrackId || 0,
-    trackName: currentTrackName || '',
-    totalDistance: totalRaceDistance
+    channel: channelValue
   };
   
   fetch('/races/save', {
@@ -4066,7 +3998,6 @@ function applyRaceHistoryModeUI() {
   const storageLabel = document.getElementById('raceHistoryStorageLabel');
   const raceTabBanner = document.getElementById('raceTabDownloadReminder');
 
-  setTrackDataSettingsVisible(raceHistoryPersistent);
   setLEDSettingsVisible(ledConnected);
 
   setButtonLabel(
@@ -6201,344 +6132,48 @@ function clearSerialMonitor() {
 }
 
 // ============================================
-// Distance Tracking Functions
+// Running Lap Timer Display
 // ============================================
 
-function startDistancePolling() {
-  // Poll distance every 5 seconds during race (less aggressive)
-  if (distancePollingInterval) {
-    clearInterval(distancePollingInterval);
+function startLapTimerDisplay() {
+  if (window.lapTimerDisplayInterval) {
+    clearInterval(window.lapTimerDisplayInterval);
   }
-  
-  // Initial fetch
-  fetchDistance();
-  
-  distancePollingInterval = setInterval(() => {
-    fetchDistance();
-    // Also update the display to refresh the estimated distance
-    updateDistanceDisplay();
-  }, 5000);
-  
-  // Also update display more frequently (every 100ms) for smoother estimation
-  if (!window.distanceDisplayInterval) {
-    window.distanceDisplayInterval = setInterval(() => {
-      updateDistanceDisplay();
-    }, 100);
+  updateLapTimerDisplay();
+  window.lapTimerDisplayInterval = setInterval(updateLapTimerDisplay, 100);
+}
+
+function stopLapTimerDisplay() {
+  if (window.lapTimerDisplayInterval) {
+    clearInterval(window.lapTimerDisplayInterval);
+    window.lapTimerDisplayInterval = null;
   }
 }
 
-function stopDistancePolling() {
-  if (distancePollingInterval) {
-    clearInterval(distancePollingInterval);
-    distancePollingInterval = null;
-  }
-  if (window.distanceDisplayInterval) {
-    clearInterval(window.distanceDisplayInterval);
-    window.distanceDisplayInterval = null;
-  }
-}
-
-function fetchDistance() {
-  fetch('/timer/distance', {
-    signal: AbortSignal.timeout(3000) // 3 second timeout
-  })
-    .then(response => {
-      if (!response.ok) throw new Error('Distance fetch failed');
-      return response.json();
-    })
-    .then(data => {
-      currentTrackId = data.trackId || 0;
-      currentTrackName = data.trackName || '';
-      trackLapLength = data.trackDistance || 0.0;
-      currentTotalDistance = data.totalDistance || 0;
-      currentDistanceRemaining = data.distanceRemaining || 0;
-      updateDistanceDisplay();
-    })
-    .catch(error => {
-      // Silently fail - don't spam console or cause issues
-      if (error.name !== 'TimeoutError' && error.name !== 'AbortError') {
-        console.warn('Distance fetch error:', error.message);
-      }
-    });
-}
-
-function updateDistanceDisplay() {
-  // Update lap counter to include current lap time and per-lap distance
+function updateLapTimerDisplay() {
   const lapCounter = document.getElementById('lapCounter');
   if (!lapCounter) return;
-  
-  // Base lap counter text
-  let lapText = '';
-  if (maxLaps === 0) {
-    lapText = `Lap ${Math.max(0, lapNo)}`;
-  } else {
-    lapText = `Lap ${Math.max(0, lapNo)} / ${maxLaps}`;
-  }
-  
-  // Calculate current lap time (time since last lap or race start)
+
+  let lapText = (maxLaps === 0)
+    ? `Lap ${Math.max(0, lapNo)}`
+    : `Lap ${Math.max(0, lapNo)} / ${maxLaps}`;
+
   if (lapTimerStartMs > 0) {
     const currentLapMs = Date.now() - lapTimerStartMs;
     const minutes = Math.floor(currentLapMs / 60000);
     const seconds = Math.floor((currentLapMs % 60000) / 1000);
     const centiseconds = Math.floor((currentLapMs % 1000) / 10);
-    
+
     const m = minutes < 10 ? "0" + minutes : minutes;
     const s = seconds < 10 ? "0" + seconds : seconds;
     const ms = centiseconds < 10 ? "0" + centiseconds : centiseconds;
-    const lapTimeText = `${m}:${s}:${ms}s`;
-    
-    lapText += ` - ${lapTimeText}`;
+    lapText += ` - ${m}:${s}:${ms}s`;
   }
-  
-  // Add per-lap distance if track is selected and race is running
-  if (currentTrackId && trackLapLength > 0) {
-    // Estimate distance travelled in current lap using time extrapolation
-    let estimatedDistance = 0;
-    if (currentLapStartTime > 0 && lastCompletedLapTime > 0) {
-      const currentLapElapsed = Date.now() - currentLapStartTime;
-      const progress = Math.min(currentLapElapsed / lastCompletedLapTime, 1.0);
-      estimatedDistance = progress * trackLapLength;
-    }
-    
-    lapText += ` - ${estimatedDistance.toFixed(1)}/${trackLapLength.toFixed(1)}m`;
-  }
-  
+
   lapCounter.textContent = lapText;
 }
 
 // ============================================
-// Track Management Functions
-// ============================================
-
-let currentEditTrackId = null;
-let allTracks = [];
-
-function setTracksUI(enabled) {
-  const tracksContent = document.getElementById('tracksContent');
-  if (tracksContent) {
-    tracksContent.style.display = enabled ? 'block' : 'none';
-  }
-  if (enabled) {
-    loadTracks();
-  }
-}
-
-function toggleTracksEnabled(enabled, opts = {}) {
-  const save = (opts.save !== undefined) ? !!opts.save : true;
-
-  setTracksUI(enabled);
-
-  if (!save) return;
-
-  stageConfig('tracksEnabled', enabled ? 1 : 0);
-}
-
-function loadTracks() {
-  fetch('/tracks')
-    .then(response => response.json())
-    .then(data => {
-      allTracks = data.tracks || [];
-      displayTracks();
-      updateTrackSelect();
-    })
-    .catch(error => console.error('Error loading tracks:', error));
-}
-
-function displayTracks() {
-  const tracksList = document.getElementById('tracksList');
-  if (!tracksList) return;
-  
-  if (allTracks.length === 0) {
-    tracksList.innerHTML = '<p style="color: var(--secondary-color); text-align: center;">No tracks created yet</p>';
-    return;
-  }
-  
-  let html = '<div style="display: flex; flex-direction: column; gap: 12px;">';
-  
-  allTracks.forEach(track => {
-    html += `
-      <div style="padding: 12px; background-color: var(--bg-secondary); border-radius: 8px; border-left: 4px solid var(--accent-color);">
-        <div style="display: flex; justify-content: between; align-items: center; margin-bottom: 8px;">
-          <div style="flex: 1;">
-            <div style="font-weight: bold; font-size: 16px; margin-bottom: 4px;">${track.name}</div>
-            <div style="font-size: 14px; color: var(--secondary-color);">
-              ${track.distance} meters${track.tags ? ' • ' + track.tags : ''}
-            </div>
-          </div>
-          <div style="display: flex; gap: 8px;">
-            <button onclick="editTrack(${track.trackId})" style="padding: 6px 12px; font-size: 14px;">Edit</button>
-            <button onclick="deleteTrack(${track.trackId})" style="padding: 6px 12px; font-size: 14px; background-color: var(--danger-color);">Delete</button>
-          </div>
-        </div>
-        ${track.notes ? `<div style="font-size: 13px; color: var(--secondary-color); margin-top: 8px;">${track.notes}</div>` : ''}
-      </div>
-    `;
-  });
-  
-  html += '</div>';
-  tracksList.innerHTML = html;
-}
-
-function updateTrackSelect() {
-  const selectEl = document.getElementById('selectedTrack');
-  if (!selectEl) return;
-  
-  // Save current selection
-  const currentSelection = selectEl.value;
-  
-  // Clear and repopulate
-  selectEl.innerHTML = '<option value="0">None</option>';
-  
-  allTracks.forEach(track => {
-    const option = document.createElement('option');
-    option.value = track.trackId;
-    option.textContent = `${track.name} (${track.distance}m)`;
-    selectEl.appendChild(option);
-  });
-  
-  // Restore selection if it still exists
-  if (currentSelection) {
-    selectEl.value = currentSelection;
-  }
-}
-
-function openCreateTrackModal() {
-  currentEditTrackId = null;
-  document.getElementById('trackModalTitle').textContent = 'Create Track';
-  document.getElementById('trackName').value = '';
-  document.getElementById('trackDistance').value = '';
-  document.getElementById('trackTags').value = '';
-  document.getElementById('trackNotes').value = '';
-  document.getElementById('saveTrackBtn').textContent = 'Save Track';
-  document.getElementById('trackModal').style.display = 'flex';
-}
-
-function editTrack(trackId) {
-  const track = allTracks.find(t => t.trackId === trackId);
-  if (!track) return;
-  
-  currentEditTrackId = trackId;
-  document.getElementById('trackModalTitle').textContent = 'Edit Track';
-  document.getElementById('trackName').value = track.name;
-  document.getElementById('trackDistance').value = track.distance;
-  document.getElementById('trackTags').value = track.tags || '';
-  document.getElementById('trackNotes').value = track.notes || '';
-  document.getElementById('saveTrackBtn').textContent = 'Update Track';
-  document.getElementById('trackModal').style.display = 'flex';
-}
-
-function closeTrackModal() {
-  document.getElementById('trackModal').style.display = 'none';
-  currentEditTrackId = null;
-}
-
-function saveTrack() {
-  const name = document.getElementById('trackName').value.trim();
-  const distance = parseFloat(document.getElementById('trackDistance').value);
-  const tags = document.getElementById('trackTags').value.trim();
-  const notes = document.getElementById('trackNotes').value.trim();
-  
-  if (!name) {
-    alert('Please enter a track name');
-    return;
-  }
-  
-  if (!distance || distance <= 0) {
-    alert('Please enter a valid distance');
-    return;
-  }
-  
-  const trackData = {
-    trackId: currentEditTrackId || Math.floor(Date.now() / 1000),
-    name: name,
-    distance: distance,
-    tags: tags,
-    notes: notes
-  };
-  
-  const endpoint = currentEditTrackId ? '/tracks/update' : '/tracks/create';
-  
-  fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Accept': 'application/json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(trackData)
-  })
-  .then(response => response.json())
-  .then(data => {
-    if (data.status === 'OK') {
-      closeTrackModal();
-      loadTracks();
-    } else {
-      alert('Error saving track');
-    }
-  })
-  .catch(error => {
-    console.error('Error saving track:', error);
-    alert('Error saving track');
-  });
-}
-
-function deleteTrack(trackId) {
-  if (!confirm('Are you sure you want to delete this track?')) {
-    return;
-  }
-  
-  fetch('/tracks/delete', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/x-www-form-urlencoded',
-    },
-    body: 'trackId=' + trackId
-  })
-  .then(response => response.json())
-  .then(data => {
-    if (data.status === 'OK') {
-      loadTracks();
-    } else {
-      alert('Error deleting track');
-    }
-  })
-  .catch(error => {
-    console.error('Error deleting track:', error);
-    alert('Error deleting track');
-  });
-}
-
-function selectTrack() {
-  const selectEl = document.getElementById('selectedTrack');
-  const trackId = parseInt(selectEl.value, 10) || 0;
-
-  // Existing UI/runtime behavior
-  if (trackId === 0) {
-    trackLapLength = 0;
-    currentTrackId = 0;
-    currentTrackName = '';
-  } else {
-    const selectedTrack = allTracks.find(t => t.trackId === trackId);
-    if (selectedTrack) {
-      trackLapLength = selectedTrack.distance;
-      currentTrackId = selectedTrack.trackId;
-      currentTrackName = selectedTrack.name;
-      console.log(`Track selected: ${selectedTrack.name}, length: ${trackLapLength}m`);
-    }
-  }
-
-  // Keep existing backend behavior
-  fetch('/tracks/select', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: 'trackId=' + trackId
-  })
-  .then(response => response.json())
-  .catch(err => console.error('Error selecting track:', err));
-
-  // Stage config
-  stageConfig('selectedTrackId', trackId);
-}
-
 // ===== WEBHOOK MANAGEMENT =====
 
 function setWebhooksUI(enabled) {
@@ -6710,7 +6345,6 @@ function testWebhook() {
   });
 }
 
-// Load tracks when settings modal opens
 function openSettingsModal() {
   settingsLoading = true;
   // Trigger serial config dump for debugging (fire-and-forget)
@@ -6836,22 +6470,6 @@ function openSettingsModal() {
         
         if (webhookLapToggle && config.webhookLap !== undefined) {
           webhookLapToggle.checked = config.webhookLap === 1;
-        }
-        
-        // Tracks
-        const tracksEnabled = config.tracksEnabled === 1;
-        const tracksCheckbox = document.getElementById('tracksEnabled');
-        if (tracksCheckbox) {
-          tracksCheckbox.checked = tracksEnabled;
-          toggleTracksEnabled(tracksEnabled, { save: false });
-        }
-        
-        // Set selected track
-        if (config.selectedTrackId) {
-          const selectEl = document.getElementById('selectedTrack');
-          if (selectEl) {
-            selectEl.value = config.selectedTrackId;
-          }
         }
         
         // Webhooks

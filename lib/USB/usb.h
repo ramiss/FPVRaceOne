@@ -35,7 +35,6 @@
 #include "storage.h"
 #include "selftest.h"
 #include "RX5808.h"
-#include "trackmanager.h"
 
 #ifdef ESP32S3
 #include "rgbled.h"
@@ -44,8 +43,8 @@
 // USB Serial transport using native ESP32-S3 USB CDC
 class USBTransport : public TransportInterface {
    public:
-    void init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer, 
-              Led *led, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr);
+    void init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer,
+              Led *led, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808);
     
     // TransportInterface implementation
     void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) override;
@@ -73,8 +72,7 @@ class USBTransport : public TransportInterface {
     Storage *storage;
     SelfTest *selftest;
     RX5808 *rx;
-    TrackManager *trackManager;
-    
+
     bool rssiStreamingEnabled;
     uint32_t lastRssiSentMs;
     static const uint32_t RSSI_SEND_INTERVAL_MS = 200;

@@ -9,7 +9,6 @@
 #include "storage.h"
 #include "selftest.h"
 #include "transport.h"
-#include "trackmanager.h"
 #include "usb.h"
 #include "webhook.h"
 // DISABLED FOR NOW: #include "nodemode.h"  // Uncomment to re-enable RotorHazard support
@@ -58,7 +57,6 @@ static TransportManager transportManager;
 static Buzzer buzzer;
 static Led led;
 static RaceHistory raceHistory;
-static TrackManager trackManager;
 static WebhookManager webhookManager;
 static MultiNodeManager multiNodeManager;
 #ifdef ESP32S3
@@ -219,22 +217,6 @@ void setup() {
         DEBUG("Race history initialization failed\n");
     }
     
-    // Initialize track manager
-    if (trackManager.init(&storage)) {
-        DEBUG("Track manager initialized, %d tracks loaded\n", trackManager.getTrackCount());
-    } else {
-        DEBUG("Track manager initialization failed\n");
-    }
-    
-    // Load selected track if tracks are enabled
-    if (config.getTracksEnabled() && config.getSelectedTrackId() != 0) {
-        Track* selectedTrack = trackManager.getTrackById(config.getSelectedTrackId());
-        if (selectedTrack) {
-            timer.setTrack(selectedTrack);
-            DEBUG("Selected track loaded: %s\n", selectedTrack->name.c_str());
-        }
-    }
-    
     // Initialize webhook manager and load webhooks from config
     webhookManager.setEnabled(config.getWebhooksEnabled());
     for (uint8_t i = 0; i < config.getWebhookCount(); i++) {
@@ -248,13 +230,13 @@ void setup() {
     // Initialize multi-node manager
     multiNodeManager.init(&config);
 
-    ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &trackManager, &webhookManager, &multiNodeManager);
+    ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &webhookManager, &multiNodeManager);
 
     // OTA manager — uses the webserver's SSE channel for progress events.
     otaManager.init(&config, &timer, ws.getEvents());
-    
+
     // Initialize USB transport
-    usbTransport.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &trackManager);
+    usbTransport.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx);
     
     // Register transports with TransportManager
     transportManager.addTransport(&ws);
@@ -354,22 +336,6 @@ void loop() {
                 DEBUG("Race history reloaded from SD card, %d races available\n", raceHistory.getRaceCount());
             } else {
                 DEBUG("Race history reload from SD card failed\n");
-            }
-            
-            // Reload tracks from SD card
-            if (trackManager.loadTracks()) {
-                DEBUG("Tracks reloaded from SD card, %d tracks available\n", trackManager.getTrackCount());
-                
-                // Reload selected track if tracks are enabled
-                if (config.getTracksEnabled() && config.getSelectedTrackId() != 0) {
-                    Track* selectedTrack = trackManager.getTrackById(config.getSelectedTrackId());
-                    if (selectedTrack) {
-                        timer.setTrack(selectedTrack);
-                        DEBUG("Selected track reloaded: %s\n", selectedTrack->name.c_str());
-                    }
-                }
-            } else {
-                DEBUG("Tracks reload from SD card failed\n");
             }
         } else {
             DEBUG("SD card not available - using LittleFS only\n");

@@ -123,7 +123,7 @@ static uint8_t selectBestWifiChannel() {
     return best;
 }
 
-void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, TrackManager *trackMgr, WebhookManager *webhookMgr, MultiNodeManager *multiNodeMgr) {
+void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMonitor, Buzzer *buzzer, Led *l, RaceHistory *raceHist, Storage *stor, SelfTest *test, RX5808 *rx5808, WebhookManager *webhookMgr, MultiNodeManager *multiNodeMgr) {
 
     ipAddress.fromString(wifi_ap_address);
 
@@ -137,7 +137,6 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     g_storage = stor;  // Set global pointer for static functions
     selftest = test;
     rx = rx5808;
-    trackManager = trackMgr;
     webhooks = webhookMgr;
     multiNode = multiNodeMgr;
     transportMgr = nullptr;
@@ -1314,130 +1313,6 @@ EEPROM:\n\
     server.addHandler(raceUploadHandler);
     server.addHandler(updateLapsHandler);
 
-    // Track endpoints
-    server.on("/tracks", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        String json = trackManager->toJsonString();
-        request->send(200, "application/json", json);
-        led->on(200);
-    });
-
-    AsyncCallbackJsonWebHandler *trackCreateHandler = new AsyncCallbackJsonWebHandler("/tracks/create", [this](AsyncWebServerRequest *request, JsonVariant &json) {
-        JsonObject jsonObj = json.as<JsonObject>();
-        
-        Track track;
-        track.trackId = jsonObj["trackId"];
-        track.name = jsonObj["name"] | "";
-        track.tags = jsonObj["tags"] | "";
-        track.distance = jsonObj["distance"] | 0.0f;
-        track.notes = jsonObj["notes"] | "";
-        track.imagePath = "";
-        
-        bool success = trackManager->createTrack(track);
-        request->send(200, "application/json", success ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}");
-        led->on(200);
-    });
-
-    AsyncCallbackJsonWebHandler *trackUpdateHandler = new AsyncCallbackJsonWebHandler("/tracks/update", [this](AsyncWebServerRequest *request, JsonVariant &json) {
-        JsonObject jsonObj = json.as<JsonObject>();
-        
-        if (!jsonObj.containsKey("trackId")) {
-            request->send(400, "application/json", "{\"status\": \"ERROR\", \"message\": \"Missing trackId\"}");
-            return;
-        }
-        
-        uint32_t trackId = jsonObj["trackId"];
-        Track updatedTrack;
-        updatedTrack.trackId = trackId;
-        updatedTrack.name = jsonObj["name"] | "";
-        updatedTrack.tags = jsonObj["tags"] | "";
-        updatedTrack.distance = jsonObj["distance"] | 0.0f;
-        updatedTrack.notes = jsonObj["notes"] | "";
-        
-        bool success = trackManager->updateTrack(trackId, updatedTrack);
-        request->send(200, "application/json", success ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}");
-        led->on(200);
-    });
-
-    server.on("/tracks/delete", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        if (request->hasParam("trackId", true)) {
-            uint32_t trackId = request->getParam("trackId", true)->value().toInt();
-            bool success = trackManager->deleteTrack(trackId);
-            
-            // If deleted track was selected, deselect it
-            if (success && conf->getSelectedTrackId() == trackId) {
-                conf->setSelectedTrackId(0);
-                timer->setTrack(nullptr);
-            }
-            
-            request->send(200, "application/json", success ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}");
-        } else {
-            request->send(400, "application/json", "{\"status\": \"ERROR\", \"message\": \"Missing trackId\"}");
-        }
-        led->on(200);
-    });
-
-    server.on("/tracks/select", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        if (request->hasParam("trackId", true)) {
-            uint32_t trackId = request->getParam("trackId", true)->value().toInt();
-            
-            if (trackId == 0) {
-                // Deselect track
-                conf->setSelectedTrackId(0);
-                timer->setTrack(nullptr);
-                request->send(200, "application/json", "{\"status\": \"OK\"}");
-            } else {
-                Track* track = trackManager->getTrackById(trackId);
-                if (track) {
-                    conf->setSelectedTrackId(trackId);
-                    timer->setTrack(track);
-                    request->send(200, "application/json", "{\"status\": \"OK\"}");
-                } else {
-                    request->send(404, "application/json", "{\"status\": \"ERROR\", \"message\": \"Track not found\"}");
-                }
-            }
-        } else {
-            request->send(400, "application/json", "{\"status\": \"ERROR\", \"message\": \"Missing trackId\"}");
-        }
-        led->on(200);
-    });
-
-    server.on("/tracks/clear", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        bool success = trackManager->clearAll();
-        
-        // Clear selected track if any
-        if (success && conf->getSelectedTrackId() != 0) {
-            conf->setSelectedTrackId(0);
-            timer->setTrack(nullptr);
-        }
-        
-        request->send(200, "application/json", success ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}");
-        led->on(200);
-    });
-
-    server.on("/timer/distance", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        DynamicJsonDocument doc(512);
-        doc["totalDistance"] = timer->getTotalDistance();
-        doc["distanceRemaining"] = timer->getDistanceRemaining();
-        
-        Track* selectedTrack = timer->getSelectedTrack();
-        if (selectedTrack) {
-            doc["trackId"] = selectedTrack->trackId;
-            doc["trackName"] = selectedTrack->name;
-            doc["trackDistance"] = selectedTrack->distance;
-        } else {
-            doc["trackId"] = 0;
-            doc["trackName"] = "";
-            doc["trackDistance"] = 0.0f;
-        }
-        
-        String json;
-        serializeJson(doc, json);
-        request->send(200, "application/json", json);
-    });
-
-    server.addHandler(trackCreateHandler);
-    server.addHandler(trackUpdateHandler);
-
     /*  // NOTE: /api/selftest is defined later with the full per-module test suite (RX5808, timer, etc).
         // Keeping only one registration prevents route conflicts.
     // Self-test endpoint
@@ -1831,11 +1706,6 @@ EEPROM:\n\
             TestResult batteryTest = selftest->testBattery();
         #endif
         
-        #ifdef PIN_SD_CS
-        // Run Track Manager test
-        TestResult trackTest = selftest->testTrackManager();
-        #endif
-        
         // Run Webhooks test
         TestResult webhookTest = selftest->testWebhooks();
         
@@ -1876,9 +1746,6 @@ EEPROM:\n\
         addTest(wifiTest);
         #ifdef PIN_VBAT
             addTest(batteryTest);
-        #endif
-        #ifdef PIN_SD_CS
-            addTest(trackTest);
         #endif
         addTest(webhookTest);
         addTest(transportTest);
