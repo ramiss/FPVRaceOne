@@ -70,6 +70,14 @@ String wifi_ap_ssid;
 // Scan 2.4GHz channels and return the least-congested non-overlapping channel (1, 6, or 11).
 // Scoring: each nearby AP adds 1 point plus a RSSI weight (stronger = more interference).
 // Lower score = better channel. Called once per boot before starting the AP.
+//
+// MAC-derived fallback: when the scan sees nothing on any of {1,6,11}, the naive
+// "first minimum wins" pick always returns ch 1.  Multiple FPVRaceOne devices
+// cold-booting at the same moment in an otherwise-empty RF environment would all
+// converge on ch 1.  Hash the device's MAC into {0,1,2} → {ch 1, 6, 11} so
+// simultaneous boots deterministically spread across all three channels.  XOR
+// of all 6 MAC bytes is fine here: even sequential Espressif MAC allocations
+// hash to a uniform distribution mod 3.
 static uint8_t selectBestWifiChannel() {
     const uint8_t candidates[] = {1, 6, 11};
     int score[14] = {};  // index 1-13; 0 unused
@@ -88,16 +96,30 @@ static uint8_t selectBestWifiChannel() {
     WiFi.scanDelete();
     WiFi.mode(WIFI_OFF);
 
-    uint8_t best = candidates[0];
     int bestScore = INT_MAX;
+    uint8_t best = candidates[0];
     for (uint8_t ch : candidates) {
         if (score[ch] < bestScore) {
             bestScore = score[ch];
             best = ch;
         }
     }
-    DEBUG("WiFi channel scan: ch1=%d ch6=%d ch11=%d -> selected ch%d\n",
-          score[1], score[6], score[11], best);
+
+    if (bestScore == 0) {
+        // Scan saw nothing on {1, 6, 11}.  Spread cold-booting nodes across
+        // channels deterministically using the device's MAC.
+        uint8_t mac[6] = {};
+        WiFi.macAddress(mac);
+        uint8_t hash = 0;
+        for (uint8_t b : mac) hash ^= b;
+        best = candidates[hash % 3];
+        DEBUG("WiFi channel scan: no APs visible — MAC-fallback ch%d "
+              "(mac %02X:%02X:%02X:%02X:%02X:%02X)\n",
+              best, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    } else {
+        DEBUG("WiFi channel scan: ch1=%d ch6=%d ch11=%d -> selected ch%d\n",
+              score[1], score[6], score[11], best);
+    }
     return best;
 }
 
@@ -344,8 +366,10 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
 
                 DEBUG("Starting WiFi AP: %s with password: %s on ch%d\n", wifi_ap_ssid.c_str(), wifi_ap_password, apChannel);
-                // Master mode supports up to 8 clients; single mode supports 4
-                uint8_t maxConn = (conf->getNodeMode() == 1) ? 8 : 4;
+                // Master: 7 client STAs + 1 race-director phone = 8 expected slots;
+                // we set 9 to keep 1 buffer slot so a single stray pilot connection
+                // can't lock the director out of their own master.  Single mode: 4.
+                uint8_t maxConn = (conf->getNodeMode() == 1) ? 9 : 4;
                 WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
 
                 // Master: embed a 6-byte vendor IE in every beacon and probe-response so
