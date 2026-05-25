@@ -37,15 +37,23 @@
   --tabcontent-bg: #2A2A2A;
 }
 
-/* Material Lighter */
+/* Material Lighter — contrast-tuned for WCAG AA on near-white backgrounds.
+ * The original palette used #7CB342 lime-green as --secondary-color (~2.7:1 on
+ * white, fails AA) and #00897B teal as --primary-color (~3.97:1, marginal for
+ * 12-14px text). Both are commonly used as text colors throughout the UI, so
+ * we shift them to darker variants while keeping the same hue family:
+ *   - secondary: teal-leaning blue-gray #455A64 (~9.0:1 on white)
+ *   - primary:   #00796B teal 700        (~4.91:1 on white — passes AA normal)
+ * bg-primary / bg-secondary fall through to :root (#FFFFFF / #F5F5F5).
+ */
 [data-theme="lighter"] {
-  --primary-color: #00897B;
-  --primary-color-dark: #00695C;
-  --secondary-color: #7CB342;
+  --primary-color: #00796B;
+  --primary-color-dark: #004D40;
+  --secondary-color: #455A64;
   --background-color: #FAFAFA;
-  --text-color: #272727;
-  --border-color: #E7EAEC;
-  --table-even-bg: #F1F1F1;
+  --text-color: #212121;
+  --border-color: #CFD8DC;
+  --table-even-bg: #ECEFF1;
   --tabcontent-bg: #FFFFFF;
 }
 

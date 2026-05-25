@@ -124,7 +124,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 24
+#define CONFIG_VERSION 25
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -175,6 +175,7 @@ typedef struct {
     uint8_t mnSkipMasterStart;  // 1=skip master Start All if race already running on this node
     uint8_t devMode;            // 0=off, 1=dev mode (simulate laps by clicking pilot name)
     uint8_t otaIncludePrereleases;  // 0=stable only (default), 1=also offer beta / pre-release builds in Check for Updates
+    uint8_t mnClientRaceAudio;  // client mode: 1=play master's race-start countdown + beep locally, 0=silent (default)
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -237,6 +238,8 @@ class Config {
     void    setNodeMode(uint8_t mode);
     bool    getMnSkipMasterStart();
     void    setMnSkipMasterStart(bool skip);
+    uint8_t getMnClientRaceAudio();
+    void    setMnClientRaceAudio(uint8_t enabled);
     uint8_t getDevMode();
     void    setDevMode(uint8_t mode);
     bool    getOtaIncludePrereleases();

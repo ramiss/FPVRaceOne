@@ -24,7 +24,13 @@ class Webserver : public TransportInterface {
     // Exposes the SSE channel so other modules (e.g. OtaManager) can publish
     // progress events to connected browsers.  Returns nullptr until init().
     AsyncEventSource* getEvents();
-    
+
+    // Build the multi-node "director state" payload (nodes + race state), push
+    // it via local SSE as "multiNodeState" (master's own browser) AND queue it
+    // for HTTP broadcast to all online clients so their read-only Race View tab
+    // can mirror the master's view. Master-mode only; no-op otherwise.
+    void pushMultiNodeState();
+
     // TransportInterface implementation
     void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) override;
     void sendRssiEvent(uint8_t rssi) override;

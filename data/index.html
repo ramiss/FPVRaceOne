@@ -72,6 +72,7 @@
       </div>
       <ul class="nav-links">
         <li><a href="#" id="nav-link-race" class="tablinks active" onclick="openTab(event, 'race')">Race</a></li>
+        <li id="nav-li-raceview" style="display:none;"><a href="#" id="nav-link-raceview" class="tablinks" onclick="openTab(event, 'raceview')">Race View</a></li>
         <li><a href="#" id="nav-link-history" class="tablinks" onclick="openTab(event, 'history')">Race History</a></li>
         <li><a href="#" id="nav-link-calib" class="tablinks" onclick="openTab(event, 'calib')">Calibration</a></li>
         <li><a href="#" id="nav-link-config" class="tablinks" onclick="openSettingsModal()">Configuration</a></li>
@@ -168,7 +169,7 @@
           <div id="mn-race-data-buttons" style="display:none; margin-bottom:12px; text-align:center;">
             <button onclick="downloadMnRaceData()" style="padding:8px 16px;">Download Race</button>
           </div>
-          <div id="mn-race-timer" class="mn-race-timer-display">0:00.0</div>
+          <div id="mn-race-timer" class="mn-race-timer-display">00:00:00s</div>
           <div class="racebuttons mn-race-buttons">
             <button id="mnStartRaceBtnMain" onclick="mnStartRace()">Start All</button>
             <button id="mnStopRaceBtnMain"  onclick="mnStopRace()" disabled>Stop All</button>
@@ -179,13 +180,30 @@
 
       </div>
 
+      <!-- ── Client read-only Race View tab (mirrors master's race display) ── -->
+      <div id="raceview" class="tabcontent" style="display: none;">
+        <div id="rv-status-banner" style="text-align:center; font-size:13px; font-weight:600; color:#fff; background:#1565c0; padding:6px 14px; border-radius:6px; letter-spacing:0.02em; margin:6px 0;">
+          Waiting for race director to start race...
+        </div>
+        <div id="rv-race-data-buttons" style="display:none; margin-bottom:12px; text-align:center;">
+          <button onclick="downloadClientRaceData()" style="padding:8px 16px;">Download Race</button>
+        </div>
+        <div id="rv-race-timer" class="mn-race-timer-display">00:00.00</div>
+        <div id="rv-race-container" style="margin: 16px 0;"></div>
+        <div style="margin-top: 24px; padding-top: 16px; text-align:center; border-top: 1px solid var(--border-color, rgba(128,128,128,0.25));">
+          <button onclick="document.getElementById('rvImportFile').click()" style="padding:10px 24px; font-size:15px;">Import Multi Race File</button>
+          <input type="file" id="rvImportFile" accept=".json" style="display:none;" onclick="this.value='';" onchange="importClientRace(this);">
+          <div style="font-size:12px; color:var(--secondary-color); margin-top:8px;">Load a saved MultiRace file to review.</div>
+        </div>
+      </div>
+
       <div id="history" class="tabcontent" style="display: none;">
 
         <!-- Master mode: import-only view -->
         <div id="mn-history-import-section" style="display:none; padding: 24px 0; text-align:center;">
           <h2>Import Race</h2>
           <p style="color:var(--secondary-color); margin-bottom:20px;">Import a previously downloaded MultiRace file to review race data.</p>
-          <button onclick="document.getElementById('mnImportFileHistory').click()" style="padding:10px 24px; font-size:15px;">Import Race File</button>
+          <button onclick="document.getElementById('mnImportFileHistory').click()" style="padding:10px 24px; font-size:15px;">Import Multi Race File</button>
           <input type="file" id="mnImportFileHistory" accept=".json" style="display:none;" onclick="this.value='';" onchange="importMnRace(this);">
         </div>
 
@@ -936,6 +954,10 @@
                   <label for="mnSkipMasterStartToggle">Ignore Race Director Start/Stop if already racing: </label>
                   <input type="checkbox" id="mnSkipMasterStartToggle" onchange="mnClientSkipEnabled = this.checked; autoSaveConfig();" />
                 </div>
+              <div class="config-item" id="mnClientRaceAudioRow" style="display:none;">
+                  <label for="mnClientRaceAudioToggle">Play race start audio on this client (countdown + beep): </label>
+                  <input type="checkbox" id="mnClientRaceAudioToggle" onchange="mnClientRaceAudio = this.checked; autoSaveConfig();" />
+                </div>
               <div style="margin-top: 20px;">
                 <button id="applyMultiNodeBtn" onclick="applyMultiNodeSettings()" disabled style="background-color: var(--primary-color); color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: not-allowed; font-size: 14px; opacity: 0.5;">Apply Multi-Node &amp; Reboot</button>
               </div>
@@ -1169,16 +1191,17 @@
               <div class="config-item">
                 <label for="themeSelect">Theme:</label>
                 <select id="themeSelect" onchange="changeTheme()">
-                  <option value="lighter">Material Lighter</option>
                   <option value="oceanic" selected>Material Oceanic</option>
-                  <option value="darker">Material Darker</option>
-                  <option value="palenight">Material Palenight</option>
-                  <option value="deepocean">Material Deep Ocean</option>
-                  <option value="forest">Material Forest</option>
-                  <option value="skyblue">Material Sky Blue</option>
-                  <option value="sandybeach">Material Sandy Beach</option>
-                  <option value="volcano">Material Volcano</option>
-                  <option value="space">Material Space</option>
+                  <option value="lighter">Material Lighter</option>
+                  <!-- Other themes hidden but CSS rules retained for backward compatibility -->
+                  <option value="darker"     hidden>Material Darker</option>
+                  <option value="palenight"  hidden>Material Palenight</option>
+                  <option value="deepocean"  hidden>Material Deep Ocean</option>
+                  <option value="forest"     hidden>Material Forest</option>
+                  <option value="skyblue"    hidden>Material Sky Blue</option>
+                  <option value="sandybeach" hidden>Material Sandy Beach</option>
+                  <option value="volcano"    hidden>Material Volcano</option>
+                  <option value="space"      hidden>Material Space</option>
                   <option value="monokai">Monokai Pro</option>
                   <option value="dracula">Dracula</option>
                   <option value="github">GitHub</option>

@@ -71,6 +71,16 @@ public:
     void   clearAllLaps();                 // master: wipe all stored laps for all nodes
     void   setExcludeNodes(const std::vector<uint8_t>& ids);  // master: exclude specific nodes from next broadcast
 
+    // Queue a director-state payload to be broadcast to all online clients.
+    // Called from Webserver request threads; actual HTTP POSTs run in process()
+    // on Core 0 so the AsyncWebServer threads stay free.
+    void   queueDirectorStateBroadcast(const String& payload);
+
+    // Pre-arm phase tracking — exposed to clients via the director-state payload
+    // so the Race View banner can prompt "Arm your quad" during the countdown.
+    void   setPrearmPhase(bool active);
+    bool   getPrearmPhase() const;
+
     // ── Client-side state setters (called from webserver handlers) ──
     void   setTimerRunning(bool running);
     void   setMasterRaceActive(bool active);
@@ -119,6 +129,18 @@ private:
     volatile bool     _quitPending             = false;
     volatile bool     _clientStateChangedFlag  = false;  // set in process() when _masterConnected changes
 
+    // Director-state broadcast queue (master-side push to clients).
+    // Setting _directorStateBroadcastPending coalesces multiple bursts into one push.
+    volatile bool     _directorStateBroadcastPending = false;
+    String            _directorStatePayload;
+
+    // Pre-arm phase: master entered the countdown but the race hasn't actually started yet.
+    // Auto-clears after a timeout so a missed race/start (e.g. director cancelled) doesn't
+    // pin clients in the "Arm your quad" state forever.
+    bool              _prearmPhase           = false;
+    uint32_t          _prearmPhaseSetAtMs    = 0;
+    static constexpr uint32_t PREARM_PHASE_TIMEOUT_MS = 15000;
+
     void _sendRegistration();
     void _sendHeartbeat();
     void _processQueuedLap();
@@ -126,6 +148,7 @@ private:
     void _broadcastRacePreArm();
     void _broadcastRaceStart();
     void _broadcastRaceStop();
+    void _broadcastDirectorState();
     bool _postToMaster(const String& endpoint, const String& body);
     bool _postToMasterWithResponse(const String& endpoint, const String& body, String& response);
     void _checkNodeTimeouts(uint32_t currentTimeMs);

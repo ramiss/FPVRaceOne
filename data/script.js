@@ -17,6 +17,7 @@ let baselineConfig = {};             // last config loaded from device (for "sam
 let scannerPaused = false;
 const SCANNER_BUFFER_WHILE_PAUSED = false;
 let mnClientSkipEnabled   = false; // mirrors config.mnSkipMasterStart — set at page load and on toggle change
+let mnClientRaceAudio     = false; // mirrors config.mnClientRaceAudio — client mode race-start audio toggle
 let _raceCountdownAborted = false; // set by stopRace/mnStopRace to cancel in-progress countdown
 
 // --- Wizard loop control (prevents stale timers/fetches blocking restart) ---
@@ -561,6 +562,14 @@ function setupWiFiEvents() {
     } catch (_) {}
   }, false);
 
+  // Master pushed full director state (nodes + race) to this client node for the Race View tab
+  eventSource.addEventListener("directorState", function (e) {
+    try {
+      const data = JSON.parse(e.data);
+      rvHandleDirectorState(data);
+    } catch (_) {}
+  }, false);
+
   // Master pushed race start/stop to this client node
   eventSource.addEventListener("masterRaceState", function (e) {
     if (e.data === "prearming") {
@@ -616,6 +625,7 @@ function setupWiFiEvents() {
       mnMasterConnected = !!d.connected;
       mnMyNodeId        = d.nodeId || 0;
       mnUpdateRaceStatusBar();
+      rvUpdateBanner();
     } catch (_) {}
   }, false);
 }
@@ -1100,6 +1110,11 @@ onload = async function (e) {
       mnClientSkipEnabled = !!configData.mnSkipMasterStart;
       const mnSkipToggleEarly = document.getElementById('mnSkipMasterStartToggle');
       if (mnSkipToggleEarly) mnSkipToggleEarly.checked = mnClientSkipEnabled;
+    }
+    if (configData.mnClientRaceAudio !== undefined) {
+      mnClientRaceAudio = !!configData.mnClientRaceAudio;
+      const mnAudioToggleEarly = document.getElementById('mnClientRaceAudioToggle');
+      if (mnAudioToggleEarly) mnAudioToggleEarly.checked = mnClientRaceAudio;
     }
 
     // Populate antenna and TX power so buildConfigSnapshotFromUI() gets correct values
@@ -1783,8 +1798,9 @@ function openTab(evt, tabName) {
   document.getElementById(tabName).style.display = "block";
 
   // Switch between single-pilot and master race view
-  if (tabName === "race")    onRaceTabOpen();
-  if (tabName === "history") updateHistoryTabMode();
+  if (tabName === "race")     onRaceTabOpen();
+  if (tabName === "history")  updateHistoryTabMode();
+  if (tabName === "raceview") rvRender();
 
   // Hook pause button when entering Calibration tab; create chart on first open
   if (tabName === "calib") {
@@ -2086,6 +2102,7 @@ function buildConfigSnapshotFromUI() {
     })(),
     masterSSID: (document.getElementById('masterSSIDInput')?.value || ''),
     mnSkipMasterStart: document.getElementById('mnSkipMasterStartToggle')?.checked ? 1 : 0,
+    mnClientRaceAudio: document.getElementById('mnClientRaceAudioToggle')?.checked ? 1 : 0,
     devMode: document.getElementById('devModeToggle')?.checked ? 1 : 0,
 
     // OTA
@@ -3458,7 +3475,7 @@ async function startRace() {
 
 function stopRace() {
   if (mnMasterRaceActive) {
-    if (!confirm('The race director started this race. Stopping will record a DNF for you. Stop anyway?')) return;
+    if (!confirm('The race director started this race. Stopping will record a DNF for you. Quit race anyway?')) return;
   }
   _raceCountdownAborted = true;
   // Clear any queued audio to prevent race start sounds
@@ -4002,7 +4019,7 @@ function applyRaceHistoryModeUI() {
 
   setButtonLabel(
     importBtn,
-    raceHistoryPersistent ? 'Import Races' : 'Import Race (overrides current data)'
+    raceHistoryPersistent ? 'Import Races' : 'Import Single Race (overrides current data)'
   );
 
   if (clearBtn) {
@@ -6537,6 +6554,11 @@ function openSettingsModal() {
           mnSkipToggle.checked = !!config.mnSkipMasterStart;
           mnClientSkipEnabled = !!config.mnSkipMasterStart;
         }
+        const mnAudioToggle = document.getElementById('mnClientRaceAudioToggle');
+        if (mnAudioToggle && config.mnClientRaceAudio !== undefined) {
+          mnAudioToggle.checked = !!config.mnClientRaceAudio;
+          mnClientRaceAudio = !!config.mnClientRaceAudio;
+        }
 
         const devModeToggle = document.getElementById('devModeToggle');
         const devModeLabel  = document.getElementById('devModeLabel');
@@ -6602,18 +6624,21 @@ function onNodeModeChange() {
   const warningText   = document.getElementById('mn-ip-warning-text');
   const ssidInput     = document.getElementById('masterSSIDInput');
 
-  const skipRow = document.getElementById('mnSkipMasterStartRow');
+  const skipRow      = document.getElementById('mnSkipMasterStartRow');
+  const audioRow     = document.getElementById('mnClientRaceAudioRow');
 
   if (mode === 2) {
     // Switching TO client — restore any previously entered SSID
     if (clientFields) clientFields.style.display = '';
     if (ssidInput && _savedMasterSSID) ssidInput.value = _savedMasterSSID;
-    if (skipRow) skipRow.style.display = '';
+    if (skipRow)  skipRow.style.display  = '';
+    if (audioRow) audioRow.style.display = '';
   } else {
     // Switching AWAY from client — save the current SSID value before hiding
     if (ssidInput && ssidInput.value.trim()) _savedMasterSSID = ssidInput.value.trim();
     if (clientFields) clientFields.style.display = 'none';
-    if (skipRow) skipRow.style.display = 'none';
+    if (skipRow)  skipRow.style.display  = 'none';
+    if (audioRow) audioRow.style.display = 'none';
   }
 
   // Show IP-change warning when selected mode has a different IP than the live firmware mode
@@ -6859,12 +6884,14 @@ function formatMsSpeak(ms) {
 }
 
 // Format milliseconds as M:SS.cs (e.g. 1:23.45) for the race view.
+// Always 2-digit seconds and centiseconds so times don't jitter visually
+// (e.g. "5.05" → "05.05"); minutes are only shown when non-zero.
 function formatMsRace(ms) {
   if (!ms || ms <= 0) return '—';
   const m  = Math.floor(ms / 60000);
   const s  = Math.floor((ms % 60000) / 1000);
   const cs = Math.floor((ms % 1000) / 10);
-  const ss = s.toString().padStart(m > 0 ? 2 : 1, '0');
+  const ss = s.toString().padStart(2, '0');
   const cc = cs.toString().padStart(2, '0');
   return m > 0 ? `${m}:${ss}.${cc}` : `${ss}.${cc}`;
 }
@@ -6891,6 +6918,7 @@ function formatMsGap(ms) {
 
 // Update the status bar above the race clock based on current multi-node mode.
 function mnUpdateRaceStatusBar() {
+  rvShowTabIfClient();
   const bar  = document.getElementById('mn-race-status-bar');
   const text = document.getElementById('mn-race-status-text');
   if (!bar || !text) return;
@@ -7036,20 +7064,54 @@ function _mnMasterEntry() {
 
 // Render the master race tab: RotorHazard-style summary table + per-pilot lap columns.
 // Always shows 8 slots: 1 master + 7 client slots (populated or empty).
-function mnRenderRaceTab(nodes) {
-  mnCurrentNodes = nodes;
+//
+// opts.containerId — render into a different container (defaults to mn-race-container).
+// opts.readOnly    — when true, strips edit buttons and TAP handlers for the client Race View.
+// opts.skipMnState — when true, skip mnCurrentNodes assignment + mnUpdateRaceDataButtons (used by client view).
+function mnRenderRaceTab(nodes, opts) {
+  opts = opts || {};
+  const containerId = opts.containerId || 'mn-race-container';
+  const readOnly    = !!opts.readOnly;
+  // raceRunning is the master's race state.  On the master UI this is the local
+  // mnRaceRunning flag (set on Start All / Stop All).  On the client Race View
+  // we don't have a local race timer, so the caller passes the master's state
+  // from the director-state push — without this, isSoloRacing fires for every
+  // client racing under the director.
+  const raceRunning = (opts.raceRunning !== undefined) ? !!opts.raceRunning : mnRaceRunning;
 
-  const masterView = document.getElementById('master-race-view');
-  if (!masterView || masterView.style.display === 'none') return;
+  if (!opts.skipMnState) {
+    mnCurrentNodes = nodes;
+    const masterView = document.getElementById('master-race-view');
+    if (!masterView || masterView.style.display === 'none') return;
+    const b1 = document.getElementById('mnStartRaceBtnMain'); if (b1) b1.disabled = mnRaceRunning;
+    const b2 = document.getElementById('mnStopRaceBtnMain');  if (b2) b2.disabled = !mnRaceRunning;
+  }
 
-  const b1 = document.getElementById('mnStartRaceBtnMain'); if (b1) b1.disabled = mnRaceRunning;
-  const b2 = document.getElementById('mnStopRaceBtnMain');  if (b2) b2.disabled = !mnRaceRunning;
-
-  const container = document.getElementById('mn-race-container');
+  const container = document.getElementById(containerId);
   if (!container) return;
 
-  // Build full 8-slot list: master first, then 7 client slots (filled or empty)
-  const master = _mnMasterEntry();
+  // Build full 8-slot list: master first, then 7 client slots (filled or empty).
+  // In read-only client view, the master entry comes from the pushed nodes array
+  // (we don't have authoritative master pilot info locally) — _mnMasterEntry()
+  // would read THIS device's pname input instead, which is the client's pilot.
+  const master = readOnly
+    ? (() => {
+        const pushed = nodes.find(n => n.nodeId === 0 && n.isMaster);
+        if (!pushed) {
+          return { nodeId: 0, pilotName: 'Race Director', online: false, isMaster: true,
+                   lapCount: 0, laps: [], allLapsMs: 0, totalMs: 0, avgMs: 0, fastestMs: Infinity };
+        }
+        const laps      = Array.isArray(pushed.laps) ? pushed.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
+        const realLaps  = laps.filter(l => l.lapNumber > 0);
+        const lapCount  = realLaps.length;
+        const allLapsMs = laps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+        const totalMs   = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+        const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
+        const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
+        return { ...pushed, pilotName: pushed.pilotName || 'Race Director',
+                 laps, lapCount, allLapsMs, totalMs, avgMs, fastestMs };
+      })()
+    : _mnMasterEntry();
   const clients = Array.from({ length: 7 }, (_, i) => {
     const nodeId = i + 1;
     const found  = nodes.find(n => n.nodeId === nodeId);
@@ -7076,7 +7138,7 @@ function mnRenderRaceTab(nodes) {
   // excludedFromCurrentRace flag arrives via SSE.
   const _pendingExcludes = new Set(window._mnExcludeNodes || []);
   const ranked = [...activeSlots].filter(n =>
-    !n.skipEnabled && !n.excludedFromCurrentRace && !_pendingExcludes.has(n.nodeId) && !(n.running && !n.isMaster && !mnRaceRunning)
+    !n.skipEnabled && !n.excludedFromCurrentRace && !_pendingExcludes.has(n.nodeId) && !(n.running && !n.isMaster && !raceRunning)
   ).sort((a, b) => {
     if (b.lapCount !== a.lapCount) return b.lapCount - a.lapCount;
     if (a.lapCount === 0) return 0;
@@ -7095,6 +7157,8 @@ function mnRenderRaceTab(nodes) {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
     const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
     const hostTag  = n.isMaster ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Host</span>' : '';
+    const meTag    = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
+      ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Me</span>' : '';
     let badge = '';
     if (n.quitEarly) badge = ' <span class="mn-status-dnf">DNF</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
@@ -7102,7 +7166,7 @@ function mnRenderRaceTab(nodes) {
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
       <td class="mn-lb-pilot">
-        ${hostTag}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
+        ${hostTag}${meTag}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
       </td>
       <td class="mn-lb-mono">${n.lapCount}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(n.totalMs)            : '—'}</td>
@@ -7128,16 +7192,18 @@ function mnRenderRaceTab(nodes) {
 
     const _isExcludedThisRace = n.excludedFromCurrentRace || _pendingExcludes.has(n.nodeId);
     const isSoloRacing = n.running && !n.isMaster &&
-      (!mnRaceRunning || _isExcludedThisRace);
-    const canTap  = mnDevMode && mnRaceRunning && !n.independent && !isSoloRacing;
+      (!raceRunning || _isExcludedThisRace);
+    const canTap  = !readOnly && mnDevMode && raceRunning && !n.independent && !isSoloRacing;
     const devAttr = canTap ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.laps.length},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
-    // Show Racing badge as soon as mnRaceRunning flips (pre-arm) for non-excluded nodes, matching the master card.
+    // Show Racing badge as soon as raceRunning flips (pre-arm) for non-excluded nodes, matching the master card.
     const isRacing = n.isMaster
-      ? mnRaceRunning
-      : (n.running || (mnRaceRunning && !_isExcludedThisRace && !n.skipEnabled));
+      ? raceRunning
+      : (n.running || (raceRunning && !_isExcludedThisRace && !n.skipEnabled));
     const racingBadgeColor = isSoloRacing ? 'rgba(255,140,0,0.75)' : 'rgba(0,160,0,0.5)';
-    const cardEditBtn = n.isMaster ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    const cardEditBtn = (n.isMaster || readOnly) ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
+    const meBadge = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
+      ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Me</span>' : '';
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {
@@ -7145,7 +7211,7 @@ function mnRenderRaceTab(nodes) {
     }
 
     // Solo race in progress: always show for skip-enabled pilots; only show for others when no master race is active
-    if (n.running && !n.isMaster && (n.skipEnabled || _isExcludedThisRace || !mnRaceRunning)) {
+    if (n.running && !n.isMaster && (n.skipEnabled || _isExcludedThisRace || !raceRunning)) {
       const soloLabel = n.skipEnabled
         ? 'Solo race in progress<br>(ignoring race director)'
         : _isExcludedThisRace
@@ -7175,7 +7241,7 @@ function mnRenderRaceTab(nodes) {
   html += '</div>';
 
   container.innerHTML = html;
-  mnUpdateRaceDataButtons();
+  if (!readOnly) mnUpdateRaceDataButtons();
 }
 
 // ── Node pilot edit modal ─────────────────────────────────────────────────
@@ -7406,6 +7472,253 @@ function _mnStopTimer() {
   mnRaceTimerIntervalId = null;
 }
 
+// ===============================================================
+// Race View (client-mode read-only mirror of the director's view)
+// ===============================================================
+// State pushed by the master via /api/multinode/directorState arrives on this
+// node's SSE channel as a "directorState" event. We cache the payload, render
+// it into the Race View tab, and extrapolate the race timer locally between
+// pushes so it ticks smoothly.
+
+let rvLastNodes        = [];
+let rvRaceRunning      = false;
+let rvPrearmActive     = false;
+let rvElapsedAtPushMs  = 0;
+let rvLocalReceiveMs   = 0;
+let rvTimerInterval    = null;
+let rvImportedNodes    = null;  // non-null while viewing an imported file; blocks live pushes from overwriting
+
+function rvShowTabIfClient() {
+  const li  = document.getElementById('nav-li-raceview');
+  const tab = document.getElementById('raceview');
+  const show = (mnNodeMode === 2);
+  if (li)  li.style.display  = show ? '' : 'none';
+  if (!show && tab && tab.style.display !== 'none') {
+    // If we're somehow on the Race View tab in a non-client mode, switch away.
+    tab.style.display = 'none';
+    const raceTab = document.getElementById('race');
+    if (raceTab) raceTab.style.display = 'block';
+  }
+  // In client mode the "Race" tab is the pilot's own solo race; the "Race View"
+  // tab mirrors the multi-node race director's view.  Rename both to make that
+  // distinction obvious from the nav bar.
+  const raceLink     = document.getElementById('nav-link-race');
+  const raceviewLink = document.getElementById('nav-link-raceview');
+  if (raceLink)     raceLink.textContent     = show ? 'Single Race' : 'Race';
+  if (raceviewLink) raceviewLink.textContent = show ? 'Multi Race'  : 'Race View';
+}
+
+function rvFormatTimer(ms) {
+  if (!isFinite(ms) || ms < 0) ms = 0;
+  const m  = Math.floor(ms / 60000);
+  const s  = Math.floor((ms % 60000) / 1000);
+  const cs = Math.floor((ms % 1000) / 10);
+  // Always 2-digit minutes / seconds / centiseconds for a non-jittery clock.
+  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+}
+
+function rvUpdateTimerDisplay() {
+  const el = document.getElementById('rv-race-timer');
+  if (!el) return;
+  const baseMs = rvElapsedAtPushMs;
+  const extrapolateMs = rvRaceRunning ? Math.max(0, Date.now() - rvLocalReceiveMs) : 0;
+  el.textContent = rvFormatTimer(baseMs + extrapolateMs);
+}
+
+function rvStartTicker() {
+  if (rvTimerInterval) return;
+  rvTimerInterval = setInterval(rvUpdateTimerDisplay, 100);
+}
+
+function rvStopTicker() {
+  if (rvTimerInterval) { clearInterval(rvTimerInterval); rvTimerInterval = null; }
+  rvUpdateTimerDisplay();
+}
+
+function rvUpdateBanner() {
+  const banner = document.getElementById('rv-status-banner');
+  if (!banner) return;
+  if (!mnMasterConnected) {
+    banner.textContent = 'Disconnected from race director';
+    banner.style.background = '#c0392b';
+    return;
+  }
+  if (rvPrearmActive) {
+    banner.textContent = 'Arm your quad';
+    banner.style.background = '#e67e22';   // orange — "act now"
+  } else if (rvRaceRunning) {
+    banner.textContent = 'Race in progress';
+    banner.style.background = '#2e7d32';
+  } else {
+    banner.textContent = 'Waiting for race director to start race...';
+    banner.style.background = '#1565c0';
+  }
+}
+
+function rvRender() {
+  mnRenderRaceTab(rvLastNodes, {
+    containerId: 'rv-race-container',
+    readOnly:    true,
+    skipMnState: true,
+    // Pass master's race state — fixes Solo-race-in-progress bug.  Include prearm
+    // so the Racing badge appears during the countdown, matching what the
+    // master's own UI shows (where mnRaceRunning is set before _raceCountdown).
+    raceRunning: rvRaceRunning || rvPrearmActive,
+  });
+  rvUpdateBanner();
+  rvUpdateTimerDisplay();
+  rvUpdateDownloadButton();
+}
+
+function rvHandleDirectorState(payload) {
+  // payload = { nodes: [...], race: { running, elapsedMs, prearmActive } }
+  try {
+    const race        = payload.race || {};
+    const prevPrearm  = rvPrearmActive;
+    const prevRunning = rvRaceRunning;
+    rvRaceRunning     = !!race.running;
+    rvPrearmActive    = !!race.prearmActive;
+    rvElapsedAtPushMs = Number.isFinite(race.elapsedMs) ? race.elapsedMs : 0;
+    rvLocalReceiveMs  = Date.now();
+
+    // If master is starting a new race, drop the imported-view freeze so live
+    // data takes over again.
+    if ((rvPrearmActive && !prevPrearm) || (rvRaceRunning && !prevRunning)) {
+      rvImportedNodes = null;
+    }
+
+    // While viewing an imported file, ignore the live node list — but still
+    // accept race/connection state so the banner and ticker stay accurate.
+    if (!rvImportedNodes) {
+      rvLastNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+    }
+
+    if (rvRaceRunning) rvStartTicker(); else rvStopTicker();
+    // Edge-trigger: prearm just turned on.
+    if (rvPrearmActive && !prevPrearm) {
+      // If audio toggle enabled, run the shared countdown locally so this
+      // pilot hears "Arm your quad" + 5..1 + beep alongside the director.
+      if (mnClientRaceAudio) {
+        _raceCountdownAborted = false;
+        _raceCountdown('Arm your quad').catch(() => {});
+      }
+      // Auto-switch to Multi Race tab if the pilot is sitting on Single Race
+      // and isn't currently running a solo race.  startRaceButton.disabled is
+      // the existing "race is running" signal (set by startRace, cleared by
+      // stopRace) — when it's enabled, the pilot is idle and benefits from
+      // seeing the director's countdown view instead of their own idle one.
+      const singleRaceTab = document.getElementById('race');
+      const startBtn      = document.getElementById('startRaceButton');
+      const onSingleTab   = singleRaceTab && singleRaceTab.style.display !== 'none';
+      const inSoloRace    = startBtn && startBtn.disabled;
+      if (onSingleTab && !inSoloRace) {
+        const raceviewLink = document.getElementById('nav-link-raceview');
+        if (raceviewLink) raceviewLink.click();
+      }
+    }
+    rvRender();
+  } catch (e) {
+    console.warn('[RaceView] failed to apply directorState', e);
+  }
+}
+
+// ── Client Multi Race download / import ─────────────────────────────────────
+// Same wire format as the master's download (type:'MultiRace', nodes:[...]):
+// a file written here imports cleanly on a master or another client, and a
+// file written by the master imports cleanly here.
+
+function rvUpdateDownloadButton() {
+  const div = document.getElementById('rv-race-data-buttons');
+  if (!div) return;
+  const hasData = (rvLastNodes || []).some(n => (n.laps || []).length > 0);
+  const stopped = !rvRaceRunning && !rvPrearmActive;
+  div.style.display = (stopped && hasData) ? 'block' : 'none';
+}
+
+function downloadClientRaceData() {
+  const allNodes = [];
+  (rvLastNodes || []).forEach(n => {
+    if (!(n.laps || []).length) return;
+    allNodes.push({
+      nodeId:     n.nodeId,
+      isMaster:   !!n.isMaster,
+      pilotName:  n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId),
+      pilotColor: n.pilotColor || 0x0080FF,
+      quitEarly:  !!n.quitEarly,
+      laps:       (n.laps || []).map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
+    });
+  });
+
+  if (allNodes.length === 0) { alert('No race data to download.'); return; }
+
+  const ts   = Math.floor(Date.now() / 1000);
+  const blob = new Blob(
+    [JSON.stringify({ type: 'MultiRace', timestamp: ts, nodes: allNodes }, null, 2)],
+    { type: 'application/json' }
+  );
+  const url = URL.createObjectURL(blob);
+  const a   = document.createElement('a');
+  a.href = url;
+  a.download = `MultiRace-${ts}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function importClientRace(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  input.value = '';
+
+  let json;
+  try { json = JSON.parse(await file.text()); }
+  catch (_e) { alert('Invalid JSON file — could not parse.'); return; }
+
+  // Detect a single-pilot file accidentally pointed here
+  if (Array.isArray(json?.races) || (Array.isArray(json) && json[0]?.lapTimes !== undefined)) {
+    alert('This is a single-pilot race file. Import it from the Race History tab instead.');
+    return;
+  }
+  if (json?.type !== 'MultiRace' || !Array.isArray(json?.nodes)) {
+    alert('File format not recognised. Expected a MultiRace file.');
+    return;
+  }
+
+  // Compute stats per node so the leaderboard renders correctly (same shape
+  // mnRenderRaceTab expects from the live push).
+  rvLastNodes = json.nodes.map(n => {
+    const laps      = n.laps || [];
+    const realLaps  = laps.filter(l => l.lapNumber > 0);
+    const lapCount  = realLaps.length;
+    const totalMs   = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+    const avgMs     = lapCount > 0 ? Math.round(totalMs / lapCount) : 0;
+    const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
+    return {
+      ...n,
+      online:                  true,
+      running:                 false,
+      independent:             false,
+      skipEnabled:             n.skipEnabled || false,
+      excludedFromCurrentRace: false,
+      lapCount, totalMs, avgMs, fastestMs,
+    };
+  });
+
+  // Freeze: live director-state pushes won't replace this view until the
+  // master starts a new race (handled in rvHandleDirectorState).
+  rvImportedNodes   = rvLastNodes;
+  rvRaceRunning     = false;
+  rvPrearmActive    = false;
+  rvElapsedAtPushMs = 0;
+  rvStopTicker();
+  const timerEl = document.getElementById('rv-race-timer');
+  if (timerEl) timerEl.textContent = rvFormatTimer(0);
+
+  rvRender();
+  alert(`Race imported: ${json.nodes.length} pilot${json.nodes.length !== 1 ? 's' : ''}.`);
+}
+
 // Shows a modal with three labelled buttons. Returns 0, 1, or 2.
 function _showThreeOptionModal(message, btn1Text, btn2Text, btn3Text) {
   return new Promise(resolve => {
@@ -7437,7 +7750,7 @@ async function mnStartRace() {
       await fetch('/api/multinode/clearLaps', { method: 'POST' }).catch(() => {});
       clearLaps();
       const timerEl = document.getElementById('mn-race-timer');
-      if (timerEl) timerEl.textContent = '0:00.0';
+      if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
     }
   }
 
@@ -7542,7 +7855,7 @@ async function mnClearRace() {
     window._mnExcludeNodes = [];  // clear pending excludes so previously-ignored pilots reappear
     _mnStopTimer();
     const timerEl = document.getElementById('mn-race-timer');
-    if (timerEl) timerEl.textContent = '0:00.0';
+    if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
     ['mnStartRaceBtn', 'mnStartRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });
     ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true;  });
     clearLaps();           // clear master's own local laps
@@ -7658,7 +7971,7 @@ async function importMnRace(input) {
   mnImportedNodes = mnCurrentNodes;  // freeze race tab against live polling
   _mnStopTimer();
   const timerEl = document.getElementById('mn-race-timer');
-  if (timerEl) timerEl.textContent = '0:00.0';
+  if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
 
   mnRenderRaceTab(mnCurrentNodes);
   mnUpdateRaceDataButtons();

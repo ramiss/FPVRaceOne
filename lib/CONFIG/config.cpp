@@ -152,6 +152,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
+    config["mnClientRaceAudio"] = conf.mnClientRaceAudio;
     config["devMode"] = conf.devMode;
     config["otaIncludePrereleases"] = conf.otaIncludePrereleases;
 
@@ -201,6 +202,7 @@ void Config::toJsonString(char* buf) {
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
+    config["mnClientRaceAudio"] = conf.mnClientRaceAudio;
     config["devMode"] = conf.devMode;
     config["otaIncludePrereleases"] = conf.otaIncludePrereleases;
 
@@ -410,6 +412,7 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("masterSSID"))         setStr("masterSSID",     conf.masterSSID,     sizeof(conf.masterSSID));
     if (source.containsKey("masterPassword"))     setStr("masterPassword", conf.masterPassword, sizeof(conf.masterPassword));
     if (source.containsKey("mnSkipMasterStart"))  setU8("mnSkipMasterStart", conf.mnSkipMasterStart, 0, 1);
+    if (source.containsKey("mnClientRaceAudio"))  setU8("mnClientRaceAudio", conf.mnClientRaceAudio, 0, 1);
     if (source.containsKey("devMode"))            setU8("devMode", conf.devMode, 0, 1);
 
     // ===== OTA =====
@@ -777,6 +780,18 @@ void Config::setMnSkipMasterStart(bool skip) {
     }
 }
 
+uint8_t Config::getMnClientRaceAudio() {
+    return conf.mnClientRaceAudio;
+}
+
+void Config::setMnClientRaceAudio(uint8_t enabled) {
+    uint8_t val = enabled ? 1 : 0;
+    if (conf.mnClientRaceAudio != val) {
+        conf.mnClientRaceAudio = val;
+        modified = true;
+    }
+}
+
 uint8_t Config::getDevMode() {
     return conf.devMode;
 }
@@ -1024,6 +1039,7 @@ void Config::setDefaults(void) {
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));
     conf.mnSkipMasterStart = 0;
+    conf.mnClientRaceAudio = 0;   // client mode: race-start audio off by default
     conf.devMode = 0;
     conf.otaIncludePrereleases = 0;  // Stable releases only by default
     modified = true;

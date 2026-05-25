@@ -148,8 +148,13 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     DEBUG("WiFi AP SSID configured: %s\n", wifi_ap_ssid.c_str());
 
     WiFi.persistent(false);
-    WiFi.disconnect();
+    // Belt-and-suspenders: also wipe NVS creds + tear down any AP that may
+    // have survived a non-clean previous run (crash, brownout, older firmware
+    // version without the /reboot cleanup path).
+    WiFi.softAPdisconnect(true);
+    WiFi.disconnect(true, true);
     WiFi.mode(WIFI_OFF);
+    delay(50);
 
     // Determine initial WiFi mode based on node mode.
     //
@@ -219,6 +224,7 @@ void Webserver::sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi) {
     char buf[24];
     snprintf(buf, sizeof(buf), "%u,%u", lapTimeMs, peakRssi);
     events.send(buf, "lap");
+    pushMultiNodeState();  // master mode: mirror lap to client Race View tabs
 }
 
 void Webserver::sendRssiEvent(uint8_t rssi) {
@@ -231,6 +237,89 @@ void Webserver::sendRssiEvent(uint8_t rssi) {
 void Webserver::sendRaceStateEvent(const char* state) {
     if (!servicesStarted) return;
     events.send(state, "raceState");
+    pushMultiNodeState();  // master mode: keep client Race View timers in sync on start/stop
+}
+
+// Escape a string for JSON — only handles the common cases (quotes, backslash, control).
+static String _jsonEscape(const String& s) {
+    String out;
+    out.reserve(s.length() + 4);
+    for (size_t i = 0; i < s.length(); i++) {
+        char c = s[i];
+        if      (c == '"')  out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else if ((uint8_t)c < 0x20) { /* drop other control chars */ }
+        else                out += c;
+    }
+    return out;
+}
+
+// Build the {"nodes":[master,...clients],"race":{...}} payload used by both the
+// local /api/multinode/nodes endpoint and the broadcast-to-clients push.
+static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *timer, Config *conf) {
+    // Master entry (nodeId=0) built by hand to avoid an extra JSON allocation.
+    bool    masterRunning = timer && timer->isRunning();
+    uint8_t masterCnt     = timer ? timer->getLapCount() : 0;
+
+    String pilotName = conf && conf->getPilotName() ? String(conf->getPilotName()) : String();
+    uint32_t pilotColor = conf ? conf->getPilotColor() : 0x0080FFu;
+
+    String  masterStr     = "{\"nodeId\":0,\"isMaster\":true,\"online\":true";
+    masterStr += ",\"pilotName\":\""; masterStr += _jsonEscape(pilotName); masterStr += "\"";
+    masterStr += ",\"pilotColor\":";  masterStr += pilotColor;
+    masterStr += ",\"running\":";  masterStr += masterRunning ? "true" : "false";
+    masterStr += ",\"lapCount\":"; masterStr += masterCnt;
+    masterStr += ",\"laps\":[";
+    for (uint8_t i = 0; i < masterCnt; i++) {
+        if (i > 0) masterStr += ',';
+        masterStr += "{\"lapNumber\":";
+        masterStr += (int)i;
+        masterStr += ",\"lapTimeMs\":";
+        masterStr += (int)timer->getLapTimeAt(i);
+        masterStr += '}';
+    }
+    masterStr += "]}";
+
+    String clientsJson = multiNode ? multiNode->getNodesToJson() : String("{\"nodes\":[]}");
+    String nodesArray;
+    // clientsJson is either {"nodes":[]} or {"nodes":[{...},...]}
+    String clientsTail = clientsJson.substring(10);  // "]}" when empty
+    nodesArray.reserve(masterStr.length() + clientsTail.length() + 16);
+    if (clientsTail == "]}") {
+        nodesArray = "[" + masterStr + "]";
+    } else {
+        // Strip trailing "]}" from clientsTail and prepend master entry.
+        nodesArray  = "[" + masterStr + "," + clientsTail.substring(0, clientsTail.length() - 2) + "]";
+    }
+
+    // Race state: include elapsed so clients can extrapolate a ticking timer
+    // between pushes without polling. prearmActive flags the countdown window
+    // so client Race View tabs can show "Arm your quad".
+    uint32_t elapsedMs    = timer ? timer->getElapsedMs() : 0;
+    bool     prearmActive = multiNode && multiNode->getPrearmPhase();
+
+    String out;
+    out.reserve(nodesArray.length() + 80);
+    out  = "{\"nodes\":";
+    out += nodesArray;
+    out += ",\"race\":{\"running\":";
+    out += masterRunning ? "true" : "false";
+    out += ",\"elapsedMs\":";
+    out += (uint32_t)elapsedMs;
+    out += ",\"prearmActive\":";
+    out += prearmActive ? "true" : "false";
+    out += "}}";
+    return out;
+}
+
+void Webserver::pushMultiNodeState() {
+    if (!multiNode || !multiNode->isMasterMode()) return;
+    String payload = _buildDirectorStatePayload(multiNode, timer, conf);
+    if (servicesStarted) events.send(payload.c_str(), "multiNodeState");
+    multiNode->queueDirectorStateBroadcast(payload);
 }
 
 bool Webserver::isConnected() {
@@ -840,6 +929,7 @@ EEPROM:\n\
 
     server.on("/timer/clearLaps", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (timer) timer->clearLapData();
+        pushMultiNodeState();
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
@@ -848,6 +938,29 @@ EEPROM:\n\
         if (multiNode && multiNode->isClientMode()) multiNode->pauseReconnect(60000);
         request->send(200, "application/json", "{\"status\":\"OK\"}");
     });
+
+    // /api/multinode/directorState — master pushes the full {nodes, race} state here so the
+    // client's Race View tab can mirror the director's view without polling the master.
+    // Body is opaque JSON; just forward it to the local SSE channel as "directorState".
+    server.on("/api/multinode/directorState", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            // Final handler — body is processed by the body callback below.
+            request->send(200, "application/json", "{\"status\":\"OK\"}");
+        },
+        nullptr,
+        [this](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+            // Reassemble across chunks if the payload exceeds a single TCP segment.
+            static String buf;
+            if (index == 0) {
+                buf = String();
+                buf.reserve(total + 1);
+            }
+            buf.concat((const char*)data, len);
+            if (index + len == total && servicesStarted) {
+                events.send(buf.c_str(), "directorState");
+                buf = String();
+            }
+        });
 
     // /timer/masterPreArm — called by master before countdown; clients flash Start button
     server.on("/timer/masterPreArm", HTTP_POST, [this](AsyncWebServerRequest *request) {
@@ -944,6 +1057,7 @@ EEPROM:\n\
         if (jsonObj.containsKey("lapTime")) {
             uint32_t lapTimeMs = jsonObj["lapTime"].as<uint32_t>();
             if (timer) timer->recordManualLap(lapTimeMs);
+            pushMultiNodeState();
         }
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
@@ -1353,11 +1467,28 @@ EEPROM:\n\
     });
 #endif
 
-    // Reboot endpoint
+    // Reboot endpoint.
+    //
+    // Why the explicit WiFi teardown:  ESP.restart() does NOT reset the WiFi
+    // peripheral — beacon templates, vendor IEs, association tables, and TX
+    // power state survive the soft reboot.  When the next boot brings up a
+    // different mode (single→master changes the AP IP from 192.168.4.1 to
+    // 192.168.5.1; single→client switches AP→AP+STA), the orphaned state
+    // collides with the new bring-up and the radio refuses to beacon or
+    // accept associations.  A full power cycle clears the peripheral, which
+    // is why that's the only thing that works without this fix.
+    //
+    // softAPdisconnect/disconnect/mode(OFF) walks the driver through a clean
+    // stop+deinit sequence so the next boot starts from a known state.
     server.on("/reboot", HTTP_POST, [this](AsyncWebServerRequest *request) {
         request->send(200, "application/json", "{\"status\": \"OK\", \"message\": \"Rebooting...\"}");
         led->on(200);
-        // Restart immediately without delay to avoid blocking async_tcp task
+        // Let async_tcp actually flush the 200 to the browser before we yank WiFi.
+        delay(100);
+        WiFi.softAPdisconnect(true);
+        WiFi.disconnect(true, true);   // disconnect STA + erase any stale NVS creds
+        WiFi.mode(WIFI_OFF);           // calls esp_wifi_stop + esp_wifi_deinit under the hood
+        delay(50);
         ESP.restart();
     });
 
@@ -1901,45 +2032,14 @@ EEPROM:\n\
     });
 
     // /api/multinode/nodes — master returns all registered client nodes PLUS the
-    // master's own lap data as nodeId=0.  Including master laps here means the
-    // 2-second polling loop keeps them fresh without a separate /api/laps/current
-    // fetch, so they survive page refresh reliably (same mechanism as client laps).
+    // master's own lap data as nodeId=0, alongside the race state ({running, elapsedMs}).
+    // Same payload that gets pushed to client Race View tabs via SSE.
     server.on("/api/multinode/nodes", HTTP_GET, [this](AsyncWebServerRequest *request) {
         if (!multiNode) {
-            request->send(200, "application/json", "{\"nodes\":[]}");
+            request->send(200, "application/json", "{\"nodes\":[],\"race\":{\"running\":false,\"elapsedMs\":0}}");
             return;
         }
-        // Build master entry by hand — avoids a JSON-document allocation.
-        bool  masterRunning = timer && timer->isRunning();
-        uint8_t masterCnt  = timer ? timer->getLapCount() : 0;
-        String masterStr   = "{\"nodeId\":0,\"isMaster\":true,\"online\":true";
-        masterStr += ",\"running\":";   masterStr += masterRunning ? "true" : "false";
-        masterStr += ",\"lapCount\":";  masterStr += masterCnt;
-        masterStr += ",\"laps\":[";
-        for (uint8_t i = 0; i < masterCnt; i++) {
-            if (i > 0) masterStr += ',';
-            masterStr += "{\"lapNumber\":";
-            masterStr += (int)(i);
-            masterStr += ",\"lapTimeMs\":";
-            masterStr += (int)timer->getLapTimeAt(i);
-            masterStr += '}';
-        }
-        masterStr += "]}";
-
-        // Splice into clients JSON: {"nodes":[...]} -> {"nodes":[{master},...clients...]}
-        String clientsJson = multiNode->getNodesToJson();  // {"nodes":[...]}
-        String out;
-        out.reserve(masterStr.length() + clientsJson.length() + 4);
-        // clientsJson is either {"nodes":[]} (12 chars, no clients) or {"nodes":[{...},...]}
-        // substring(10) strips the leading '{"nodes":[', leaving "]}" or "{node},...]}"
-        String clientsTail = clientsJson.substring(10);  // "]}" when empty
-        if (clientsTail == "]}") {
-            out = "{\"nodes\":[" + masterStr + "]}";
-        } else {
-            // clientsTail starts with the first client object: "{nodeId...},...]}"
-            out = "{\"nodes\":[" + masterStr + "," + clientsTail;
-        }
-        request->send(200, "application/json", out);
+        request->send(200, "application/json", _buildDirectorStatePayload(multiNode, timer, conf));
     });
 
     // /api/multinode/clearLaps — master clears all stored laps for all nodes
@@ -1950,11 +2050,7 @@ EEPROM:\n\
         }
         multiNode->clearAllLaps();
         if (timer) timer->clearLapData();  // also clear master host laps
-        // Push updated (empty) node state to all SSE clients
-        String nodesJson = multiNode->getNodesToJson();
-        char buf[64];
-        snprintf(buf, sizeof(buf), "%s", nodesJson.c_str());
-        events.send(buf, "multiNodeState", millis());
+        pushMultiNodeState();
         request->send(200, "application/json", "{\"ok\":true}");
     });
 
@@ -1991,6 +2087,7 @@ EEPROM:\n\
                                                  pilotColor, bandIndex, channelIndex, freq,
                                                  staIP, clientIP,
                                                  macAddress, assignedId);
+            if (ok) pushMultiNodeState();  // give the new client an immediate Race View snapshot
 
             DynamicJsonDocument resp(64);
             if (ok) {
@@ -2027,6 +2124,7 @@ EEPROM:\n\
                 snprintf(buf, sizeof(buf), "{\"node\":%u,\"lap\":%u,\"ms\":%u}",
                          nodeId, lapNumber, lapTimeMs);
                 events.send(buf, "multiNodeLap");
+                pushMultiNodeState();  // also mirror to client Race View tabs
             }
             request->send(ok ? 200 : 404, "application/json",
                           ok ? "{\"status\":\"OK\"}" : "{\"status\":\"ERROR\"}");
@@ -2049,9 +2147,7 @@ EEPROM:\n\
             bool stateChanged = false;
             bool ok = multiNode->handleHeartbeat(nodeId, running, independent, skipEnabled, stateChanged);
             if (ok && stateChanged) {
-                // Push updated node list to master browser
-                String nodesJson = multiNode->getNodesToJson();
-                events.send(nodesJson.c_str(), "multiNodeState");
+                pushMultiNodeState();
             }
             request->send(ok ? 200 : 404, "application/json",
                           ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
@@ -2070,8 +2166,7 @@ EEPROM:\n\
             uint8_t nodeId = obj["nodeId"] | 0;
             bool ok = multiNode->handleQuit(nodeId);
             if (ok) {
-                String nodesJson = multiNode->getNodesToJson();
-                events.send(nodesJson.c_str(), "multiNodeState");
+                pushMultiNodeState();
             }
             request->send(ok ? 200 : 404, "application/json",
                           ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
@@ -2090,8 +2185,7 @@ EEPROM:\n\
             uint8_t nodeId = obj["nodeId"] | 0;
             bool ok = multiNode->removeNode(nodeId);
             if (ok) {
-                String nodesJson = multiNode->getNodesToJson();
-                events.send(nodesJson.c_str(), "multiNodeState");
+                pushMultiNodeState();
             }
             request->send(ok ? 200 : 404, "application/json",
                           ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
@@ -2123,7 +2217,7 @@ EEPROM:\n\
                 }
             }
             bool ok = multiNode->removeNode(nodeId);
-            if (ok) events.send(multiNode->getNodesToJson().c_str(), "multiNodeState");
+            if (ok) pushMultiNodeState();
             request->send(ok ? 200 : 404, "application/json",
                           ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
         });
@@ -2224,6 +2318,7 @@ EEPROM:\n\
             if (sent) {
                 multiNode->updateNodePilot(nodeId, pilotName, pilotColor);
                 if (hasBand) multiNode->updateNodeChannel(nodeId, bandIndex, chanIndex, freq);
+                pushMultiNodeState();
             }
             request->send(sent ? 200 : 502, "application/json",
                           sent ? "{\"status\":\"OK\"}" : "{\"status\":\"PROXY_FAILED\"}");
@@ -2298,7 +2393,9 @@ EEPROM:\n\
             }
             multiNode->setExcludeNodes(excludeIds);
         }
+        multiNode->setPrearmPhase(true);
         multiNode->queueRacePreArm();
+        pushMultiNodeState();   // tells client Race View tabs to show "Arm your quad" + play audio if enabled
         request->send(200, "application/json", "{\"status\":\"OK\"}");
     });
 
@@ -2324,8 +2421,9 @@ EEPROM:\n\
             }
             multiNode->setExcludeNodes(excludeIds);
         }
+        multiNode->setPrearmPhase(false);  // race actually started — leave prearm
         if (timer) timer->start();
-        if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
+        if (transportMgr) transportMgr->broadcastRaceStateEvent("started");  // also fires pushMultiNodeState() via sendRaceStateEvent
         multiNode->queueRaceStart();
         request->send(200, "application/json", "{\"status\":\"OK\"}");
     });

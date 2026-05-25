@@ -91,6 +91,10 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             _raceStopPending = false;
             _broadcastRaceStop();
         }
+        if (_directorStateBroadcastPending) {
+            _directorStateBroadcastPending = false;
+            _broadcastDirectorState();
+        }
     }
 }
 
@@ -494,6 +498,40 @@ void MultiNodeManager::_broadcastRaceStart() {
         vTaskDelay(1);  // yield between nodes so async_tcp stays fed
     }
     _excludeNodes.clear();  // consumed — reset for next race
+}
+
+void MultiNodeManager::setPrearmPhase(bool active) {
+    _prearmPhase        = active;
+    _prearmPhaseSetAtMs = millis();
+}
+
+bool MultiNodeManager::getPrearmPhase() const {
+    if (!_prearmPhase) return false;
+    if (millis() - _prearmPhaseSetAtMs > PREARM_PHASE_TIMEOUT_MS) return false;
+    return true;
+}
+
+void MultiNodeManager::queueDirectorStateBroadcast(const String& payload) {
+    if (!isMasterMode()) return;
+    _directorStatePayload          = payload;     // overwrites any pending payload — newest wins
+    _directorStateBroadcastPending = true;
+}
+
+void MultiNodeManager::_broadcastDirectorState() {
+    if (_directorStatePayload.isEmpty()) return;
+    for (auto& n : _nodes) {
+        if (!n.online || n.staIP.isEmpty()) continue;
+        HTTPClient http;
+        String url = "http://" + n.staIP + "/api/multinode/directorState";
+        if (http.begin(url)) {
+            http.setTimeout(300);
+            http.addHeader("Content-Type", "application/json");
+            http.POST(_directorStatePayload);
+            http.end();
+        }
+        vTaskDelay(1);
+    }
+    _directorStatePayload = String();
 }
 
 void MultiNodeManager::_broadcastRaceStop() {
