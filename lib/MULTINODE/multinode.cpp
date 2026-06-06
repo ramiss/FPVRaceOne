@@ -30,7 +30,9 @@ static String _readStaMacString() {
 void MultiNodeManager::init(Config* config) {
     _conf                = config;
     _masterConnected     = false;
-    _myNodeId            = 0;
+    // Restore the last slot a master assigned to us so registration can request
+    // it.  0 means "no preference yet — let the master pick first available".
+    _myNodeId            = config ? config->getMnPreferredSlot() : 0;
     _lapPending          = false;
     _localLapCount       = 0;
     _lastHeartbeatMs     = 0;
@@ -188,6 +190,14 @@ void MultiNodeManager::_sendRegistration() {
                 _myNodeId        = id;
                 _masterConnected = true;
                 DEBUG("[MULTINODE] Registered as node %u\n", _myNodeId);
+                // Persist the assigned slot so we can request it again on the
+                // next boot.  Only writes when the slot actually changed —
+                // setMnPreferredSlot is a no-op if the stored value matches.
+                if (_conf && _conf->getMnPreferredSlot() != id) {
+                    _conf->setMnPreferredSlot(id);
+                    _conf->write();
+                    DEBUG("[MULTINODE] Persisted preferred slot %u\n", id);
+                }
             }
         }
     } else {
@@ -323,14 +333,27 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
         return false;
     }
 
-    // Assign first available node ID (1–7)
+    // Slot assignment.  Honour the client's requested slot first if it's valid
+    // and currently free — clients persist their last-assigned slot in EEPROM
+    // and send it back here as nodeId so they can reclaim it across reboots.
+    // If the requested slot is taken (or no preference was sent), fall back to
+    // the first-available slot 1..7.
     uint8_t newId = 0;
-    for (uint8_t id = 1; id <= MULTINODE_MAX_NODES; id++) {
+    if (incomingNodeId >= 1 && incomingNodeId <= MULTINODE_MAX_NODES) {
         bool used = false;
         for (const auto& n : _nodes) {
-            if (n.nodeId == id) { used = true; break; }
+            if (n.nodeId == incomingNodeId) { used = true; break; }
         }
-        if (!used) { newId = id; break; }
+        if (!used) newId = incomingNodeId;
+    }
+    if (newId == 0) {
+        for (uint8_t id = 1; id <= MULTINODE_MAX_NODES; id++) {
+            bool used = false;
+            for (const auto& n : _nodes) {
+                if (n.nodeId == id) { used = true; break; }
+            }
+            if (!used) { newId = id; break; }
+        }
     }
     if (newId == 0) return false;
 

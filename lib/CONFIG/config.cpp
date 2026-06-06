@@ -153,6 +153,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
     config["mnClientRaceAudio"] = conf.mnClientRaceAudio;
+    config["mnPreferredSlot"]   = conf.mnPreferredSlot;
     config["devMode"] = conf.devMode;
     config["otaIncludePrereleases"] = conf.otaIncludePrereleases;
 
@@ -203,6 +204,7 @@ void Config::toJsonString(char* buf) {
     config["masterPassword"] = conf.masterPassword;
     config["mnSkipMasterStart"] = conf.mnSkipMasterStart;
     config["mnClientRaceAudio"] = conf.mnClientRaceAudio;
+    config["mnPreferredSlot"]   = conf.mnPreferredSlot;
     config["devMode"] = conf.devMode;
     config["otaIncludePrereleases"] = conf.otaIncludePrereleases;
 
@@ -413,6 +415,7 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("masterPassword"))     setStr("masterPassword", conf.masterPassword, sizeof(conf.masterPassword));
     if (source.containsKey("mnSkipMasterStart"))  setU8("mnSkipMasterStart", conf.mnSkipMasterStart, 0, 1);
     if (source.containsKey("mnClientRaceAudio"))  setU8("mnClientRaceAudio", conf.mnClientRaceAudio, 0, 1);
+    if (source.containsKey("mnPreferredSlot"))    setU8("mnPreferredSlot",   conf.mnPreferredSlot,   0, 7);
     if (source.containsKey("devMode"))            setU8("devMode", conf.devMode, 0, 1);
 
     // ===== OTA =====
@@ -792,6 +795,18 @@ void Config::setMnClientRaceAudio(uint8_t enabled) {
     }
 }
 
+uint8_t Config::getMnPreferredSlot() {
+    return conf.mnPreferredSlot;
+}
+
+void Config::setMnPreferredSlot(uint8_t slot) {
+    if (slot > 7) slot = 0;  // valid range is 0 (no preference) or 1-7
+    if (conf.mnPreferredSlot != slot) {
+        conf.mnPreferredSlot = slot;
+        modified = true;
+    }
+}
+
 uint8_t Config::getDevMode() {
     return conf.devMode;
 }
@@ -1040,6 +1055,7 @@ void Config::setDefaults(void) {
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));
     conf.mnSkipMasterStart = 0;
     conf.mnClientRaceAudio = 0;   // client mode: race-start audio off by default
+    conf.mnPreferredSlot   = 0;   // client mode: no preferred slot until a master assigns one
     conf.devMode = 0;
     conf.otaIncludePrereleases = 0;  // Stable releases only by default
     modified = true;
