@@ -326,7 +326,8 @@
     <!-- Node Pilot Edit Modal -->
     <div id="mnPilotModal" class="modal" style="display:none;" onclick="mnClosePilotModalBackdrop(event)">
       <div class="modal-content" style="max-width:360px;">
-        <h3>Edit Pilot — <span id="mnPilotModalTitle"></span></h3>
+        <h3 id="mnPilotModalTitle" style="margin-bottom:2px;">Edit Pilot</h3>
+        <div id="mnPilotModalSubtitle" style="margin: 0 0 14px; font-size:13px; font-weight:600; color: var(--secondary-color);"></div>
         <div class="config-item" style="margin-bottom:14px;">
           <label for="mnPilotModalName">Pilot Name</label>
           <input type="text" id="mnPilotModalName" autocomplete="off" style="width:100%;box-sizing:border-box;">

@@ -4,6 +4,28 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <esp_wifi.h>
+#include <esp_mac.h>
+
+// Defined in webserver.cpp.  Format: "FPVRaceOne_<6-hex>".
+extern String wifi_ap_ssid;
+
+// Read the device's STA MAC directly from eFuse, bypassing WiFi.macAddress().
+// init() runs before any WiFi.mode(...) call, so WiFi is in WIFI_MODE_NULL —
+// in that state Arduino-ESP32's WiFi.macAddress() takes a code path that has
+// returned the SAME string on distinct ESP32-C6 chips (same family of bug as
+// the SSID issue we fixed with esp_read_mac).  When two clients report the
+// same MAC, handleRegister's macMatch path overwrites slot 1 for the second
+// client instead of opening slot 2.
+// Reading eFuse directly is what we already do for the SoftAP MAC and is
+// guaranteed to return this chip's actual unique STA MAC.
+static String _readStaMacString() {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    char buf[18];
+    snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+             mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    return String(buf);
+}
 
 void MultiNodeManager::init(Config* config) {
     _conf                = config;
@@ -21,7 +43,8 @@ void MultiNodeManager::init(Config* config) {
     _raceStartPending    = false;
     _raceStopPending     = false;
     _quitPending         = false;
-    _myMacAddress        = WiFi.macAddress();
+    _myMacAddress        = _readStaMacString();
+    DEBUG("[MULTINODE] My STA MAC: %s\n", _myMacAddress.c_str());
     _nodes.clear();
 }
 
@@ -146,6 +169,12 @@ void MultiNodeManager::_sendRegistration() {
     doc["clientIP"]      = MULTINODE_CLIENT_AP_IP;
     doc["nodeId"]        = _myNodeId;  // 0 on first registration
     doc["mac"]           = _myMacAddress;
+    // Last 6 hex chars of our own AP SSID (FPVRaceOne_xxxxxx).  Master shows
+    // this in the Edit Pilot modal so the director can correlate a slot to a
+    // physical unit by its broadcast SSID.
+    doc["apSuffix"]      = (wifi_ap_ssid.length() >= 6)
+                              ? wifi_ap_ssid.substring(wifi_ap_ssid.length() - 6)
+                              : String();
 
     String body;
     serializeJson(doc, body);
@@ -255,14 +284,22 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
                                        uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
                                        const String& staIP, const String& clientIP,
                                        const String& macAddress,
+                                       const String& apSuffix,
                                        uint8_t& assignedNodeId) {
-    // Re-registration: match by MAC first (most stable), then nodeId, then STA IP
+    // Re-registration matching.  Only MAC and nodeId are reliable identifiers —
+    // STA IPs can be reassigned by DHCP to a different physical client, so a
+    // bare IP match would silently merge two distinct units into the same slot
+    // (observed bug: second client overwrote slot 1 because both ended up at
+    // the same DHCP-assigned address).  We also block any match when the
+    // incoming MAC explicitly disagrees with the stored MAC, so a stale nodeId
+    // never lets a different unit hijack an existing slot.
     uint8_t incomingNodeId = assignedNodeId;
     for (auto& n : _nodes) {
-        bool macMatch  = macAddress.length() > 0 && macAddress == n.macAddress;
-        bool idMatch   = incomingNodeId > 0 && n.nodeId == incomingNodeId;
-        bool ipMatch   = n.staIP.length() > 0 && n.staIP == staIP;
-        if (macMatch || idMatch || ipMatch) {
+        bool macKnown    = macAddress.length() > 0 && n.macAddress.length() > 0;
+        bool macMatch    = macKnown && macAddress == n.macAddress;
+        bool macMismatch = macKnown && macAddress != n.macAddress;
+        bool idMatch     = incomingNodeId > 0 && n.nodeId == incomingNodeId;
+        if (macMatch || (idMatch && !macMismatch)) {
             n.pilotName     = pilotName;
             n.pilotColor    = pilotColor;
             n.bandIndex     = bandIndex;
@@ -271,10 +308,12 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
             n.clientIP      = clientIP;
             n.staIP         = staIP;
             if (macAddress.length() > 0) n.macAddress = macAddress;
+            if (apSuffix.length() > 0)   n.apSuffix   = apSuffix;
             n.lastSeen      = millis();
             n.online        = true;
             assignedNodeId  = n.nodeId;
-            DEBUG("[MULTINODE] Re-registered node %u (%s): %s\n", n.nodeId, macAddress.c_str(), pilotName.c_str());
+            DEBUG("[MULTINODE] Re-registered node %u (mac=%s ip=%s suffix=%s): %s\n",
+                  n.nodeId, n.macAddress.c_str(), staIP.c_str(), n.apSuffix.c_str(), pilotName.c_str());
             return true;
         }
     }
@@ -305,13 +344,15 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     n.staIP         = staIP;
     n.clientIP      = clientIP;
     n.macAddress    = macAddress;
+    n.apSuffix      = apSuffix;
     n.lastSeen      = millis();
     n.online        = true;
     n.lapCount      = 0;
     _nodes.push_back(n);
 
     assignedNodeId = newId;
-    DEBUG("[MULTINODE] New node %u: %s @ %s\n", newId, pilotName.c_str(), staIP.c_str());
+    DEBUG("[MULTINODE] New node %u (mac=%s ip=%s suffix=%s): %s\n",
+          newId, macAddress.c_str(), staIP.c_str(), apSuffix.c_str(), pilotName.c_str());
     return true;
 }
 
@@ -438,6 +479,7 @@ String MultiNodeManager::getNodesToJson() const {
         o["lapCount"]       = n.lapCount;
         o["clientIP"]       = n.clientIP;
         o["mac"]            = n.macAddress;
+        o["apSuffix"]       = n.apSuffix;
         JsonArray laps      = o.createNestedArray("laps");
         // Send all stored laps so the race view can compute full stats
         for (size_t i = 0; i < n.laps.size(); i++) {

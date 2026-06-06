@@ -363,6 +363,7 @@ async function onWiFiReconnect() {
     mnMasterConnected = data.masterConnected  || false;
     mnMasterRaceActive = data.masterRaceActive || false;
     if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
+    if (data.ssid) mnMyOwnSSID = data.ssid;
 
     const timerRunning  = data.timerRunning  || false;
     const raceElapsedMs = data.raceElapsedMs || 0;
@@ -859,14 +860,21 @@ onload = async function (e) {
     });
   }
 
-  // Restore always-hide banner toggle — default OFF (banner is visible until
-  // the user explicitly opts in by toggling On).  Only "1" means hidden.
+  // Always-hide banner toggle — default OFF for every new build / page load.
+  //
+  // The old behavior read the saved value out of localStorage, which persists
+  // across firmware reflashes for the same browser+IP combo.  Result: a unit
+  // freshly flashed with new firmware kept "always hide" stuck on because the
+  // browser remembered an earlier session.  We now wipe the persistent key on
+  // every page load so the toggle is always reported OFF at startup.  The
+  // session-scoped "Dismiss" button (sessionStorage / hideRaceDownloadReminder)
+  // still works for one-session dismissal.
   const alwaysHideBannerToggle = document.getElementById("alwaysHideBannerToggle");
   const alwaysHideBannerLabel  = document.getElementById("alwaysHideBannerLabel");
   if (alwaysHideBannerToggle) {
-    const stored = localStorage.getItem("alwaysHideRaceBanner") === "1";
-    alwaysHideBannerToggle.checked = stored;
-    if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = stored ? "On" : "Off";
+    localStorage.removeItem("alwaysHideRaceBanner");
+    alwaysHideBannerToggle.checked = false;
+    if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = "Off";
     alwaysHideBannerToggle.addEventListener("change", () => {
       if (alwaysHideBannerLabel) alwaysHideBannerLabel.textContent = alwaysHideBannerToggle.checked ? "On" : "Off";
       // When opting back in to seeing the banner, clear the session-level dismiss too
@@ -6610,7 +6618,8 @@ let mnRaceStartMs         = 0;
 let mnMasterConnected     = false; // client: true when registered with master
 let mnClientPollInterval  = null;  // client: timer for periodic /api/mode polls
 let mnDevMode             = false; // dev mode: click pilot name to simulate a lap
-let mnStatusSSID          = '';    // SSID string for the race status bar
+let mnStatusSSID          = '';    // SSID string for the race status bar (master mode: own SSID; client mode: master SSID)
+let mnMyOwnSSID           = '';    // this device's own SSID — needed so the client banner can show its own MAC suffix
 
 /** Show/hide client-specific fields in the Multi-Node settings section */
 let _savedMasterSSID = '';
@@ -6916,6 +6925,12 @@ function formatMsGap(ms) {
   return (ms > 0 ? '+' : '-') + formatMsDisplay(Math.abs(ms));
 }
 
+// SSIDs follow the FPVRaceOne_<6-hex> format. Pull the last 6 chars when the
+// full SSID is present, empty string otherwise.
+function _ssidSuffix(ssid) {
+  return (ssid && ssid.length >= 6) ? ssid.substring(ssid.length - 6) : '';
+}
+
 // Update the status bar above the race clock based on current multi-node mode.
 function mnUpdateRaceStatusBar() {
   rvShowTabIfClient();
@@ -6927,12 +6942,15 @@ function mnUpdateRaceStatusBar() {
     text.textContent  = `Multi-Node (Master) — ${mnStatusSSID || 'FPVRaceOne'}`;
   } else if (mnNodeMode === 2) {
     bar.style.display = '';
+    const mySuffix     = _ssidSuffix(mnMyOwnSSID);
+    const masterSuffix = _ssidSuffix(mnStatusSSID) || mnStatusSSID || '';
+    const prefix       = mySuffix ? `Multi-Node (Client - ${mySuffix})` : 'Multi-Node (Client)';
     if (!mnMasterConnected) {
-      text.textContent = `Multi-Node (Client) — Disconnected from ${mnStatusSSID || ''}`.trim();
+      text.textContent = `${prefix} — Disconnected from ${masterSuffix}`.trim();
     } else if (mnMyNodeId > 0) {
-      text.textContent = `Multi-Node (Client) ${mnMyNodeId} — Connected to ${mnStatusSSID || ''}`.trim();
+      text.textContent = `${prefix} ${mnMyNodeId} — Connected to ${masterSuffix}`.trim();
     } else {
-      text.textContent = 'Multi-Node (Client) — Searching for master node...';
+      text.textContent = `${prefix} — Searching for master node...`;
     }
   } else {
     bar.style.display = 'none';
@@ -7203,7 +7221,7 @@ function mnRenderRaceTab(nodes, opts) {
     const cardEditBtn = (n.isMaster || readOnly) ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
     const meBadge = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
       ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Me</span>' : '';
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${n.nodeId}: ${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {
@@ -7286,7 +7304,13 @@ function mnOpenPilotModal(nodeId) {
   const node = mnCurrentNodes.find(n => n.nodeId === nodeId);
   const name     = node ? (node.pilotName || '') : '';
   const colorHex = node ? '#' + ((node.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0') : '#0080ff';
-  document.getElementById('mnPilotModalTitle').textContent = 'Node ' + nodeId + (name ? ' \u2014 ' + name : '');
+  const apSuffix = (node && node.apSuffix) ? node.apSuffix : '';
+  // Row 1: "Edit Pilot - <name>" (or just "Edit Pilot" if name is empty)
+  // Row 2: "Node X - <apSuffix>" so the director can correlate slot to SSID
+  document.getElementById('mnPilotModalTitle').textContent =
+    name ? `Edit Pilot - ${name}` : 'Edit Pilot';
+  document.getElementById('mnPilotModalSubtitle').textContent =
+    apSuffix ? `Node ${nodeId} - ${apSuffix}` : `Node ${nodeId}`;
   document.getElementById('mnPilotModalName').value  = name;
   const mnColorSelect  = document.getElementById('mnPilotModalColor');
   const mnColorPreview = document.getElementById('mnPilotModalColorPreview');
@@ -7426,6 +7450,7 @@ async function mnInitTab() {
     const data     = await r.json();
     const nodeMode = data.nodeMode || 0;
     mnNodeMode     = nodeMode;
+    if (data.ssid) mnMyOwnSSID = data.ssid;
 
     if (nodeMode === 1) {
       mnStatusSSID = data.ssid || '';
@@ -8036,6 +8061,7 @@ document.addEventListener('DOMContentLoaded', () => {
       mnMyNodeId        = data.myNodeId       || 0;
       mnMasterConnected = data.masterConnected || false;
       if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
+      if (data.ssid) mnMyOwnSSID = data.ssid;
       if (typeof audioAnnouncer !== 'undefined') audioAnnouncer.sdAvailable = !!data.sdAvailable;
       if (data.devMode !== undefined) {
         mnDevMode = !!data.devMode;

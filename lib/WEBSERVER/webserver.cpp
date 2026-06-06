@@ -6,6 +6,7 @@
 #include <ESPmDNS.h>
 #include <LittleFS.h>
 #include <esp_wifi.h>
+#include <esp_mac.h>
 extern "C" {
   #include "lwip/dhcp.h"
   #include "lwip/netif.h"
@@ -141,11 +142,24 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     multiNode = multiNodeMgr;
     transportMgr = nullptr;
 
-    uint64_t mac = ESP.getEfuseMac();  // bytes 0-2 = OUI (same on all units), bytes 3-5 = unique
+    // SSID suffix = last 3 bytes of the AP MAC, lowercase, matching the format
+    // shown by WiFi scanners.  Two units must always produce different SSIDs.
+    //
+    // The earlier version used `ESP.getEfuseMac()` and `snprintf(... "%06llX", ...)`.
+    // That returned the SAME six chars on every unit because ESP-IDF v5's default
+    // nano-printf does not support 64-bit format specifiers (%llX) — it consumes
+    // an unrelated stack word and prints constant garbage instead of the masked
+    // value.  Read the SoftAP MAC byte-by-byte and print with %02x to avoid the
+    // entire problem.  Falls back to all-zero suffix if the read ever fails so
+    // we still get a deterministic, non-crashing SSID.
+    uint8_t apMac[6] = {0};
+    esp_read_mac(apMac, ESP_MAC_WIFI_SOFTAP);
     char macStr[7];
-    snprintf(macStr, sizeof(macStr), "%06llX", (mac >> 24) & 0xFFFFFF);
+    snprintf(macStr, sizeof(macStr), "%02x%02x%02x", apMac[3], apMac[4], apMac[5]);
     wifi_ap_ssid = String(wifi_ap_ssid_prefix) + "_" + macStr;
-    DEBUG("WiFi AP SSID configured: %s\n", wifi_ap_ssid.c_str());
+    DEBUG("WiFi AP SSID configured: %s (AP MAC %02x:%02x:%02x:%02x:%02x:%02x)\n",
+          wifi_ap_ssid.c_str(),
+          apMac[0], apMac[1], apMac[2], apMac[3], apMac[4], apMac[5]);
 
     WiFi.persistent(false);
     // Belt-and-suspenders: also wipe NVS creds + tear down any AP that may
@@ -2082,11 +2096,12 @@ EEPROM:\n\
             String staIP            = request->client()->remoteIP().toString();
 
             String macAddress   = obj["mac"]      | "";
-            uint8_t assignedId  = obj["nodeId"]   | 0;  // client's self-reported nodeId (0 on first registration)
+            String apSuffix     = obj["apSuffix"] | "";   // last 6 hex chars of the client's broadcast SSID
+            uint8_t assignedId  = obj["nodeId"]   | 0;    // client's self-reported nodeId (0 on first registration)
             bool ok = multiNode->handleRegister(pilotName,
                                                  pilotColor, bandIndex, channelIndex, freq,
                                                  staIP, clientIP,
-                                                 macAddress, assignedId);
+                                                 macAddress, apSuffix, assignedId);
             if (ok) pushMultiNodeState();  // give the new client an immediate Race View snapshot
 
             DynamicJsonDocument resp(64);

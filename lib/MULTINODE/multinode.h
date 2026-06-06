@@ -28,6 +28,7 @@ struct NodeInfo {
     String   clientIP;   // client's own AP IP (master uses this to push commands)
     String   staIP;      // client's STA IP assigned by master's DHCP
     String   macAddress; // client's WiFi MAC — primary unique key
+    String   apSuffix;   // last 6 hex chars of this client's AP SSID — shown in master's Edit Pilot modal
     uint32_t lastSeen;
     bool     online;
     bool     running                = false;  // true while client's race timer is active
@@ -61,6 +62,7 @@ public:
                           uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
                           const String& staIP, const String& clientIP,
                           const String& macAddress,
+                          const String& apSuffix,
                           uint8_t& assignedNodeId);
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
     bool   handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged);
