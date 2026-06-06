@@ -342,6 +342,58 @@ bool Webserver::isConnected() {
     return servicesStarted;
 }
 
+// Bring the device's own AP up.  Used by handleWebUpdate's WIFI_AP transition
+// and by the recruit job after it returns from STA-only mode.  apChannel is a
+// member: scanned once on first call, reused thereafter.  startServices() is
+// idempotent so calling this multiple times is safe.
+void Webserver::startAP() {
+    if (apChannel == 0) {
+        apChannel = selectBestWifiChannel();
+    }
+    DEBUG("Changing to WiFi AP mode on ch%d\n", apChannel);
+
+    WiFi.disconnect();
+    wifiMode = WIFI_AP;
+    WiFi.setHostname(wifi_hostname);  // must be set before WiFi.mode()
+    WiFi.mode(WIFI_AP);
+
+    WiFi.setTxPower(dBmToWifiPower(conf->getWifiTxPower()));
+
+    // Master node uses 192.168.5.1 so client nodes can keep the standard 192.168.4.1
+    if (conf->getNodeMode() == 1) {
+        ipAddress.fromString("192.168.5.1");
+    }
+    // Advertise NO default gateway — helps Android keep cellular data for internet
+    WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
+
+    DEBUG("Starting WiFi AP: %s with password: %s on ch%d\n", wifi_ap_ssid.c_str(), wifi_ap_password, apChannel);
+    // Master: 7 client STAs + 1 race-director phone = 8 expected slots; we set
+    // 9 to keep 1 buffer slot so a single stray pilot connection can't lock
+    // the director out of their own master.
+    //
+    // Single: 5 — up to 4 pilot phones + 1 reserved slot for an inbound master
+    // doing a "Recruit Nearby Units" scan.  The recruit job needs to associate
+    // as a STA to push config, and that has to fit even when the unit already
+    // has pilots connected to it.
+    uint8_t maxConn = (conf->getNodeMode() == 1) ? 9 : 5;
+    WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
+
+    // Master: embed a 6-byte vendor IE in every beacon and probe-response so
+    // scanning clients can identify this node as a master without connecting.
+    if (conf->getNodeMode() == 1) {
+        static const uint8_t kMasterIE[] = { 0xDD, 0x04, 0x46, 0x50, 0x56, 0x01 };
+        esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON,     WIFI_VND_IE_ID_0, kMasterIE);
+        esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, kMasterIE);
+    }
+
+    esp_wifi_set_ps(WIFI_PS_NONE);
+    esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
+    esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+
+    DEBUG("WiFi AP started: SSID=%s ch=%d HT20\n", WiFi.softAPSSID().c_str(), apChannel);
+    startServices();
+}
+
 void Webserver::update(uint32_t currentTimeMs) {
     handleWebUpdate(currentTimeMs);
 }
@@ -444,57 +496,8 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     if (changeMode != wifiMode && changeMode != WIFI_OFF && (currentTimeMs - changeTimeMs) > WIFI_RECONNECT_TIMEOUT_MS) {
         switch (changeMode) {
             case WIFI_AP: {
-                // Scan for the least-congested non-overlapping channel once per boot
-                static uint8_t apChannel = 0;
-                if (apChannel == 0) {
-                    apChannel = selectBestWifiChannel();
-                }
-
-                DEBUG("Changing to WiFi AP mode on ch%d\n", apChannel);
-
-                WiFi.disconnect();
-                wifiMode = WIFI_AP;
-                WiFi.setHostname(wifi_hostname);  // must be set before WiFi.mode()
-                WiFi.mode(WIFI_AP);
                 changeTimeMs = currentTimeMs;
-
-                WiFi.setTxPower(dBmToWifiPower(conf->getWifiTxPower()));
-
-                // Master node uses 192.168.5.1 so client nodes can keep the standard 192.168.4.1
-                if (conf->getNodeMode() == 1) {
-                    ipAddress.fromString("192.168.5.1");
-                }
-                // Advertise NO default gateway — helps Android keep cellular data for internet
-                WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
-
-                DEBUG("Starting WiFi AP: %s with password: %s on ch%d\n", wifi_ap_ssid.c_str(), wifi_ap_password, apChannel);
-                // Master: 7 client STAs + 1 race-director phone = 8 expected slots;
-                // we set 9 to keep 1 buffer slot so a single stray pilot connection
-                // can't lock the director out of their own master.  Single mode: 4.
-                uint8_t maxConn = (conf->getNodeMode() == 1) ? 9 : 4;
-                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
-
-                // Master: embed a 6-byte vendor IE in every beacon and probe-response so
-                // scanning clients can identify this node as a master without connecting.
-                // Layout: 0xDD (vendor-specific), length=4, OUI='F','P','V', type=0x01.
-                // Zero ongoing CPU cost — stored in the WiFi driver's beacon template.
-                if (conf->getNodeMode() == 1) {
-                    static const uint8_t kMasterIE[] = { 0xDD, 0x04, 0x46, 0x50, 0x56, 0x01 };
-                    esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_BEACON,     WIFI_VND_IE_ID_0, kMasterIE);
-                    esp_wifi_set_vendor_ie(true, WIFI_VND_IE_TYPE_PROBE_RESP, WIFI_VND_IE_ID_0, kMasterIE);
-                }
-
-                // Disable modem power save — without this the AP sleeps between beacons
-                // and clients drop ~50% of the time on ESP32C6.
-                esp_wifi_set_ps(WIFI_PS_NONE);
-
-                // Force HT20 (20 MHz) to reduce adjacent-channel interference
-                esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
-                // Standard 802.11 b/g/n — no proprietary LR (LR only works between ESP32 devices)
-                esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
-
-                DEBUG("WiFi AP started: SSID=%s ch=%d HT20\n", WiFi.softAPSSID().c_str(), apChannel);
-                startServices();
+                startAP();
                 buz->beep(1000);
                 led->on(1000);
                 break;
@@ -2412,6 +2415,50 @@ EEPROM:\n\
         multiNode->queueRacePreArm();
         pushMultiNodeState();   // tells client Race View tabs to show "Arm your quad" + play audio if enabled
         request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
+
+    // /api/multinode/recruit — master scans for nearby FPVRaceOne units and
+    // configures them as clients of this master.  Drops the AP for ~60s while
+    // it runs.  Body: { "force": bool } — true = recruit even units already in
+    // master/client mode; false (default) = only single-mode units.
+    server.on("/api/multinode/recruit", HTTP_POST,
+        [this](AsyncWebServerRequest *request) {
+            if (!multiNode || !multiNode->isMasterMode()) {
+                request->send(403, "application/json", "{\"error\":\"master only\"}");
+                return;
+            }
+            bool force = false;
+            if (request->hasParam("force")) {
+                String v = request->getParam("force")->value();
+                v.toLowerCase();
+                force = (v == "1" || v == "true");
+            }
+            multiNode->queueRecruit(force);
+            request->send(202, "application/json", "{\"status\":\"queued\"}");
+        });
+
+    // /api/multinode/recruit/status — director's browser polls this after the
+    // master comes back online to learn how the run went.  Consuming clears
+    // the summary so a refresh later doesn't re-show it.
+    server.on("/api/multinode/recruit/status", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!multiNode) {
+            request->send(200, "application/json", "{\"valid\":false}");
+            return;
+        }
+        RecruitSummary s = multiNode->getRecruitSummary();
+        DynamicJsonDocument doc(128);
+        doc["valid"]      = s.valid;
+        doc["inProgress"] = s.inProgress;
+        doc["found"]      = s.found;
+        doc["recruited"]  = s.recruited;
+        doc["skipped"]    = s.skipped;
+        doc["failed"]     = s.failed;
+        String out;
+        serializeJson(doc, out);
+        request->send(200, "application/json", out);
+        // Clear after read so a later refresh doesn't re-toast.  Leave the
+        // inProgress flag alone — that's set/cleared by the job itself.
+        if (s.valid && !s.inProgress) multiNode->clearRecruitSummary();
     });
 
     // /api/multinode/race/start — start master timer immediately, queue client POSTs

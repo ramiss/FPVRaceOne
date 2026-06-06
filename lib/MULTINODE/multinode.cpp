@@ -1,6 +1,8 @@
 #include "multinode.h"
 #include "config.h"
 #include "debug.h"
+#include "led.h"
+#include "webserver.h"
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <esp_wifi.h>
@@ -27,8 +29,10 @@ static String _readStaMacString() {
     return String(buf);
 }
 
-void MultiNodeManager::init(Config* config) {
+void MultiNodeManager::init(Config* config, Led* led, Webserver* webserver) {
     _conf                = config;
+    _led                 = led;
+    _webserver           = webserver;
     _masterConnected     = false;
     // Restore the last slot a master assigned to us so registration can request
     // it.  0 means "no preference yet — let the master pick first available".
@@ -119,6 +123,11 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         if (_directorStateBroadcastPending) {
             _directorStateBroadcastPending = false;
             _broadcastDirectorState();
+        }
+        if (_recruitPending) {
+            _recruitPending = false;
+            bool force = _recruitForce;
+            _runRecruitJob(force);
         }
     }
 }
@@ -580,6 +589,183 @@ void MultiNodeManager::queueDirectorStateBroadcast(const String& payload) {
     if (!isMasterMode()) return;
     _directorStatePayload          = payload;     // overwrites any pending payload — newest wins
     _directorStateBroadcastPending = true;
+}
+
+void MultiNodeManager::queueRecruit(bool force) {
+    if (!isMasterMode()) return;
+    _recruitForce          = force;
+    _recruitSummary        = RecruitSummary{};
+    _recruitSummary.inProgress = true;
+    _recruitPending        = true;
+}
+
+void MultiNodeManager::_runRecruitJob(bool force) {
+    DEBUG("[RECRUIT] Starting (force=%d)\n", force ? 1 : 0);
+
+    // Hold the LED solid-on for the entire procedure so the director sees the
+    // master is busy and knows the AP is temporarily down.  on(0) means no
+    // auto-off — we explicitly clear it at the end.
+    if (_led) _led->on(0);
+
+    // Snapshot our own SSID so we can both tell targets which master to join,
+    // and skip our own AP during the scan.
+    String ownSsid = wifi_ap_ssid;
+
+    // Drop the AP entirely.  Any connected director phone or pilot client will
+    // lose its connection — by design, the user was warned.
+    WiFi.softAPdisconnect(true);
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+    WiFi.mode(WIFI_STA);
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+
+    int n = WiFi.scanNetworks(false, false, false, 300);
+    DEBUG("[RECRUIT] Scan found %d networks total\n", n);
+
+    uint8_t found = 0, recruited = 0, skipped = 0, failed = 0;
+
+    for (int i = 0; i < n; i++) {
+        String ssid = WiFi.SSID(i);
+        if (!ssid.startsWith("FPVRaceOne_")) continue;
+        if (ssid == ownSsid) continue;
+        found++;
+
+        DEBUG("[RECRUIT] Target: %s (RSSI %d, ch %d)\n", ssid.c_str(), WiFi.RSSI(i), WiFi.channel(i));
+
+        WiFi.begin(ssid.c_str(), "fpvraceone");
+        uint32_t start = millis();
+        while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+            vTaskDelay(100 / portTICK_PERIOD_MS);
+        }
+        if (WiFi.status() != WL_CONNECTED) {
+            DEBUG("[RECRUIT] Could not associate with %s\n", ssid.c_str());
+            failed++;
+            WiFi.disconnect(true);
+            vTaskDelay(200 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        // Target may be running as single (192.168.4.1) or master (192.168.5.1).
+        // Try single first — that's the common case.  If /api/mode returns mode 1
+        // we know it's a master, switch to that IP.
+        String targetIp = "192.168.4.1";
+        int    targetMode = -1;
+        {
+            HTTPClient http;
+            String url = "http://" + targetIp + "/api/mode";
+            if (http.begin(url)) {
+                http.setTimeout(2000);
+                int code = http.GET();
+                if (code == 200) {
+                    String resp = http.getString();
+                    DynamicJsonDocument d(256);
+                    if (!deserializeJson(d, resp)) targetMode = d["nodeMode"] | -1;
+                }
+                http.end();
+            }
+            if (targetMode == -1) {
+                targetIp = "192.168.5.1";
+                HTTPClient http2;
+                if (http2.begin("http://" + targetIp + "/api/mode")) {
+                    http2.setTimeout(2000);
+                    int code = http2.GET();
+                    if (code == 200) {
+                        String resp = http2.getString();
+                        DynamicJsonDocument d(256);
+                        if (!deserializeJson(d, resp)) targetMode = d["nodeMode"] | -1;
+                    }
+                    http2.end();
+                }
+            }
+        }
+
+        if (targetMode == -1) {
+            DEBUG("[RECRUIT] %s: /api/mode unreachable\n", ssid.c_str());
+            failed++;
+            WiFi.disconnect(true);
+            vTaskDelay(200 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        // Filter: by default only recruit single-mode units (mode 0).  When force
+        // is true, recruit regardless of current mode — including other masters
+        // and clients already bound to a different master.
+        if (!force && targetMode != 0) {
+            DEBUG("[RECRUIT] %s: mode=%d, skipping (force=false)\n", ssid.c_str(), targetMode);
+            skipped++;
+            WiFi.disconnect(true);
+            vTaskDelay(200 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        // POST /config with the patch — nodeMode=2 + masterSSID=ours.  /config
+        // already supports partial updates and persists immediately.
+        DynamicJsonDocument patch(192);
+        patch["nodeMode"]   = 2;
+        patch["masterSSID"] = ownSsid;
+        String body;
+        serializeJson(patch, body);
+
+        bool configOk = false;
+        {
+            HTTPClient http;
+            if (http.begin("http://" + targetIp + "/config")) {
+                http.addHeader("Content-Type", "application/json");
+                http.setTimeout(3000);
+                int code = http.POST(body);
+                http.end();
+                configOk = (code == 200);
+            }
+        }
+        if (!configOk) {
+            DEBUG("[RECRUIT] %s: /config POST failed\n", ssid.c_str());
+            failed++;
+            WiFi.disconnect(true);
+            vTaskDelay(200 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        // Tell the target to reboot so the new nodeMode takes effect.  We don't
+        // care about the response — the unit will tear down WiFi mid-request.
+        {
+            HTTPClient http;
+            if (http.begin("http://" + targetIp + "/reboot")) {
+                http.setTimeout(1000);
+                http.POST("");
+                http.end();
+            }
+        }
+
+        DEBUG("[RECRUIT] %s recruited\n", ssid.c_str());
+        recruited++;
+        WiFi.disconnect(true);
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+    }
+
+    WiFi.scanDelete();
+    WiFi.disconnect(true, true);
+    WiFi.mode(WIFI_OFF);
+    vTaskDelay(100 / portTICK_PERIOD_MS);
+
+    // Bring our own AP back up via the webserver helper.  startServices() is
+    // idempotent so this restores the listening sockets cleanly.
+    if (_webserver) _webserver->startAP();
+
+    // Restore the normal LED state — handleLed() runs on Core 0 and turns the
+    // LED off after this on() pulse expires, leaving the device in its
+    // idle/awaiting-clients state.
+    if (_led) _led->on(500);
+
+    _recruitSummary.valid      = true;
+    _recruitSummary.inProgress = false;
+    _recruitSummary.found      = found;
+    _recruitSummary.recruited  = recruited;
+    _recruitSummary.skipped    = skipped;
+    _recruitSummary.failed     = failed;
+
+    DEBUG("[RECRUIT] Done — found=%u recruited=%u skipped=%u failed=%u\n",
+          found, recruited, skipped, failed);
 }
 
 void MultiNodeManager::_broadcastDirectorState() {

@@ -965,6 +965,21 @@
               <div style="font-size: 12px; color: var(--secondary-color); margin-top: 8px;">
                 Device will restart after applying. Current races are saved automatically before reboot.
               </div>
+
+              <!-- Master-only: recruit nearby units as clients of this master -->
+              <div id="mn-recruit-section" style="display:none; margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border-color);">
+                <h3 style="margin: 0 0 6px;">Recruit Nearby Units</h3>
+                <div style="margin-bottom: 12px;">
+                  <button id="recruitNearbyBtn" onclick="recruitNearbyUnits()" style="background-color: var(--primary-color); color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: pointer; font-size: 14px;">Recruit Nearby Units</button>
+                  <label style="margin-left: 14px; font-size: 13px; cursor: pointer;">
+                    <input type="checkbox" id="recruitForceToggle" style="vertical-align: middle;">
+                    Force recruit ALL units (even masters / existing clients)
+                  </label>
+                </div>
+                <div style="font-size: 12px; color: var(--secondary-color); line-height: 1.5;">
+                  This procedure will force the master node's access point to disconnect while it configures each client and will reappear when complete.
+                </div>
+              </div>
             </div>
 
             <!-- Webhooks Section -->

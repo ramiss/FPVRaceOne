@@ -41,10 +41,25 @@ struct NodeInfo {
 };
 
 class Config;
+class Led;
+class Webserver;
+
+struct RecruitSummary {
+    bool     valid     = false;
+    bool     inProgress= false;
+    uint8_t  found     = 0;
+    uint8_t  recruited = 0;
+    uint8_t  skipped   = 0;
+    uint8_t  failed    = 0;
+};
 
 class MultiNodeManager {
 public:
-    void init(Config* config);
+    // led + webserver are needed by the "Recruit nearby units" operation:
+    // LED stays solid-on for the duration so the director knows the master
+    // is offline; webserver provides the AP-restart helper after we drop
+    // back from STA.  Both may be nullptr on builds that don't recruit.
+    void init(Config* config, Led* led = nullptr, Webserver* webserver = nullptr);
     void process(uint32_t currentTimeMs);  // Call from Core 0 (parallelTask)
 
     // Called from Core 1 (lap detection) — minimal work, thread-safe via volatile flag
@@ -83,6 +98,14 @@ public:
     void   setPrearmPhase(bool active);
     bool   getPrearmPhase() const;
 
+    // Queue a "Recruit nearby units" job — master only.  When force is true the
+    // master configures ALL FPVRaceOne units in range regardless of their
+    // current mode; when false only units currently in single mode are touched.
+    // The job runs on Core 0 from process() and drops the AP for the duration.
+    void   queueRecruit(bool force);
+    RecruitSummary getRecruitSummary() const { return _recruitSummary; }
+    void   clearRecruitSummary() { _recruitSummary.valid = false; }
+
     // ── Client-side state setters (called from webserver handlers) ──
     void   setTimerRunning(bool running);
     void   setMasterRaceActive(bool active);
@@ -103,7 +126,9 @@ public:
     const std::vector<NodeInfo>& getNodes() const { return _nodes; }
 
 private:
-    Config* _conf = nullptr;
+    Config*    _conf      = nullptr;
+    Led*       _led       = nullptr;
+    Webserver* _webserver = nullptr;
     std::vector<NodeInfo> _nodes;  // master: list of registered clients
     std::vector<uint8_t>  _excludeNodes;  // node IDs to skip in next _broadcastRaceStart()
 
@@ -143,6 +168,11 @@ private:
     uint32_t          _prearmPhaseSetAtMs    = 0;
     static constexpr uint32_t PREARM_PHASE_TIMEOUT_MS = 15000;
 
+    // "Recruit nearby units" job — flag set by web handler, consumed on Core 0.
+    volatile bool     _recruitPending        = false;
+    volatile bool     _recruitForce          = false;
+    RecruitSummary    _recruitSummary;
+
     void _sendRegistration();
     void _sendHeartbeat();
     void _processQueuedLap();
@@ -154,4 +184,5 @@ private:
     bool _postToMaster(const String& endpoint, const String& body);
     bool _postToMasterWithResponse(const String& endpoint, const String& body, String& response);
     void _checkNodeTimeouts(uint32_t currentTimeMs);
+    void _runRecruitJob(bool force);
 };

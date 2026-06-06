@@ -296,6 +296,11 @@ async function connectUSB(portPath) {
 }
 
 function showDisconnectedBanner(message) {
+  // During the recruit job the master's AP intentionally drops for ~60s while
+  // it scans + configures peers.  Don't pop the generic "WiFi disconnected"
+  // banner during that window — recruitNearbyUnits() is already showing a
+  // dedicated overlay that explains what's happening.
+  if (window.__recruitInProgress) return;
   const banner = document.getElementById('disconnectedBanner');
   const text = document.getElementById('disconnectedBannerText');
   if (!banner) return;
@@ -6650,6 +6655,12 @@ function onNodeModeChange() {
     if (audioRow) audioRow.style.display = 'none';
   }
 
+  // Recruit panel is only meaningful on a device that's currently running as
+  // master — recruitment scans nearby APs and pushes config to them.  Show
+  // it based on the LIVE firmware mode, not the staged selection.
+  const recruitSection = document.getElementById('mn-recruit-section');
+  if (recruitSection) recruitSection.style.display = (mnNodeMode === 1) ? '' : 'none';
+
   // Show IP-change warning when selected mode has a different IP than the live firmware mode
   const deviceIsMaster   = (mnNodeMode === 1);
   const selectingMaster  = (mode === 1);
@@ -6678,6 +6689,108 @@ function updateApplyMultiNodeButtonState() {
   btn.disabled = !changed;
   btn.style.opacity = changed ? '1' : '0.5';
   btn.style.cursor = changed ? 'pointer' : 'not-allowed';
+}
+
+/** Recruit nearby FPVRaceOne units as clients of this master.
+ *
+ * Confirms with the director, fires POST /api/multinode/recruit, then shows a
+ * full-screen overlay while the master's AP is down (the browser will lose
+ * connection during this window).  Polls the master's IP until it answers
+ * again, fetches the recruit summary, toasts the result, and dismisses the
+ * overlay.
+ */
+async function recruitNearbyUnits() {
+  const forceEl = document.getElementById('recruitForceToggle');
+  const force   = !!(forceEl && forceEl.checked);
+
+  // Warning popup — the owners of nearby nodes need to consent.
+  const confirmed = await new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#fff);border-radius:10px;padding:28px 32px;max-width:460px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);font-family:inherit;';
+    const forceWarning = force
+      ? `<div style="background:#fde6e6;border:1px solid #c0392b;border-radius:6px;padding:10px 14px;color:#5a0000;font-size:13px;margin-bottom:14px;">
+           <strong>Force mode is ON.</strong> This will reconfigure <em>every</em> FPVRaceOne unit in range — including units already running as a master or as a client of a different master.
+         </div>` : '';
+    box.innerHTML = `
+      <h3 style="margin:0 0 12px;font-size:17px;color:#222;">Recruit nearby units?</h3>
+      ${forceWarning}
+      <p style="margin:0 0 12px;font-size:14px;color:#444;line-height:1.5;">
+        This will scan for every FPVRaceOne unit in range and configure them as clients of this master, then reboot them.
+      </p>
+      <p style="margin:0 0 16px;font-size:13px;color:#666;line-height:1.5;">
+        Make sure the owners of nearby nodes are aware before proceeding — their devices will be reconfigured and rebooted automatically.
+      </p>
+      <p style="margin:0 0 20px;font-size:13px;color:#666;line-height:1.5;">
+        This master's WiFi access point will go offline for up to ~60 seconds while it works. Your browser will lose its connection until the master comes back up.
+      </p>
+      <div style="display:flex;gap:12px;justify-content:flex-end;">
+        <button id="_rnCancel"   style="padding:8px 20px;border-radius:6px;border:1px solid #aaa;background:#f5f5f5;color:#333;cursor:pointer;font-size:14px;">Cancel</button>
+        <button id="_rnContinue" style="padding:8px 20px;border-radius:6px;border:none;background:var(--primary-color,#2196F3);color:#fff;cursor:pointer;font-size:14px;font-weight:600;">Continue</button>
+      </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    document.getElementById('_rnCancel').onclick   = () => { overlay.remove(); resolve(false); };
+    document.getElementById('_rnContinue').onclick = () => { overlay.remove(); resolve(true);  };
+  });
+  if (!confirmed) return;
+
+  // Flag the recruit phase BEFORE the master drops its AP — showDisconnectedBanner
+  // checks this and stays out of the way so the user only sees the recruit overlay.
+  window.__recruitInProgress = true;
+  hideDisconnectedBanner();
+
+  try {
+    await fetch('/api/multinode/recruit?force=' + (force ? '1' : '0'), { method: 'POST' });
+  } catch (e) {
+    // The 202 response usually flushes before the AP goes down, but if not,
+    // the catch is harmless — we'll see the result when the master comes back.
+    console.warn('[Recruit] POST may have failed mid-flight', e);
+  }
+
+  // Working overlay — opaque background and a z-index above the disconnect
+  // banner (9999) so it's the only thing the director sees while the AP is down.
+  const overlay = document.createElement('div');
+  overlay.id = '_recruitOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:#1a1a1a;z-index:10001;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:inherit;text-align:center;padding:24px;';
+  overlay.innerHTML = `
+    <div style="font-size:26px;font-weight:700;margin-bottom:14px;">Configuring nearby units as clients…</div>
+    <div style="font-size:15px;opacity:0.85;margin-bottom:6px;max-width:520px;line-height:1.55;">
+      This master node is currently disconnected and recruiting other FPVRaceOne units.<br>
+      The access point will return automatically when configuration is complete.
+    </div>
+    <div id="_recruitStatusLine" style="font-size:13px;opacity:0.7;margin-top:18px;">Waiting for master to come back…</div>`;
+  document.body.appendChild(overlay);
+
+  // Wait 5 s before polling so the master has time to actually drop its AP.
+  await new Promise(r => setTimeout(r, 5000));
+
+  // Poll for the master to come back online + fetch the summary.
+  const statusLine = document.getElementById('_recruitStatusLine');
+  let summary = null;
+  const maxAttempts = 90;  // 90 × 1s = 90s hard cap
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const r = await fetch('/api/multinode/recruit/status', { cache: 'no-store' });
+      if (r.ok) {
+        const j = await r.json();
+        if (j.valid && !j.inProgress) { summary = j; break; }
+        if (j.inProgress && statusLine) statusLine.textContent = 'Master responding — recruit still running…';
+      }
+    } catch (_) { /* still down — keep polling */ }
+    await new Promise(r => setTimeout(r, 1000));
+  }
+
+  overlay.remove();
+  // Allow the normal disconnect banner to fire again if the master is unhealthy.
+  window.__recruitInProgress = false;
+
+  if (summary) {
+    alert(`Recruit complete:\n\nFound: ${summary.found}\nRecruited: ${summary.recruited}\nSkipped: ${summary.skipped}\nFailed: ${summary.failed}`);
+  } else {
+    alert('Recruit may still be in progress — the master did not respond within the timeout. Refresh in a few seconds.');
+  }
 }
 
 /** Apply multi-node settings and reboot */

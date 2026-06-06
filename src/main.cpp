@@ -227,8 +227,9 @@ void setup() {
         }
     }
     
-    // Initialize multi-node manager
-    multiNodeManager.init(&config);
+    // Initialize multi-node manager — pass LED and webserver so the recruit
+    // job can hold the LED solid-on and restore the AP after STA work.
+    multiNodeManager.init(&config, &led, &ws);
 
     ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &webhookManager, &multiNodeManager);
 

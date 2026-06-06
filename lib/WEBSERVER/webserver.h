@@ -31,6 +31,12 @@ class Webserver : public TransportInterface {
     // can mirror the master's view. Master-mode only; no-op otherwise.
     void pushMultiNodeState();
 
+    // (Re-)start the device's own AP using the cached / scanned channel.
+    // Called from handleWebUpdate's WIFI_AP transition AND from the recruit job
+    // (in MultiNodeManager) after it returns from STA-only mode.  Safe to call
+    // multiple times — startServices() is idempotent.
+    void startAP();
+
     // TransportInterface implementation
     void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) override;
     void sendRssiEvent(uint8_t rssi) override;
@@ -63,4 +69,5 @@ class Webserver : public TransportInterface {
     bool sendRssi = false;
     uint32_t rssiSentMs = 0;
     uint32_t sseKeepaliveMs = 0;
+    uint8_t apChannel = 0;  // 0 = not yet scanned; first AP start picks the least-congested 1/6/11
 };
