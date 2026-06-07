@@ -386,6 +386,39 @@
           <span id="mnPilotModalFreq" style="margin-left:10px;font-size:13px;color:var(--secondary-color);"></span>
         </div>
         <div style="font-size:12px;color:var(--secondary-color);margin-bottom:14px;">Wait ~20 seconds after changing band/channel for the new frequency to calibrate.</div>
+
+        <!-- Enter RSSI / Exit RSSI — two-row layout that fits the narrow modal.
+             Row 1: label + numeric value + −/+ buttons.  Row 2: the range slider
+             on its own line so it can use 100% width without overflow. -->
+        <div style="margin-bottom:14px;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <label for="mnPilotModalEnter" style="flex:1; margin:0;">Enter RSSI:</label>
+            <span id="mnPilotModalEnterSpan" style="min-width:32px; text-align:right; font-variant-numeric:tabular-nums;">120</span>
+            <button class="rssi-step-btn" type="button" onclick="mnModalStepRssi('enter',-1)">&minus;</button>
+            <button class="rssi-step-btn" type="button" onclick="mnModalStepRssi('enter',1)">+</button>
+          </div>
+          <input type="range" min="20" max="255" step="1" id="mnPilotModalEnter" value="120" oninput="mnModalUpdateEnterRssi(this.value)" style="width:100%; display:block; box-sizing:border-box;" />
+        </div>
+
+        <div style="margin-bottom:14px;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:6px;">
+            <label for="mnPilotModalExit" style="flex:1; margin:0;">Exit RSSI:</label>
+            <span id="mnPilotModalExitSpan" style="min-width:32px; text-align:right; font-variant-numeric:tabular-nums;">100</span>
+            <button class="rssi-step-btn" type="button" onclick="mnModalStepRssi('exit',-1)">&minus;</button>
+            <button class="rssi-step-btn" type="button" onclick="mnModalStepRssi('exit',1)">+</button>
+          </div>
+          <input type="range" min="20" max="255" step="1" id="mnPilotModalExit" value="100" oninput="mnModalUpdateExitRssi(this.value)" style="width:100%; display:block; box-sizing:border-box;" />
+        </div>
+
+        <!-- Calibration Wizard trigger — opens the same wizard the single mode
+             uses, but routes every fetch via the master's proxy to this client. -->
+        <div style="margin-bottom:14px;">
+          <button id="mnPilotModalCalibrateBtn" type="button" onclick="mnStartCalibrationWizardForModal()" style="width:100%;background:var(--primary-color);color:#fff;">Run Calibration Wizard</button>
+          <div style="font-size:12px;color:var(--secondary-color);margin-top:4px;">
+            Starts the calibration wizard for this client. Cannot be used during an active race.
+          </div>
+        </div>
+
         <div class="config-item" style="margin-bottom:14px;">
           <label for="mnPilotModalSkip">Ignore Race Director Start/Stop</label>
           <input type="checkbox" id="mnPilotModalSkip">
@@ -432,7 +465,7 @@
     <div id="calibrationWizardModal" class="modal" style="display: none;">
       <div class="modal-content wizard-modal">
         <div id="wizardRecording" style="display: none;">
-          <h3>Calibration Wizard - Recording</h3>
+          <h3>Calibration Wizard - Recording<span class="wizardPilotSuffix"></span></h3>
           <div class="wizard-instructions">
             <p><strong>Instructions:</strong></p>
             <ol>
@@ -465,7 +498,7 @@
         </div>
 
         <div id="wizardMarking" style="display: none;">
-          <h3>Calibration Wizard - Mark Lap Peaks</h3>
+          <h3>Calibration Wizard - Mark Lap Peaks<span class="wizardPilotSuffix"></span></h3>
           <div class="wizard-instructions">
             <p><strong>3 peaks (one for each lap) need to be marked to calibrate:</strong></p>
             <p><strong></strong></p>
@@ -504,7 +537,7 @@
         </div>
 
         <div id="wizardResults" style="display: none;">
-          <h3>Calibration Wizard - Results</h3>
+          <h3>Calibration Wizard - Results<span class="wizardPilotSuffix"></span></h3>
           <div class="wizard-results-box">
             <div class="result-item">
               <label>Calculated Enter RSSI:</label>

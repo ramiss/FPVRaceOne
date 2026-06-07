@@ -2100,9 +2100,12 @@ EEPROM:\n\
 
             String macAddress   = obj["mac"]      | "";
             String apSuffix     = obj["apSuffix"] | "";   // last 6 hex chars of the client's broadcast SSID
+            uint8_t enterRssi   = obj["enterRssi"] | 0;
+            uint8_t exitRssi    = obj["exitRssi"]  | 0;
             uint8_t assignedId  = obj["nodeId"]   | 0;    // client's self-reported nodeId (0 on first registration)
             bool ok = multiNode->handleRegister(pilotName,
                                                  pilotColor, bandIndex, channelIndex, freq,
+                                                 enterRssi, exitRssi,
                                                  staIP, clientIP,
                                                  macAddress, apSuffix, assignedId);
             if (ok) pushMultiNodeState();  // give the new client an immediate Race View snapshot
@@ -2294,7 +2297,9 @@ EEPROM:\n\
             }
             JsonObject obj        = json.as<JsonObject>();
             uint8_t    nodeId           = obj["nodeId"]           | 0;
+            bool       hasPilotName     = obj.containsKey("pilotName");
             String     pilotName        = obj["pilotName"]        | "";
+            bool       hasPilotColor    = obj.containsKey("pilotColor");
             uint32_t   pilotColor       = obj["pilotColor"]       | 0x0080FFu;
             bool       hasBand          = obj.containsKey("band");
             uint8_t    bandIndex        = obj["band"]             | 0;
@@ -2302,6 +2307,10 @@ EEPROM:\n\
             uint16_t   freq             = obj["freq"]             | 0;
             bool       hasSkip          = obj.containsKey("skipMasterStart");
             uint8_t    skipMasterStart  = obj["skipMasterStart"]  | 0;
+            bool       hasEnter         = obj.containsKey("enterRssi");
+            uint8_t    enterRssi        = obj["enterRssi"]        | 0;
+            bool       hasExit          = obj.containsKey("exitRssi");
+            uint8_t    exitRssi         = obj["exitRssi"]         | 0;
 
             String staIP;
             const auto& nodes = multiNode->getNodes();
@@ -2320,22 +2329,37 @@ EEPROM:\n\
                 http.addHeader("Content-Type", "application/json");
                 http.setTimeout(2000);
                 DynamicJsonDocument body(256);
-                body["pilotName"]  = pilotName;
-                body["pilotColor"] = pilotColor;
+                // All fields are conditional — the wizard-only RSSI push, for
+                // example, must not blank the pilot's name as a side effect.
+                if (hasPilotName)  body["pilotName"]  = pilotName;
+                if (hasPilotColor) body["pilotColor"] = pilotColor;
                 if (hasBand) {
                     body["band"] = bandIndex;
                     body["chan"] = chanIndex;
                     body["freq"] = freq;
                 }
-                if (hasSkip) body["mnSkipMasterStart"] = skipMasterStart;
+                if (hasSkip)  body["mnSkipMasterStart"] = skipMasterStart;
+                if (hasEnter) body["enterRssi"]         = enterRssi;
+                if (hasExit)  body["exitRssi"]          = exitRssi;
                 String bodyStr;
                 serializeJson(body, bodyStr);
                 sent = (http.POST(bodyStr) == 200);
                 http.end();
             }
             if (sent) {
-                multiNode->updateNodePilot(nodeId, pilotName, pilotColor);
-                if (hasBand) multiNode->updateNodeChannel(nodeId, bandIndex, chanIndex, freq);
+                if (hasPilotName || hasPilotColor) multiNode->updateNodePilot(nodeId, pilotName, pilotColor);
+                if (hasBand)  multiNode->updateNodeChannel(nodeId, bandIndex, chanIndex, freq);
+                // Update master's cached NodeInfo for RSSI so the modal sees fresh values
+                // without waiting for the next registration.
+                if (hasEnter || hasExit) {
+                    for (auto& n : const_cast<std::vector<NodeInfo>&>(multiNode->getNodes())) {
+                        if (n.nodeId == nodeId) {
+                            if (hasEnter) n.enterRssi = enterRssi;
+                            if (hasExit)  n.exitRssi  = exitRssi;
+                            break;
+                        }
+                    }
+                }
                 pushMultiNodeState();
             }
             request->send(sent ? 200 : 502, "application/json",
@@ -2377,6 +2401,8 @@ EEPROM:\n\
             if (obj.containsKey("chan"))              patch["chan"]              = obj["chan"].as<int>();
             if (obj.containsKey("freq"))              patch["freq"]              = obj["freq"].as<int>();
             if (obj.containsKey("mnSkipMasterStart")) patch["mnSkipMasterStart"] = obj["mnSkipMasterStart"].as<uint8_t>();
+            if (obj.containsKey("enterRssi"))         patch["enterRssi"]         = obj["enterRssi"].as<uint8_t>();
+            if (obj.containsKey("exitRssi"))          patch["exitRssi"]          = obj["exitRssi"].as<uint8_t>();
             conf->fromJson(patch.as<JsonObject>());
             conf->write();
             // Push update to this client's browser so name/color reflect immediately
@@ -2415,6 +2441,122 @@ EEPROM:\n\
         multiNode->queueRacePreArm();
         pushMultiNodeState();   // tells client Race View tabs to show "Arm your quad" + play audio if enabled
         request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
+
+    // ─── Calibration Wizard remote control ──────────────────────────────────
+    //
+    // The director runs the existing calibration wizard on the master's browser
+    // and every wizard fetch is proxied here to the target client.  Three
+    // endpoints mirror the client-local /calibration/{start,data,stop}.  All
+    // three enforce:
+    //   • request issued only from the master mode (403 otherwise)
+    //   • target client exists and is online
+    //   • neither master nor target is in an active race
+    //   • only one wizard active across all clients at a time
+    //
+    // The "active wizard" is tracked here in a file-scope variable (single AsyncTCP
+    // task means we don't need a mutex).
+    static uint8_t calActiveNodeId = 0;
+
+    auto calLookupStaIP = [this](uint8_t nodeId) -> String {
+        for (const auto& n : multiNode->getNodes()) {
+            if (n.nodeId == nodeId && n.online) return n.staIP;
+        }
+        return String();
+    };
+
+    server.on("/api/multinode/calibration/start", HTTP_POST, [this, calLookupStaIP](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isMasterMode()) {
+            request->send(403, "application/json", "{\"error\":\"master only\"}"); return;
+        }
+        if (!request->hasParam("nodeId")) {
+            request->send(400, "application/json", "{\"error\":\"missing nodeId\"}"); return;
+        }
+        uint8_t nodeId = (uint8_t)request->getParam("nodeId")->value().toInt();
+        if (calActiveNodeId != 0 && calActiveNodeId != nodeId) {
+            request->send(409, "application/json", "{\"error\":\"another calibration is already running\"}"); return;
+        }
+        // Block while the master itself is running a race
+        if (timer && timer->isRunning()) {
+            request->send(409, "application/json", "{\"error\":\"master race active\"}"); return;
+        }
+        // Block while the target client is running a race
+        for (const auto& n : multiNode->getNodes()) {
+            if (n.nodeId == nodeId && n.running) {
+                request->send(409, "application/json", "{\"error\":\"client race active\"}"); return;
+            }
+        }
+        String staIP = calLookupStaIP(nodeId);
+        if (staIP.isEmpty()) {
+            request->send(404, "application/json", "{\"error\":\"client offline\"}"); return;
+        }
+        HTTPClient http;
+        String url = "http://" + staIP + "/calibration/start";
+        int code = 0;
+        if (http.begin(url)) {
+            http.setTimeout(2000);
+            code = http.POST("");
+            http.end();
+        }
+        if (code == 200) calActiveNodeId = nodeId;
+        request->send(code == 200 ? 200 : 502, "application/json",
+                      code == 200 ? "{\"status\":\"OK\"}" : "{\"status\":\"PROXY_FAILED\"}");
+    });
+
+    server.on("/api/multinode/calibration/data", HTTP_GET, [this, calLookupStaIP](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isMasterMode()) {
+            request->send(403, "application/json", "{\"error\":\"master only\"}"); return;
+        }
+        if (!request->hasParam("nodeId")) {
+            request->send(400, "application/json", "{\"error\":\"missing nodeId\"}"); return;
+        }
+        uint8_t nodeId = (uint8_t)request->getParam("nodeId")->value().toInt();
+        String staIP = calLookupStaIP(nodeId);
+        if (staIP.isEmpty()) {
+            request->send(404, "application/json", "{\"error\":\"client offline\"}"); return;
+        }
+        // Forward offset + limit if provided
+        String qs;
+        if (request->hasParam("offset")) { qs += "offset="; qs += request->getParam("offset")->value(); }
+        if (request->hasParam("limit"))  { if (qs.length()) qs += "&"; qs += "limit=";  qs += request->getParam("limit")->value(); }
+        String url = "http://" + staIP + "/calibration/data";
+        if (qs.length()) { url += "?"; url += qs; }
+        HTTPClient http;
+        if (!http.begin(url)) {
+            request->send(502, "application/json", "{\"error\":\"proxy begin failed\"}"); return;
+        }
+        http.setTimeout(3000);
+        int code = http.GET();
+        String body = (code == 200) ? http.getString() : String("{}");
+        http.end();
+        request->send(code == 200 ? 200 : 502, "application/json", body);
+    });
+
+    server.on("/api/multinode/calibration/stop", HTTP_POST, [this, calLookupStaIP](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isMasterMode()) {
+            request->send(403, "application/json", "{\"error\":\"master only\"}"); return;
+        }
+        if (!request->hasParam("nodeId")) {
+            request->send(400, "application/json", "{\"error\":\"missing nodeId\"}"); return;
+        }
+        uint8_t nodeId = (uint8_t)request->getParam("nodeId")->value().toInt();
+        String staIP = calLookupStaIP(nodeId);
+        // Always clear the active flag — even on proxy failure we want a stuck
+        // session to time out cleanly so the director can retry.
+        if (calActiveNodeId == nodeId) calActiveNodeId = 0;
+        if (staIP.isEmpty()) {
+            request->send(404, "application/json", "{\"error\":\"client offline\"}"); return;
+        }
+        HTTPClient http;
+        String url = "http://" + staIP + "/calibration/stop";
+        int code = 0;
+        if (http.begin(url)) {
+            http.setTimeout(2000);
+            code = http.POST("");
+            http.end();
+        }
+        request->send(code == 200 ? 200 : 502, "application/json",
+                      code == 200 ? "{\"status\":\"OK\"}" : "{\"status\":\"PROXY_FAILED\"}");
     });
 
     // /api/multinode/recruit — master scans for nearby FPVRaceOne units and

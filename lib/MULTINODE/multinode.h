@@ -25,6 +25,8 @@ struct NodeInfo {
     uint8_t  bandIndex    = 0;
     uint8_t  channelIndex = 0;
     uint16_t frequency    = 0;
+    uint8_t  enterRssi    = 0;   // sent by client in registration so the master's Edit Pilot modal can show + edit it
+    uint8_t  exitRssi     = 0;
     String   clientIP;   // client's own AP IP (master uses this to push commands)
     String   staIP;      // client's STA IP assigned by master's DHCP
     String   macAddress; // client's WiFi MAC — primary unique key
@@ -75,6 +77,7 @@ public:
     bool   handleRegister(const String& pilotName,
                           uint32_t pilotColor,
                           uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
+                          uint8_t enterRssi, uint8_t exitRssi,
                           const String& staIP, const String& clientIP,
                           const String& macAddress,
                           const String& apSuffix,

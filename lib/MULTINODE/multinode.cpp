@@ -180,6 +180,8 @@ void MultiNodeManager::_sendRegistration() {
     doc["clientIP"]      = MULTINODE_CLIENT_AP_IP;
     doc["nodeId"]        = _myNodeId;  // 0 on first registration
     doc["mac"]           = _myMacAddress;
+    doc["enterRssi"]     = _conf->getEnterRssi();
+    doc["exitRssi"]      = _conf->getExitRssi();
     // Last 6 hex chars of our own AP SSID (FPVRaceOne_xxxxxx).  Master shows
     // this in the Edit Pilot modal so the director can correlate a slot to a
     // physical unit by its broadcast SSID.
@@ -301,6 +303,7 @@ bool MultiNodeManager::_postToMasterWithResponse(const String& endpoint, const S
 bool MultiNodeManager::handleRegister(const String& pilotName,
                                        uint32_t pilotColor,
                                        uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
+                                       uint8_t enterRssi, uint8_t exitRssi,
                                        const String& staIP, const String& clientIP,
                                        const String& macAddress,
                                        const String& apSuffix,
@@ -324,6 +327,8 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
             n.bandIndex     = bandIndex;
             n.channelIndex  = channelIndex;
             n.frequency     = frequency;
+            n.enterRssi     = enterRssi;
+            n.exitRssi      = exitRssi;
             n.clientIP      = clientIP;
             n.staIP         = staIP;
             if (macAddress.length() > 0) n.macAddress = macAddress;
@@ -373,6 +378,8 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     n.bandIndex     = bandIndex;
     n.channelIndex  = channelIndex;
     n.frequency     = frequency;
+    n.enterRssi     = enterRssi;
+    n.exitRssi      = exitRssi;
     n.staIP         = staIP;
     n.clientIP      = clientIP;
     n.macAddress    = macAddress;
@@ -512,6 +519,8 @@ String MultiNodeManager::getNodesToJson() const {
         o["clientIP"]       = n.clientIP;
         o["mac"]            = n.macAddress;
         o["apSuffix"]       = n.apSuffix;
+        o["enterRssi"]      = n.enterRssi;
+        o["exitRssi"]       = n.exitRssi;
         JsonArray laps      = o.createNestedArray("laps");
         // Send all stored laps so the race view can compute full stats
         for (size_t i = 0; i < n.laps.size(); i++) {
@@ -795,14 +804,28 @@ void MultiNodeManager::_broadcastRaceStop() {
         }
         HTTPClient http;
         String url = "http://" + n.staIP + "/timer/masterStop";
+        bool acked = false;
         if (http.begin(url)) {
             http.setTimeout(500);
             int code = http.POST("");
             http.end();
+            acked = (code == 200);
             DEBUG("[MULTINODE] Race stop → node %u (%s): HTTP %d\n", n.nodeId, n.staIP.c_str(), code);
+        }
+        // Optimistically mark the client stopped on successful ack so the
+        // master's view doesn't flag the last few clients as "Solo race in
+        // progress" during the lag between this broadcast and their next
+        // heartbeat (~2 s).  If the client somehow doesn't actually stop,
+        // its next heartbeat will reassert running=true and we'll see it.
+        if (acked) {
+            n.running     = false;
+            n.independent = false;
         }
         vTaskDelay(1);
     }
+    // Republish so the master UI + connected client Race Views reflect the
+    // post-stop state without waiting for the 2 s poll / next heartbeat.
+    if (_webserver) _webserver->pushMultiNodeState();
 }
 
 String MultiNodeManager::getMasterStatusJson() const {

@@ -2853,7 +2853,12 @@ function addLap(lapStr) {
   // Highlight fastest lap
   highlightFastestLap();
 
-  const lapSpeak = formatMsSpeak(Math.round(parseFloat(lapStr) * 1000));
+  // The audio-announcer's pattern matchers expect raw numeric time (e.g.
+  // "12.34") so they can route the spoken time through speakNumber's
+  // pre-recorded digit clips — those honor this.rate (audio.playbackRate)
+  // reliably across browsers, unlike Web Speech which varies.
+  // formatMsSpeak("12 point 3 4") would defeat that.
+  const lapSpeak = lapStr;
   switch (announcerSelect.options[announcerSelect.selectedIndex].value) {
     case "beep":
       beep(100, 330, "square");
@@ -5026,6 +5031,28 @@ let wizardState = {
   calculatedExit: 0
 };
 
+// Calibration wizard target.  0 = local (the wizard runs against this device's
+// own /calibration/* endpoints — single-mode behaviour).  >0 = remote: the
+// wizard polls /api/multinode/calibration/* with this nodeId and the master
+// proxies every call to the matching client.  Set by mnStartCalibrationWizard
+// before opening the wizard; cleared by closeCalibrationWizard.
+let wizardTargetNodeId = 0;
+
+// Build a wizard URL.  In remote mode every wizard call routes through the
+// master's proxy with the target nodeId appended; in local mode the original
+// /calibration/<suffix> path is used.  extraQuery is concatenated with the
+// correct separator (& or ?) so callers don't have to think about it.
+function _wizardPath(suffix, extraQuery) {
+  if (wizardTargetNodeId > 0) {
+    let url = `/api/multinode/calibration/${suffix}?nodeId=${wizardTargetNodeId}`;
+    if (extraQuery) url += `&${extraQuery}`;
+    return url;
+  }
+  let url = `/calibration/${suffix}`;
+  if (extraQuery) url += `?${extraQuery}`;
+  return url;
+}
+
 function startCalibrationWizard() {
   // Stop any previous run cleanly
   if (wizardRecordingTimerId) {
@@ -5055,11 +5082,11 @@ function startCalibrationWizard() {
   document.getElementById('wizardResults').style.display = 'none';
 
   // Start recording
-  fetch('/calibration/start', { method: 'POST', signal: wizardAbortController.signal })
+  fetch(_wizardPath('start'), { method: 'POST', signal: wizardAbortController.signal })
     .then(async (response) => {
       if (!response.ok) {
         const t = await response.text().catch(() => '');
-        throw new Error(`POST /calibration/start failed: HTTP ${response.status} ${response.statusText} ${t}`);
+        throw new Error(`POST calibration/start failed: HTTP ${response.status} ${response.statusText} ${t}`);
       }
       // server returns JSON but don’t *require* parsing
       await response.text().catch(() => '');
@@ -5076,19 +5103,19 @@ function startCalibrationWizard() {
 
 
 async function fetchCalibrationMeta(signal) {
-  const resp = await fetch(`/calibration/data?limit=0`, { signal });
+  const resp = await fetch(_wizardPath('data', 'limit=0'), { signal });
   if (!resp.ok) {
     const t = await resp.text().catch(() => '');
-    throw new Error(`GET /calibration/data?limit=0 failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
+    throw new Error(`GET calibration/data?limit=0 failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
   }
   return await resp.json(); // { total: N }
 }
 
 async function fetchCalibrationPage(offset, limit, signal) {
-  const resp = await fetch(`/calibration/data?offset=${offset}&limit=${limit}`, { signal });
+  const resp = await fetch(_wizardPath('data', `offset=${offset}&limit=${limit}`), { signal });
   if (!resp.ok) {
     const t = await resp.text().catch(() => '');
-    throw new Error(`GET /calibration/data page failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
+    throw new Error(`GET calibration/data page failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
   }
   return await resp.json(); // { total, offset, limit, count, data:[...] }
 }
@@ -5176,7 +5203,7 @@ async function stopCalibrationWizard() {
   showWizardProcessing('Processing recording…', 'Downloading samples from the device and detecting peaks.');
 
   try {
-    const resp = await fetch('/calibration/stop', { method: 'POST', signal: wizardAbortController?.signal });
+    const resp = await fetch(_wizardPath('stop'), { method: 'POST', signal: wizardAbortController?.signal });
 
     if (!resp.ok) {
       const t = await resp.text().catch(() => '');
@@ -5614,9 +5641,41 @@ async function calculateThresholds() {
   document.getElementById('calculatedExitRssi').textContent = calculatedExit;
 }
 
-function applyCalculatedThresholds() {
-  if (enterRssiInput) { enterRssiInput.value = wizardState.calculatedEnter; updateEnterRssi(enterRssiInput, wizardState.calculatedEnter); }
-  if (exitRssiInput)  { exitRssiInput.value  = wizardState.calculatedExit;  updateExitRssi(exitRssiInput,  wizardState.calculatedExit);  }
+async function applyCalculatedThresholds() {
+  const enter = wizardState.calculatedEnter;
+  const exit  = wizardState.calculatedExit;
+
+  if (wizardTargetNodeId > 0) {
+    // Remote wizard — push the new thresholds to the client via the master's
+    // editPilot proxy.  Only enterRssi/exitRssi are sent so the rest of the
+    // client's config (pilot name, freq, etc.) is untouched.
+    const nodeId = wizardTargetNodeId;
+    try {
+      const r = await fetch('/api/multinode/editPilot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ nodeId, enterRssi: enter, exitRssi: exit }),
+      });
+      if (!r.ok) {
+        alert('Could not push calibration to client — is the node still connected?');
+        return;
+      }
+      // Reflect on master's cached nodes so the Edit Pilot modal reopens with
+      // the new values without waiting for the next heartbeat.
+      const node = (mnCurrentNodes || []).find(n => n.nodeId === nodeId);
+      if (node) { node.enterRssi = enter; node.exitRssi = exit; }
+    } catch (e) {
+      alert('Could not push calibration to client: ' + (e && e.message ? e.message : e));
+      return;
+    }
+    closeCalibrationWizard();
+    return;
+  }
+
+  // Local single-mode wizard — original behaviour: update the page's own
+  // enter/exit sliders and persist via /config.
+  if (enterRssiInput) { enterRssiInput.value = enter; updateEnterRssi(enterRssiInput, enter); }
+  if (exitRssiInput)  { exitRssiInput.value  = exit;  updateExitRssi(exitRssiInput,  exit);  }
   saveConfig();
   closeCalibrationWizard();
 }
@@ -5694,9 +5753,9 @@ async function restartCalibrationWizard() {
   dismissPeakSpreadWarning();
   // Tell the device to drop out of CALIBRATION_WIZARD state cleanly.
   // Best-effort — if the POST fails we still proceed; startCalibrationWizard
-  // will issue its own /calibration/start which the firmware will accept.
+  // will issue its own calibration/start which the firmware will accept.
   try {
-    await fetch('/calibration/stop', { method: 'POST' });
+    await fetch(_wizardPath('stop'), { method: 'POST' });
   } catch (_) {}
   // startCalibrationWizard resets wizardState and reshows wizardRecording.
   startCalibrationWizard();
@@ -5711,7 +5770,7 @@ function cancelCalibrationWizard() {
   }
 
   // Tell firmware to stop (best effort), then close
-  fetch('/calibration/stop', { method: 'POST' })
+  fetch(_wizardPath('stop'), { method: 'POST' })
     .then(() => closeCalibrationWizard())
     .catch(() => closeCalibrationWizard());
 }
@@ -5735,6 +5794,10 @@ function closeCalibrationWizard() {
   document.getElementById('wizardResults').style.display = 'none';
   hideWizardProcessing();
   dismissPeakSpreadWarning();
+  // Reset remote target — next wizard run defaults back to local unless
+  // mnStartCalibrationWizard sets it again.
+  wizardTargetNodeId = 0;
+  document.querySelectorAll('.wizardPilotSuffix').forEach(el => { el.textContent = ''; });
 }
 
 // WiFi Settings Functions
@@ -7044,6 +7107,17 @@ function _ssidSuffix(ssid) {
   return (ssid && ssid.length >= 6) ? ssid.substring(ssid.length - 6) : '';
 }
 
+// Slot UI label.  Backend stays numeric (NodeInfo.nodeId, master config keys,
+// /api/multinode/* payloads) but every user-visible reference uses A-G so the
+// slot identifier doesn't get visually confused with the leaderboard rank
+// numbers shown above the cards.  Master (nodeId 0) returns empty so card
+// headers don't get a confusing "@" prefix.
+function _slotLetter(nodeId) {
+  const id = Number(nodeId);
+  if (!Number.isFinite(id) || id < 1 || id > 26) return '';
+  return String.fromCharCode(64 + id);
+}
+
 // Update the status bar above the race clock based on current multi-node mode.
 function mnUpdateRaceStatusBar() {
   rvShowTabIfClient();
@@ -7199,6 +7273,16 @@ function _mnMasterEntry() {
 // opts.containerId — render into a different container (defaults to mn-race-container).
 // opts.readOnly    — when true, strips edit buttons and TAP handlers for the client Race View.
 // opts.skipMnState — when true, skip mnCurrentNodes assignment + mnUpdateRaceDataButtons (used by client view).
+// Cached HTML per container.  The 2-second polling loop calls mnRenderRaceTab
+// even when nothing changed; setting innerHTML re-creates every DOM node, which
+// kills hover states and — worse — drops in-flight clicks because the button
+// the user mousedown'd on no longer exists by mouseup.  Compare new HTML
+// against the last write per container and skip the assignment when identical.
+window.__mnLastRaceTabHtml = window.__mnLastRaceTabHtml || {};
+// Set true by mnRenderRaceTab when it deferred because the Edit Pilot modal was
+// open; checked by mnClosePilotModal to fire the deferred render.
+window.__mnRaceTabRenderPending = false;
+
 function mnRenderRaceTab(nodes, opts) {
   opts = opts || {};
   const containerId = opts.containerId || 'mn-race-container';
@@ -7216,6 +7300,17 @@ function mnRenderRaceTab(nodes, opts) {
     if (!masterView || masterView.style.display === 'none') return;
     const b1 = document.getElementById('mnStartRaceBtnMain'); if (b1) b1.disabled = mnRaceRunning;
     const b2 = document.getElementById('mnStopRaceBtnMain');  if (b2) b2.disabled = !mnRaceRunning;
+
+    // Don't rebuild the DOM while the Edit Pilot modal is open.  The cards
+    // underneath are obscured anyway, and re-rendering them every 2s with
+    // innerHTML= breaks the buttons the user is about to click after closing
+    // the modal: mousedown on a stale button + re-render + mouseup = no click.
+    // Stash a flag so mnClosePilotModal can flush a fresh render afterward.
+    const pilotModal = document.getElementById('mnPilotModal');
+    if (pilotModal && pilotModal.style.display === 'flex') {
+      window.__mnRaceTabRenderPending = true;
+      return;
+    }
   }
 
   const container = document.getElementById(containerId);
@@ -7286,7 +7381,7 @@ function mnRenderRaceTab(nodes, opts) {
 
   ranked.forEach((n, i) => {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
-    const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
+    const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + _slotLetter(n.nodeId));
     const hostTag  = n.isMaster ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Host</span>' : '';
     const meTag    = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
       ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Me</span>' : '';
@@ -7311,19 +7406,26 @@ function mnRenderRaceTab(nodes, opts) {
   html += '<div class="mn-pilot-cards">';
   allSlots.forEach(n => {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
-    const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId);
+    const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + _slotLetter(n.nodeId));
 
     if (n.empty) {
       html += `<div class="mn-pilot-card mn-pilot-card-empty">
-        <div class="mn-pilot-card-header mn-pilot-card-header-empty">Slot ${n.nodeId}</div>
+        <div class="mn-pilot-card-header mn-pilot-card-header-empty">Slot ${_slotLetter(n.nodeId)}</div>
         <div class="mn-pilot-card-laps mn-card-empty-label">Not connected</div>
       </div>`;
       return;
     }
 
     const _isExcludedThisRace = n.excludedFromCurrentRace || _pendingExcludes.has(n.nodeId);
+    // Grace window after Stop All — keep the orange "solo" badge color off while
+    // the master is still waiting for the last clients to acknowledge the stop.
+    // Pilots who genuinely have skipEnabled or were excluded still show solo so
+    // those legitimate cases aren't masked.
+    const _mnRecentlyStoppedBadge = (typeof window.__mnLastRaceStopAt === 'number')
+      && (Date.now() - window.__mnLastRaceStopAt) < 5000;
+    const _mnGraceSuppressSolo = _mnRecentlyStoppedBadge && !n.skipEnabled && !_isExcludedThisRace;
     const isSoloRacing = n.running && !n.isMaster &&
-      (!raceRunning || _isExcludedThisRace);
+      (!raceRunning || _isExcludedThisRace) && !_mnGraceSuppressSolo;
     const canTap  = !readOnly && mnDevMode && raceRunning && !n.independent && !isSoloRacing;
     const devAttr = canTap ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.laps.length},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
     // Show Racing badge as soon as raceRunning flips (pre-arm) for non-excluded nodes, matching the master card.
@@ -7334,15 +7436,24 @@ function mnRenderRaceTab(nodes, opts) {
     const cardEditBtn = (n.isMaster || readOnly) ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
     const meBadge = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
       ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Me</span>' : '';
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${n.nodeId}: ${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    const slotPrefix = n.isMaster ? '' : `${_slotLetter(n.nodeId)}: `;
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${slotPrefix}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {
       html += `<div class="mn-card-solo-label mn-card-solo-label-idle">Not racing<br>(ignoring race director)</div>`;
     }
 
-    // Solo race in progress: always show for skip-enabled pilots; only show for others when no master race is active
-    if (n.running && !n.isMaster && (n.skipEnabled || _isExcludedThisRace || !raceRunning)) {
+    // Solo race in progress: always show for skip-enabled pilots; only show for others when no master race is active.
+    // Grace window: within 5 s of a Stop All click, suppress the label for
+    // non-skip / non-excluded pilots — those are clients whose stop POST or
+    // heartbeat hasn't round-tripped yet.  Any pilot whose running flag is
+    // still true *after* the grace window genuinely is solo racing and we
+    // want to show that.
+    const _mnRecentlyStopped = (typeof window.__mnLastRaceStopAt === 'number')
+      && (Date.now() - window.__mnLastRaceStopAt) < 5000;
+    const _mnSoloPending = _mnRecentlyStopped && !n.skipEnabled && !_isExcludedThisRace;
+    if (n.running && !n.isMaster && (n.skipEnabled || _isExcludedThisRace || !raceRunning) && !_mnSoloPending) {
       const soloLabel = n.skipEnabled
         ? 'Solo race in progress<br>(ignoring race director)'
         : _isExcludedThisRace
@@ -7371,7 +7482,13 @@ function mnRenderRaceTab(nodes, opts) {
   });
   html += '</div>';
 
-  container.innerHTML = html;
+  // Skip the DOM swap when output hasn't actually changed.  Most 2-second polls
+  // return identical data; without this guard each one nukes hover state and
+  // can drop an in-flight click on the edit-pilot button.
+  if (window.__mnLastRaceTabHtml[containerId] !== html) {
+    container.innerHTML = html;
+    window.__mnLastRaceTabHtml[containerId] = html;
+  }
   if (!readOnly) mnUpdateRaceDataButtons();
 }
 
@@ -7423,7 +7540,7 @@ function mnOpenPilotModal(nodeId) {
   document.getElementById('mnPilotModalTitle').textContent =
     name ? `Edit Pilot - ${name}` : 'Edit Pilot';
   document.getElementById('mnPilotModalSubtitle').textContent =
-    apSuffix ? `Node ${nodeId} - ${apSuffix}` : `Node ${nodeId}`;
+    apSuffix ? `Node ${_slotLetter(nodeId)} - ${apSuffix}` : `Node ${_slotLetter(nodeId)}`;
   document.getElementById('mnPilotModalName').value  = name;
   const mnColorSelect  = document.getElementById('mnPilotModalColor');
   const mnColorPreview = document.getElementById('mnPilotModalColorPreview');
@@ -7442,13 +7559,120 @@ function mnOpenPilotModal(nodeId) {
   }
   const skipEl = document.getElementById('mnPilotModalSkip');
   if (skipEl) skipEl.checked = !!(node && node.skipEnabled);
+  // Enter/Exit RSSI — populate from the node's last-reported values (sent by
+  // the client in registration; updated by the wizard / Save flow).
+  const enterEl = document.getElementById('mnPilotModalEnter');
+  const exitEl  = document.getElementById('mnPilotModalExit');
+  const enterSp = document.getElementById('mnPilotModalEnterSpan');
+  const exitSp  = document.getElementById('mnPilotModalExitSpan');
+  const enterVal = (node && Number.isFinite(node.enterRssi) && node.enterRssi > 0) ? node.enterRssi : 120;
+  const exitVal  = (node && Number.isFinite(node.exitRssi)  && node.exitRssi  > 0) ? node.exitRssi  : 100;
+  if (enterEl) enterEl.value = enterVal;
+  if (exitEl)  exitEl.value  = exitVal;
+  if (enterSp) enterSp.textContent = enterVal;
+  if (exitSp)  exitSp.textContent  = exitVal;
+
   document.getElementById('mnPilotModal').style.display = 'flex';
   setTimeout(() => document.getElementById('mnPilotModalName').focus(), 50);
+}
+
+// Slider helpers for the modal — mirror updateEnterRssi / updateExitRssi /
+// stepRssi from the Calibration page so the +/- buttons feel identical.  Only
+// mutate the modal's local state here; persistence happens in mnSavePilotModal.
+function mnModalUpdateEnterRssi(value) {
+  const v       = Math.max(20, Math.min(255, parseInt(value, 10) || 0));
+  const exitEl  = document.getElementById('mnPilotModalExit');
+  const exitV   = exitEl ? parseInt(exitEl.value, 10) || 0 : 0;
+  const clamped = Math.max(v, exitV + 1);  // enter must be > exit
+  const enterEl = document.getElementById('mnPilotModalEnter');
+  const span    = document.getElementById('mnPilotModalEnterSpan');
+  if (enterEl) enterEl.value = clamped;
+  if (span)    span.textContent = clamped;
+}
+
+function mnModalUpdateExitRssi(value) {
+  const v       = Math.max(20, Math.min(255, parseInt(value, 10) || 0));
+  const enterEl = document.getElementById('mnPilotModalEnter');
+  const enterV  = enterEl ? parseInt(enterEl.value, 10) || 0 : 0;
+  const clamped = Math.min(v, enterV - 1);  // exit must be < enter
+  const exitEl  = document.getElementById('mnPilotModalExit');
+  const span    = document.getElementById('mnPilotModalExitSpan');
+  if (exitEl) exitEl.value = clamped;
+  if (span)   span.textContent = clamped;
+}
+
+function mnModalStepRssi(which, delta) {
+  if (which === 'enter') {
+    const el = document.getElementById('mnPilotModalEnter');
+    if (!el) return;
+    mnModalUpdateEnterRssi((parseInt(el.value, 10) || 0) + delta);
+  } else {
+    const el = document.getElementById('mnPilotModalExit');
+    if (!el) return;
+    mnModalUpdateExitRssi((parseInt(el.value, 10) || 0) + delta);
+  }
+}
+
+// Launch the existing calibration wizard against the currently-edited client.
+// Confirms with the director, blocks if a race is active, sets
+// wizardTargetNodeId, closes the modal, then opens the wizard.  The wizard's
+// own UI takes over and routes every fetch through the master's proxy.
+function mnStartCalibrationWizardForModal() {
+  console.log('[mnCalWizard] click — _mnModalNodeId =', _mnModalNodeId);
+  try {
+    if (!_mnModalNodeId) { alert('No pilot selected.'); return; }
+    const nodeId = _mnModalNodeId;
+    const node = (mnCurrentNodes || []).find(n => n.nodeId === nodeId);
+    const pilotLabel = (node && node.pilotName) ? node.pilotName : ('Node ' + _slotLetter(nodeId));
+
+    // Local block — server also enforces, but check here for a friendlier message.
+    if (mnRaceRunning) {
+      alert('Cannot run calibration during an active race. Stop the race first.');
+      return;
+    }
+    if (node && node.running) {
+      alert(`${pilotLabel} is currently running their own race — cannot start calibration.`);
+      return;
+    }
+
+    const ok = confirm(
+      `Run the calibration wizard for ${pilotLabel}?\n\n` +
+      `${pilotLabel} will need to fly past the gate while you mark each pass. ` +
+      `This will overwrite the current Enter/Exit RSSI on that node.`
+    );
+    if (!ok) return;
+
+    // Hand off to the existing wizard.  Close the modal first so the wizard
+    // modal isn't stacked on top of it.
+    mnClosePilotModal();
+    wizardTargetNodeId = nodeId;
+    // Suffix every wizard page header with the pilot name so the director
+    // always knows which client they're calibrating.
+    document.querySelectorAll('.wizardPilotSuffix').forEach(el => {
+      el.textContent = ' (' + pilotLabel + ')';
+    });
+    console.log('[mnCalWizard] handing off to startCalibrationWizard for nodeId', nodeId);
+    if (typeof startCalibrationWizard !== 'function') {
+      alert('Wizard code not loaded — refresh the page.');
+      return;
+    }
+    startCalibrationWizard();
+  } catch (e) {
+    console.error('[mnCalWizard] failed:', e);
+    alert('Could not start the wizard: ' + (e && e.message ? e.message : e));
+  }
 }
 
 function mnClosePilotModal() {
   document.getElementById('mnPilotModal').style.display = 'none';
   _mnModalNodeId = null;
+  // While the modal was open, mnRenderRaceTab was deferred to avoid swapping
+  // the buttons out from under the user's mouse.  Flush a fresh render now so
+  // any data that arrived during that window catches up immediately.
+  if (window.__mnRaceTabRenderPending) {
+    window.__mnRaceTabRenderPending = false;
+    if (Array.isArray(mnCurrentNodes)) mnRenderRaceTab(mnCurrentNodes);
+  }
 }
 
 function mnClosePilotModalBackdrop(evt) {
@@ -7472,6 +7696,12 @@ async function mnSavePilotModal() {
   try {
     const body = { nodeId, pilotName: name, pilotColor, band: bandIndex, chan: chanIndex, freq };
     if (skipMasterStart !== undefined) body.skipMasterStart = skipMasterStart;
+    // Enter/Exit RSSI sliders — push their current values so the client picks
+    // them up.  The master's editPilot proxy treats these as optional fields.
+    const enterEl = document.getElementById('mnPilotModalEnter');
+    const exitEl  = document.getElementById('mnPilotModalExit');
+    if (enterEl) body.enterRssi = parseInt(enterEl.value, 10) || 0;
+    if (exitEl)  body.exitRssi  = parseInt(exitEl.value,  10) || 0;
     const r = await fetch('/api/multinode/editPilot', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -7486,8 +7716,9 @@ async function mnRemoveFromModal() {
   if (!_mnModalNodeId) return;
   const nodeId   = _mnModalNodeId;
   const node     = mnCurrentNodes.find(n => n.nodeId === nodeId);
-  const callsign = node ? (node.pilotName || 'Node ' + nodeId) : 'Node ' + nodeId;
-  if (!confirm(`Kick "${callsign}" from slot ${nodeId}?\n\nTheir device will pause reconnection attempts for 1 minute. After that they can rejoin and will be assigned the next available slot.`)) return;
+  const slot = _slotLetter(nodeId);
+  const callsign = node ? (node.pilotName || 'Node ' + slot) : 'Node ' + slot;
+  if (!confirm(`Kick "${callsign}" from slot ${slot}?\n\nTheir device will pause reconnection attempts for 1 minute. After that they can rejoin and will be assigned the next available slot.`)) return;
   mnClosePilotModal();
   try {
     await fetch('/api/multinode/kickNode', {
@@ -7500,7 +7731,7 @@ async function mnRemoveFromModal() {
 }
 
 async function mnRemoveNode(nodeId, callsign) {
-  if (!confirm(`Remove "${callsign}" from slot ${nodeId}?\n\nThe pilot can reconnect and will be assigned the next available slot.`)) return;
+  if (!confirm(`Remove "${callsign}" from slot ${_slotLetter(nodeId)}?\n\nThe pilot can reconnect and will be assigned the next available slot.`)) return;
   try {
     await fetch('/api/multinode/removeNode', {
       method: 'POST',
@@ -7526,7 +7757,7 @@ function mnRenderNodes(nodes) {
   nodes.forEach(n => {
     const colorHex    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
     const onlineCls   = n.online ? 'mn-node-online' : 'mn-node-offline';
-    const callsign    = n.pilotName || 'Node ' + n.nodeId;
+    const callsign    = n.pilotName || 'Node ' + _slotLetter(n.nodeId);
     let runDotCls, runLabel;
     if      (n.quitEarly) { runDotCls = 'mn-run-dot dnf';     runLabel = 'DNF'; }
     else if (n.running)   { runDotCls = 'mn-run-dot running'; runLabel = 'Racing'; }
@@ -7537,7 +7768,7 @@ function mnRenderNodes(nodes) {
         <span class="mn-node-dot" style="background:${colorHex}"></span>
         <strong>${callsign}</strong>
         <span class="mn-node-status-pill ${n.online ? 'mn-pill-online' : 'mn-pill-offline'}">${n.online ? 'Online' : 'Offline'}</span>
-        <span style="margin-left:auto;font-size:12px;color:var(--secondary-color);">Node ${n.nodeId}</span>
+        <span style="margin-left:auto;font-size:12px;color:var(--secondary-color);">Node ${_slotLetter(n.nodeId)}</span>
         <button class="mn-edit-btn" style="margin-left:6px;" onclick="mnOpenPilotModal(${n.nodeId})" title="Edit pilot">
           <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>
         </button>
@@ -7547,7 +7778,7 @@ function mnRenderNodes(nodes) {
         <span class="mn-run-label">${runLabel}</span>
       </div>
       <div style="font-size:13px;">
-        ${n.pilotName || 'Node ' + n.nodeId} — Laps: <strong>${n.lapCount || 0}</strong>
+        ${n.pilotName || 'Node ' + _slotLetter(n.nodeId)} — Laps: <strong>${n.lapCount || 0}</strong>
       </div>
     </div>`;
   });
@@ -7780,7 +8011,7 @@ function downloadClientRaceData() {
     allNodes.push({
       nodeId:     n.nodeId,
       isMaster:   !!n.isMaster,
-      pilotName:  n.pilotName || (n.isMaster ? 'Master' : 'Node ' + n.nodeId),
+      pilotName:  n.pilotName || (n.isMaster ? 'Master' : 'Node ' + _slotLetter(n.nodeId)),
       pilotColor: n.pilotColor || 0x0080FF,
       quitEarly:  !!n.quitEarly,
       laps:       (n.laps || []).map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
@@ -7895,7 +8126,7 @@ async function mnStartRace() {
   // Check for non-independent pilots solo racing — they'd be overridden by Start All
   const nonIndSolo = (mnCurrentNodes || []).filter(n => n.running && !n.isMaster && !n.independent && !mnRaceRunning);
   if (nonIndSolo.length > 0) {
-    const names = nonIndSolo.map(n => n.pilotName || `Node ${n.nodeId}`).join(', ');
+    const names = nonIndSolo.map(n => n.pilotName || `Node ${_slotLetter(n.nodeId)}`).join(', ');
     const choice = await _showThreeOptionModal(
       `<strong>Start All</strong> will restart ${nonIndSolo.length} pilot(s) currently in a solo race:<br><em>${names}</em>`,
       'Start All',
@@ -7971,6 +8202,12 @@ async function mnStopRace() {
   try {
     await fetch('/api/multinode/race/stop', { method: 'POST' });
     mnRaceRunning = false;
+    // Mark the moment of stop.  mnRenderRaceTab suppresses the
+    // "Solo race in progress" label for ~5 s after this so the last couple
+    // of clients (whose stop POST + heartbeat haven't round-tripped yet)
+    // don't briefly flash as solo racers.  After the window expires, any
+    // client that *really* is still running will resurface as solo.
+    window.__mnLastRaceStopAt = Date.now();
     // Optimistically mark non-excluded clients as stopped so the solo-race label doesn't
     // flash between this render and the next heartbeat confirming running=false.
     mnCurrentNodes = mnCurrentNodes.map(n =>
@@ -8032,7 +8269,7 @@ function downloadMnRaceData() {
     allNodes.push({
       nodeId:     n.nodeId,
       isMaster:   false,
-      pilotName:  n.pilotName || ('Node ' + n.nodeId),
+      pilotName:  n.pilotName || ('Node ' + _slotLetter(n.nodeId)),
       pilotColor: n.pilotColor || 0x0080FF,
       quitEarly:  n.quitEarly || false,
       laps:       (n.laps || []).map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),

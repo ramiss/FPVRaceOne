@@ -433,16 +433,20 @@ class AudioAnnouncer {
                 await this.speakNumber(lapTime);
                 return;
             } else {
-                console.log('[AudioAnnouncer] Pilot-specific audio not found, using fallback');
+                console.log('[AudioAnnouncer] Pilot-specific audio not found, using split fallback');
             }
         } catch (e) {
             console.error('[AudioAnnouncer] Complex speech with pilot failed:', e);
         }
-        
-        // Fallback: Use TTS directly (NOT speak() to avoid infinite recursion)
-        const fullText = `${pilot} Lap ${lapNumber}, ${lapTime}`;
-        console.log('[AudioAnnouncer] Using TTS fallback for:', fullText);
-        await this.useTtsFallback(fullText);
+
+        // Split fallback: pilot-name + lap-number through TTS, then the lap
+        // TIME through speakNumber so the digits go through playPrerecorded
+        // (audio.playbackRate honors this.rate reliably).  Dumping the whole
+        // phrase into Web Speech makes the announcer-speed setting feel like
+        // it has no effect on race speech in browsers that handle Web Speech
+        // rate poorly.
+        await this.useTtsFallback(`${pilot} Lap ${lapNumber}`);
+        await this.speakNumber(lapTime);
     }
     
     /**
@@ -480,11 +484,12 @@ class AudioAnnouncer {
         } catch (e) {
             console.error('[AudioAnnouncer] Lap+time speech failed:', e);
         }
-        
-        // Fallback: Use TTS directly (NOT speak() to avoid infinite recursion)
-        const fullText = `Lap ${lapNumber}, ${lapTime}`;
-        console.log('[AudioAnnouncer] Using TTS fallback for:', fullText);
-        await this.useTtsFallback(fullText);
+
+        // Split fallback: lap-number portion via TTS, time via speakNumber so
+        // the digits get audio.playbackRate (honors this.rate reliably).  See
+        // speakComplexWithPilot for the rationale.
+        await this.useTtsFallback(`Lap ${lapNumber}`);
+        await this.speakNumber(lapTime);
     }
 
     /**
