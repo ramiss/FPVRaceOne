@@ -387,6 +387,28 @@
         </div>
         <div style="font-size:12px;color:var(--secondary-color);margin-bottom:14px;">Wait ~20 seconds after changing band/channel for the new frequency to calibrate.</div>
 
+        <!-- Live RSSI feed for the selected client.  Master polls
+             /api/multinode/rssi?nodeId=N every ~200 ms; the red / orange
+             horizontalLines on the SmoothieChart track the Enter / Exit
+             sliders below in real time.  Only shown when no race is active —
+             the firmware streams RSSI samples to the chart loop during a race
+             and we don't want to interfere. -->
+        <div id="mnPilotModalRssiSection" style="margin-bottom:14px;">
+          <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:4px;">
+            <label style="font-weight:600; margin:0;">Live RSSI</label>
+            <span id="mnPilotModalRssiVal" style="font-size:12px; color:var(--secondary-color);">—</span>
+          </div>
+          <!-- Explicit width / height attributes — NOT just CSS — so SmoothieChart's
+               first responsive measurement isn't 0×0.  The chart re-measures via
+               offsetWidth/offsetHeight on each frame, but its lastWidth/lastHeight
+               start undefined; if the first read is 0 it sticks at 0 on some
+               browsers until the canvas is reinitialised. -->
+          <canvas id="mnPilotModalRssiChart" width="300" height="130" style="width:100%; height:130px; background:#0f1722; border-radius:4px; display:block;"></canvas>
+          <div id="mnPilotModalRssiHint" style="font-size:12px; color:var(--secondary-color); margin-top:4px; display:none;">
+            Live feed unavailable during an active race.
+          </div>
+        </div>
+
         <!-- Enter RSSI / Exit RSSI — two-row layout that fits the narrow modal.
              Row 1: label + numeric value + −/+ buttons.  Row 2: the range slider
              on its own line so it can use 100% width without overflow. -->
@@ -677,10 +699,13 @@
               </div>
 
               <div class="config-item">
-                <label>Voice Control:</label>
-                <div style="display: flex; gap: 8px; flex: 1;">
-                  <button id="EnableAudioButton" onclick="enableAudioLoop()" style="flex: 1; padding: 8px; transition: background-color 0.3s;">Enable Voice</button>
-                  <button id="DisableAudioButton" onclick="disableAudioLoop()" style="flex: 1; padding: 8px; transition: background-color 0.3s;">Disable Voice</button>
+                <label for="voiceEnabledToggle">Voice:</label>
+                <div style="display: flex; align-items: center; gap: 14px; flex: 1;">
+                  <label class="switch" style="flex-shrink: 0;">
+                    <input type="checkbox" id="voiceEnabledToggle" onchange="onVoiceEnabledToggleChange(this.checked)">
+                    <span class="slider"></span>
+                  </label>
+                  <span id="voiceEnabledLabel" style="font-size: 13px; color: var(--secondary-color); min-width: 28px;">Off</span>
                   <button id="GenerateAudioButton" onclick="generateAudio()" style="flex: 1; padding: 8px;">Test Voice</button>
                 </div>
               </div>

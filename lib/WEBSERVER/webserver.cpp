@@ -1125,6 +1125,17 @@ EEPROM:\n\
         led->on(200);
     });
 
+    // Snapshot of the current RSSI as a single value.  Used by the master's
+    // Edit Pilot modal to poll a client's live signal at ~5 Hz over HTTP (the
+    // master can't easily subscribe to a client's SSE channel, so we expose
+    // the value as a plain JSON poll endpoint instead).
+    server.on("/timer/rssi", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        uint8_t rssi = timer ? timer->getRssi() : 0;
+        char buf[24];
+        snprintf(buf, sizeof(buf), "{\"rssi\":%u}", rssi);
+        request->send(200, "application/json", buf);
+    });
+
     server.on("/config", HTTP_GET, [this](AsyncWebServerRequest *request) {
         AsyncResponseStream *response = request->beginResponseStream("application/json");
         conf->toJson(*response);
@@ -2464,6 +2475,33 @@ EEPROM:\n\
         }
         return String();
     };
+
+    // /api/multinode/rssi?nodeId=N — master proxies the client's /timer/rssi.
+    // Used by the Edit Pilot modal to draw a live RSSI chart for the selected
+    // client.  Cheap snapshot — no state on master, no rate limiting needed.
+    server.on("/api/multinode/rssi", HTTP_GET, [this, calLookupStaIP](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isMasterMode()) {
+            request->send(403, "application/json", "{\"error\":\"master only\"}"); return;
+        }
+        if (!request->hasParam("nodeId")) {
+            request->send(400, "application/json", "{\"error\":\"missing nodeId\"}"); return;
+        }
+        uint8_t nodeId = (uint8_t)request->getParam("nodeId")->value().toInt();
+        String staIP = calLookupStaIP(nodeId);
+        if (staIP.isEmpty()) {
+            request->send(404, "application/json", "{\"error\":\"client offline\"}"); return;
+        }
+        HTTPClient http;
+        String url = "http://" + staIP + "/timer/rssi";
+        if (!http.begin(url)) {
+            request->send(502, "application/json", "{\"error\":\"proxy begin failed\"}"); return;
+        }
+        http.setTimeout(800);
+        int code = http.GET();
+        String body = (code == 200) ? http.getString() : String("{\"rssi\":0}");
+        http.end();
+        request->send(code == 200 ? 200 : 502, "application/json", body);
+    });
 
     server.on("/api/multinode/calibration/start", HTTP_POST, [this, calLookupStaIP](AsyncWebServerRequest *request) {
         if (!multiNode || !multiNode->isMasterMode()) {

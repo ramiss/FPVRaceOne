@@ -3039,19 +3039,23 @@ function saveVoiceSelection() {
 }
 
 function updateVoiceButtons() {
-  const enableBtn = document.getElementById('EnableAudioButton');
-  const disableBtn = document.getElementById('DisableAudioButton');
-  
-  if (audioEnabled) {
-    enableBtn.style.backgroundColor = '#f39c12';
-    enableBtn.style.opacity = '1';
-    disableBtn.style.backgroundColor = '';
-    disableBtn.style.opacity = '0.5';
+  // Voice control switched from two side-by-side buttons to a single
+  // checkbox-styled switch.  Keep this function name so existing call sites
+  // still work; it just syncs the new <input> + label to audioEnabled.
+  const toggle = document.getElementById('voiceEnabledToggle');
+  const label  = document.getElementById('voiceEnabledLabel');
+  if (toggle) toggle.checked = !!audioEnabled;
+  if (label)  label.textContent = audioEnabled ? 'On' : 'Off';
+}
+
+// Onchange dispatcher for the Voice toggle.  Routes to the existing
+// enableAudioLoop / disableAudioLoop so persistence + announcer state stay
+// identical to the old two-button flow.
+function onVoiceEnabledToggleChange(checked) {
+  if (checked) {
+    enableAudioLoop().catch(e => console.error('[Script] enableAudioLoop failed:', e));
   } else {
-    enableBtn.style.backgroundColor = '';
-    enableBtn.style.opacity = '0.5';
-    disableBtn.style.backgroundColor = '#f39c12';
-    disableBtn.style.opacity = '1';
+    disableAudioLoop().catch(e => console.error('[Script] disableAudioLoop failed:', e));
   }
 }
 
@@ -3409,11 +3413,13 @@ async function _raceCountdown(armPhrase) {
   queueSpeak(`<p>${armPhrase}</p>`);
   await _speechDone();
   if (_raceCountdownAborted) return false;
-  // "Starting in 5" as one utterance — no inter-utterance gap from Web Speech API
+  // "Starting in 5" as one utterance — no inter-utterance gap from Web Speech API.
+  // We used to wait an extra 1000 ms here on top of the speech-done time, which
+  // made the gap between "five" and the next-spoken "four" feel like ~2 s.
+  // Drop the extra pause so the rhythm matches the rest of the countdown (the
+  // 4→3→2→1 loop already pads each iteration to a 1 s cadence).
   queueSpeak("<p>Starting in 5</p>");
   await _speechDone();
-  if (_raceCountdownAborted) return false;
-  await new Promise(r => setTimeout(r, 1000));
   if (_raceCountdownAborted) return false;
 
   for (let i = 4; i >= 1; i--) {
@@ -5606,13 +5612,11 @@ async function calculateThresholds() {
   const minPeak = Math.min(...peakRssis);
   let calculatedEnter = Math.round(minPeak * 0.95);
 
-  // Exit is 7 RSSI units below Enter — tighter than upstream's 10 because
-  // tiny-whoop layouts have gates close enough together that the drone may
-  // not drop 10 units between passes.  7 still gives enough hysteresis to
-  // avoid state oscillation at the boundary while keeping the detection
-  // band tight to the lap timer's antenna.  Noise-floor check below raises
-  // Exit if ambient is close to threshold.
-  const EXIT_GAP = 7;
+  // Exit is 4 RSSI units below Enter — tight hysteresis keeps the detection
+  // band close to the gate antenna while still avoiding state oscillation at
+  // the boundary.  Noise-floor check below raises Exit if ambient is close
+  // to threshold.
+  const EXIT_GAP = 4;
   let calculatedExit = calculatedEnter - EXIT_GAP;
 
   // Noise floor: 35th-percentile of the recording keeps exit above ambient.
@@ -5620,13 +5624,11 @@ async function calculateThresholds() {
   const noiseFloor = sorted[Math.floor(sorted.length * 0.35)];
   calculatedExit = Math.max(noiseFloor + 3, calculatedExit);
 
-  // Final clamp — exit must stay above MIN_RSSI and at least 5 below enter
-  // (5-unit minimum hysteresis fallback for cases where the noise floor
-  // crowds Exit up close to Enter).
+  // Final clamp — exit must stay above MIN_RSSI and at least 4 below enter.
   const MIN_RSSI = 30;
   const MAX_RSSI = 255;
   calculatedEnter = clamp(calculatedEnter, MIN_RSSI, MAX_RSSI);
-  calculatedExit  = clamp(calculatedExit,  MIN_RSSI, calculatedEnter - 5);
+  calculatedExit  = clamp(calculatedExit,  MIN_RSSI, calculatedEnter - 4);
 
   wizardState.calculatedEnter = calculatedEnter;
   wizardState.calculatedExit  = calculatedExit;
@@ -6804,16 +6806,12 @@ async function recruitNearbyUnits() {
   window.__recruitInProgress = true;
   hideDisconnectedBanner();
 
-  try {
-    await fetch('/api/multinode/recruit?force=' + (force ? '1' : '0'), { method: 'POST' });
-  } catch (e) {
-    // The 202 response usually flushes before the AP goes down, but if not,
-    // the catch is harmless — we'll see the result when the master comes back.
-    console.warn('[Recruit] POST may have failed mid-flight', e);
-  }
-
   // Working overlay — opaque background and a z-index above the disconnect
-  // banner (9999) so it's the only thing the director sees while the AP is down.
+  // banner (9999) so it's the only thing the director sees while the AP is
+  // down.  Paint it BEFORE firing the recruit POST: that fetch can sit pending
+  // for several seconds while the master is queueing the job and dropping its
+  // AP, and if we awaited it the user would see a frozen UI before the overlay
+  // ever appears.
   const overlay = document.createElement('div');
   overlay.id = '_recruitOverlay';
   overlay.style.cssText = 'position:fixed;inset:0;background:#1a1a1a;z-index:10001;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:inherit;text-align:center;padding:24px;';
@@ -6825,6 +6823,16 @@ async function recruitNearbyUnits() {
     </div>
     <div id="_recruitStatusLine" style="font-size:13px;opacity:0.7;margin-top:18px;">Waiting for master to come back…</div>`;
   document.body.appendChild(overlay);
+  // Yield once so the browser actually paints the overlay before we kick off
+  // the POST — without this it can still feel like a delay on slower devices
+  // because the POST starts synchronously in the same task.
+  await new Promise(r => setTimeout(r, 0));
+
+  // Fire-and-forget — we don't await so the overlay stays interactive.  The
+  // master returns 202 quickly, but its response may not flush before the AP
+  // goes down; either way we just want the request on the wire.
+  fetch('/api/multinode/recruit?force=' + (force ? '1' : '0'), { method: 'POST' })
+    .catch(e => console.warn('[Recruit] POST may have failed mid-flight', e));
 
   // Wait 5 s before polling so the master has time to actually drop its AP.
   await new Promise(r => setTimeout(r, 5000));
@@ -7529,6 +7537,221 @@ function mnModalUpdateFreq() {
   freqEl.textContent = freq ? freq + ' MHz' : 'N/A';
 }
 
+// ─── Live RSSI feed for the Edit Pilot modal ────────────────────────────────
+// Standalone SmoothieChart instance + 5 Hz poll loop, mirrored from the
+// Calibration tab chart (data/script.js createRssiChart + addRssiPoint) but
+// scoped to its own canvas/series so the two never collide.  Source data comes
+// from the master proxy /api/multinode/rssi?nodeId=N which forwards to the
+// client's /timer/rssi snapshot endpoint.
+
+let _mnModalRssiChart      = null;
+let _mnModalRssiSeries     = null;
+let _mnModalRssiPollTimer  = null;
+// nodeId 0 = the master's own card (poll local /timer/rssi), >0 = a client
+// (poll via /api/multinode/rssi proxy).  Track "is the loop running?" in a
+// separate flag so a valid nodeId of 0 doesn't trip a `if (!nodeId)` guard.
+let _mnModalRssiActive     = false;
+let _mnModalRssiNodeId     = -1;
+let _mnModalRssiMin        = 255;
+let _mnModalRssiMax        = 0;
+// Y-axis range is established ONCE at modal open from the threshold values
+// (so both lines are guaranteed visible), then expands only when trace
+// samples land outside it.  It deliberately doesn't react to slider drags
+// — otherwise moving one slider rescales the chart and visually shifts the
+// other threshold line and the trace.
+let _mnModalRssiAxisInit   = false;
+let _mnModalRssiAxisMin    = 0;
+let _mnModalRssiAxisMax    = 200;
+
+// Wait until the canvas has non-zero layout width.  When the modal goes from
+// display:none to display:flex the browser hasn't finished layout yet, so a
+// streamTo() call in that window leaves the chart with width 0 — and it never
+// repaints because SmoothieChart's resize() checks `width !== lastWidth` and
+// undefined→0→0 sticks at 0 on the next frame.
+async function _waitForCanvasLayout(canvas, maxMs = 1500) {
+  const start = Date.now();
+  while (Date.now() - start < maxMs) {
+    if (canvas && canvas.offsetWidth > 0 && canvas.offsetHeight > 0) return true;
+    await new Promise(r => requestAnimationFrame(() => r()));
+  }
+  return canvas && canvas.offsetWidth > 0;
+}
+
+async function _mnModalRssiInit() {
+  if (_mnModalRssiChart) return;
+  try {
+    await loadScript('smoothie.js');
+  } catch (e) {
+    console.error('[mnRssi] smoothie.js load failed:', e);
+    return;
+  }
+  if (typeof SmoothieChart === 'undefined' || typeof TimeSeries === 'undefined') {
+    console.error('[mnRssi] SmoothieChart not on window after load — IIFE export problem?');
+    return;
+  }
+  try {
+    _mnModalRssiSeries = new TimeSeries();
+    _mnModalRssiChart = new SmoothieChart({
+      responsive: true,
+      millisPerPixel: 50,
+      interpolation: 'linear',
+      scaleSmoothing: 1.0,
+      grid: { strokeStyle: "rgba(255,255,255,0.18)", fillStyle: "#0f1722", sharpLines: true, verticalSections: 4, borderVisible: false },
+      labels: { precision: 0, fillStyle: "rgba(255,255,255,0.85)", fontSize: 11, showIntermediateLabels: true },
+      maxValue: 200,
+      minValue: 50,
+    });
+    _mnModalRssiChart.addTimeSeries(_mnModalRssiSeries, {
+      lineWidth: 1.7,
+      strokeStyle: "hsl(214, 53%, 60%)",
+      fillStyle: "hsla(214, 53%, 60%, 0.4)",
+    });
+    const canvas = document.getElementById('mnPilotModalRssiChart');
+    if (!canvas) { console.error('[mnRssi] canvas element missing'); return; }
+    await _waitForCanvasLayout(canvas);
+    _mnModalRssiChart.streamTo(canvas, 50);
+    console.log('[mnRssi] init ok — canvas', canvas.offsetWidth, '×', canvas.offsetHeight);
+  } catch (e) {
+    console.error('[mnRssi] init failed:', e);
+  }
+}
+
+async function _mnModalRssiStart(nodeId) {
+  const section = document.getElementById('mnPilotModalRssiSection');
+  const canvas  = document.getElementById('mnPilotModalRssiChart');
+  const hint    = document.getElementById('mnPilotModalRssiHint');
+
+  // Don't poll while a race is in progress — the firmware is busy streaming
+  // samples to the chart on the device's own SSE channel, and we don't want
+  // to add HTTP load mid-race.  Just show a hint and bail.
+  if (mnRaceRunning) {
+    if (canvas) canvas.style.display = 'none';
+    if (hint)   hint.style.display   = '';
+    return;
+  }
+  if (canvas) canvas.style.display = '';
+  if (hint)   hint.style.display   = 'none';
+
+  await _mnModalRssiInit();
+  _mnModalRssiNodeId   = nodeId;
+  _mnModalRssiActive   = true;
+  _mnModalRssiMin      = 255;
+  _mnModalRssiMax      = 0;
+  _mnModalRssiAxisInit = false;   // re-establish y-axis from this node's thresholds
+  window.__mnRssiLoggedErr = false;
+  const valEl = document.getElementById('mnPilotModalRssiVal');
+  if (valEl) valEl.textContent = '—';
+  if (_mnModalRssiSeries && typeof _mnModalRssiSeries.clear === 'function') {
+    _mnModalRssiSeries.clear();
+  }
+  if (_mnModalRssiChart) _mnModalRssiChart.start();
+  if (_mnModalRssiPollTimer) clearInterval(_mnModalRssiPollTimer);
+  // Fire one poll immediately, then settle into the regular cadence.
+  // 500 ms (2 Hz) is the modal-only rate: each poll is a master→client HTTP
+  // round-trip over WiFi, and 5 Hz was loading the link enough to starve
+  // client heartbeats.  The Calibration tab's chart is unaffected — that
+  // path uses SSE at 10 Hz directly from the device and is independent
+  // of this poll loop.
+  _mnModalRssiPoll();
+  _mnModalRssiPollTimer = setInterval(_mnModalRssiPoll, 500);
+}
+
+function _mnModalRssiStop() {
+  if (_mnModalRssiPollTimer) {
+    clearInterval(_mnModalRssiPollTimer);
+    _mnModalRssiPollTimer = null;
+  }
+  if (_mnModalRssiChart) _mnModalRssiChart.stop();
+  _mnModalRssiActive = false;
+  _mnModalRssiNodeId = -1;
+}
+
+// Push the current Enter/Exit slider values into the chart's horizontalLines
+// and adjust the y-axis range so both lines stay visible.  Called from the
+// slider input handlers so dragging moves the lines immediately, and from
+// the 200 ms poll so any programmatic slider change (modal open, +/- buttons)
+// also flows through.
+function _mnModalRssiSyncThresholds() {
+  if (!_mnModalRssiChart) return;
+  const enterEl = document.getElementById('mnPilotModalEnter');
+  const exitEl  = document.getElementById('mnPilotModalExit');
+  const enterVal = enterEl ? (parseInt(enterEl.value, 10) || 120) : 120;
+  const exitVal  = exitEl  ? (parseInt(exitEl.value,  10) || 100) : 100;
+  _mnModalRssiChart.options.horizontalLines = [
+    { color: "hsl(8.2, 86.5%, 53.7%)", lineWidth: 1.7, value: enterVal },
+    { color: "hsl(25, 85%, 55%)",       lineWidth: 1.7, value: exitVal  },
+  ];
+  // Lock the y-axis range the first time this runs after modal open.  Pad
+  // generously around the current thresholds so both lines are visible AND
+  // there's headroom for trace data to land on either side.  After this
+  // initial set, the axis is only ever EXPANDED (in _mnModalRssiPoll, when
+  // a trace sample lands outside it) — slider drags never reshape it, so
+  // dragging one threshold doesn't visually move the other line or the
+  // trace.
+  if (!_mnModalRssiAxisInit) {
+    _mnModalRssiAxisMin = Math.max(0,   exitVal  - 20);
+    _mnModalRssiAxisMax = Math.min(255, enterVal + 20);
+    _mnModalRssiChart.options.maxValue = _mnModalRssiAxisMax;
+    _mnModalRssiChart.options.minValue = _mnModalRssiAxisMin;
+    _mnModalRssiAxisInit = true;
+  }
+  if (window.__mnRssiDebug) {
+    console.log('[mnRssi] thresholds:', { enterVal, exitVal,
+      maxV: _mnModalRssiChart.options.maxValue,
+      minV: _mnModalRssiChart.options.minValue });
+  }
+}
+
+async function _mnModalRssiPoll() {
+  if (!_mnModalRssiActive || !_mnModalRssiChart) return;
+  const valEl = document.getElementById('mnPilotModalRssiVal');
+  // Master's own card (nodeId === 0) reads its local /timer/rssi directly.
+  // Client cards go through the master proxy which forwards to the
+  // selected client's /timer/rssi over the AP.
+  const url = (_mnModalRssiNodeId === 0)
+    ? '/timer/rssi'
+    : `/api/multinode/rssi?nodeId=${_mnModalRssiNodeId}`;
+  try {
+    const r = await fetch(url, { cache: 'no-store' });
+    if (!r.ok) {
+      if (valEl) valEl.textContent = `(no data — ${r.status})`;
+      if (!window.__mnRssiLoggedErr) {
+        console.warn('[mnRssi] poll', r.status, url);
+        window.__mnRssiLoggedErr = true;
+      }
+      return;
+    }
+    const data = await r.json();
+    const rssi = parseInt(data.rssi, 10);
+    if (!Number.isFinite(rssi)) return;
+    if (valEl) valEl.textContent = String(rssi);
+    window.__mnRssiLoggedErr = false;
+
+    _mnModalRssiMax = Math.max(_mnModalRssiMax, rssi);
+    _mnModalRssiMin = Math.min(_mnModalRssiMin, rssi);
+
+    _mnModalRssiSyncThresholds();
+    // Expand (never shrink) the locked axis when a trace sample lands close
+    // to or past the edge.  Without this, a wandering signal would just
+    // disappear off-screen and the trace would clip flat at the boundary.
+    if (rssi > _mnModalRssiAxisMax - 3) {
+      _mnModalRssiAxisMax = Math.min(255, rssi + 10);
+      _mnModalRssiChart.options.maxValue = _mnModalRssiAxisMax;
+    }
+    if (rssi < _mnModalRssiAxisMin + 3) {
+      _mnModalRssiAxisMin = Math.max(0, rssi - 10);
+      _mnModalRssiChart.options.minValue = _mnModalRssiAxisMin;
+    }
+    _mnModalRssiSeries.append(Date.now(), rssi);
+  } catch (e) {
+    if (valEl) valEl.textContent = '(fetch error)';
+    if (!window.__mnRssiLoggedErr) {
+      console.warn('[mnRssi] fetch threw on', url, e);
+      window.__mnRssiLoggedErr = true;
+    }
+  }
+}
+
 function mnOpenPilotModal(nodeId) {
   _mnModalNodeId = nodeId;
   const node = mnCurrentNodes.find(n => n.nodeId === nodeId);
@@ -7574,6 +7797,12 @@ function mnOpenPilotModal(nodeId) {
 
   document.getElementById('mnPilotModal').style.display = 'flex';
   setTimeout(() => document.getElementById('mnPilotModalName').focus(), 50);
+
+  // Start the live RSSI feed for this node — the helper bails out cleanly
+  // when a race is active and shows a hint instead.  Defer one tick so the
+  // canvas has its final layout dimensions before SmoothieChart's responsive
+  // measurement reads them.
+  setTimeout(() => { _mnModalRssiStart(nodeId).catch(() => {}); }, 60);
 }
 
 // Slider helpers for the modal — mirror updateEnterRssi / updateExitRssi /
@@ -7588,6 +7817,9 @@ function mnModalUpdateEnterRssi(value) {
   const span    = document.getElementById('mnPilotModalEnterSpan');
   if (enterEl) enterEl.value = clamped;
   if (span)    span.textContent = clamped;
+  // Immediate chart-line update so the red threshold tracks the drag without
+  // waiting for the next 200 ms poll tick.
+  _mnModalRssiSyncThresholds();
 }
 
 function mnModalUpdateExitRssi(value) {
@@ -7599,6 +7831,8 @@ function mnModalUpdateExitRssi(value) {
   const span    = document.getElementById('mnPilotModalExitSpan');
   if (exitEl) exitEl.value = clamped;
   if (span)   span.textContent = clamped;
+  // Same as enter: immediate chart-line update on drag.
+  _mnModalRssiSyncThresholds();
 }
 
 function mnModalStepRssi(which, delta) {
@@ -7666,6 +7900,9 @@ function mnStartCalibrationWizardForModal() {
 function mnClosePilotModal() {
   document.getElementById('mnPilotModal').style.display = 'none';
   _mnModalNodeId = null;
+  // Stop the live RSSI poll + chart so we don't keep hitting the master proxy
+  // and the chart's animation loop stops chewing CPU.
+  _mnModalRssiStop();
   // While the modal was open, mnRenderRaceTab was deferred to avoid swapping
   // the buttons out from under the user's mouse.  Flush a fresh render now so
   // any data that arrived during that window catches up immediately.
