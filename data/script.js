@@ -7126,6 +7126,23 @@ function _slotLetter(nodeId) {
   return String.fromCharCode(64 + id);
 }
 
+// Return '#000' or '#fff' for use as text colour on top of `hexColor`.
+// WCAG relative luminance: y = 0.2126·R + 0.7152·G + 0.0722·B (sRGB).  A
+// 0.6 threshold puts gold / green / cyan / white / spring-green on black
+// text and leaves red / orange / blue / purple / pink / hot-pink / gray /
+// black / brown on white text — matches the user's flagged five exactly.
+function _pilotCardTextColor(hexColor) {
+  if (typeof hexColor !== 'string') return '#fff';
+  const h = hexColor.replace('#', '');
+  if (h.length < 6) return '#fff';
+  const r = parseInt(h.substr(0, 2), 16) / 255;
+  const g = parseInt(h.substr(2, 2), 16) / 255;
+  const b = parseInt(h.substr(4, 2), 16) / 255;
+  if (!Number.isFinite(r) || !Number.isFinite(g) || !Number.isFinite(b)) return '#fff';
+  const lum = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return lum > 0.6 ? '#000' : '#fff';
+}
+
 // Update the status bar above the race clock based on current multi-node mode.
 function mnUpdateRaceStatusBar() {
   rvShowTabIfClient();
@@ -7435,13 +7452,25 @@ function mnRenderRaceTab(nodes, opts) {
     const isSoloRacing = n.running && !n.isMaster &&
       (!raceRunning || _isExcludedThisRace) && !_mnGraceSuppressSolo;
     const canTap  = !readOnly && mnDevMode && raceRunning && !n.independent && !isSoloRacing;
-    const devAttr = canTap ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.laps.length},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};cursor:pointer;"` : ` style="background:${color};"`;
+    // Card header text colour follows the WCAG relative luminance of the
+    // pilot's background colour: light backgrounds (gold, green, cyan,
+    // white, spring green) get black text; everything else stays white.
+    // Threshold 0.6 keeps red / orange / hot pink on white text but flips
+    // the user's flagged five.  Theme-independent.
+    const textColor = _pilotCardTextColor(color);
+    const devAttr = canTap
+      ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.laps.length},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};color:${textColor};cursor:pointer;"`
+      : ` style="background:${color};color:${textColor};"`;
     // Show Racing badge as soon as raceRunning flips (pre-arm) for non-excluded nodes, matching the master card.
     const isRacing = n.isMaster
       ? raceRunning
       : (n.running || (raceRunning && !_isExcludedThisRace && !n.skipEnabled));
     const racingBadgeColor = isSoloRacing ? 'rgba(255,140,0,0.75)' : 'rgba(0,160,0,0.5)';
-    const cardEditBtn = (n.isMaster || readOnly) ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
+    // Edit button: hidden in read-only (client viewing) mode.  The master
+    // shows it on EVERY card including its own (n.isMaster) so the director
+    // can quickly edit the host pilot from the Race tab — the modal hides
+    // Kick + Swap for nodeId === 0 since they don't apply to the host.
+    const cardEditBtn = readOnly ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
     const meBadge = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
       ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Me</span>' : '';
     const slotPrefix = n.isMaster ? '' : `${_slotLetter(n.nodeId)}: `;
@@ -7647,13 +7676,61 @@ async function _mnModalRssiStart(nodeId) {
   if (_mnModalRssiChart) _mnModalRssiChart.start();
   if (_mnModalRssiPollTimer) clearInterval(_mnModalRssiPollTimer);
   // Fire one poll immediately, then settle into the regular cadence.
-  // 500 ms (2 Hz) is the modal-only rate: each poll is a master→client HTTP
-  // round-trip over WiFi, and 5 Hz was loading the link enough to starve
-  // client heartbeats.  The Calibration tab's chart is unaffected — that
-  // path uses SSE at 10 Hz directly from the device and is independent
-  // of this poll loop.
+  // 200 ms (5 Hz) is fast enough to catch a racing drone's brief pass over
+  // the gate antenna.  To keep this from starving the client's heartbeat
+  // to the master, the firmware-side RSSI proxy treats each successful
+  // round-trip as proof of life (multiNode->touchNode) — so the watchdog
+  // never fires while the user has the live view open.  The Calibration
+  // tab's chart is unaffected — it uses SSE directly from the local
+  // device, no HTTP polling.
   _mnModalRssiPoll();
-  _mnModalRssiPollTimer = setInterval(_mnModalRssiPoll, 500);
+  _mnModalRssiPollTimer = setInterval(_mnModalRssiPoll, 200);
+}
+
+// Toggle handler for the on/off switch next to the "Live RSSI" title.
+// Off: stop polling and gray out the readout — useful when the director
+// just wants to see / adjust thresholds without burning WiFi bandwidth.
+// On: resume polling for whichever node the modal is currently editing.
+function onMnModalRssiToggle(checked) {
+  const valEl = document.getElementById('mnPilotModalRssiVal');
+  if (checked) {
+    if (_mnModalNodeId !== null && _mnModalNodeId !== undefined) {
+      _mnModalRssiStart(_mnModalNodeId).catch(e => console.warn('[mnRssi] resume failed:', e));
+    }
+  } else {
+    _mnModalRssiStop();
+    if (valEl) valEl.textContent = '(paused)';
+  }
+}
+
+// Wipe the chart back to a blank dark canvas — used on modal open so the
+// previous pilot's trace doesn't linger after stop() (SmoothieChart's last
+// painted frame stays on the canvas until something repaints).  Clears
+// the data series, the min/max tracking, the axis-init flag, the
+// horizontalLines, and paints the canvas to its background colour.
+function _mnModalRssiClearCanvas() {
+  _mnModalRssiMin      = 255;
+  _mnModalRssiMax      = 0;
+  _mnModalRssiAxisInit = false;
+  if (_mnModalRssiSeries && typeof _mnModalRssiSeries.clear === 'function') {
+    _mnModalRssiSeries.clear();
+  }
+  if (_mnModalRssiChart) {
+    _mnModalRssiChart.options.horizontalLines = [];
+  }
+  const canvas = document.getElementById('mnPilotModalRssiChart');
+  if (canvas) {
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.save();
+      // setTransform(1,0,0,1,0,0) undoes any dpr scale from a prior
+      // SmoothieChart resize so the fill covers the full canvas.
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.fillStyle = '#0f1722';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.restore();
+    }
+  }
 }
 
 function _mnModalRssiStop() {
@@ -7752,6 +7829,38 @@ async function _mnModalRssiPoll() {
   }
 }
 
+// Populate the Move-to-Slot dropdown with letters A–G.  Each option shows
+// occupant info so the director can decide whether a swap is safe.  The
+// section is hidden for the master's own card (nodeId 0) — the master
+// always occupies slot 0 and can't be reassigned.
+function _mnPopulateMoveSlotDropdown(currentNodeId) {
+  const section = document.getElementById('mnPilotModalMoveSection');
+  const sel     = document.getElementById('mnPilotModalMoveSlot');
+  if (!sel || !section) return;
+  if (currentNodeId === 0) { section.style.display = 'none'; return; }
+  section.style.display = '';
+  sel.innerHTML = '';
+  const MAX = 7;  // MULTINODE_MAX_NODES
+  for (let i = 1; i <= MAX; i++) {
+    const letter = _slotLetter(i);
+    const occupant = (mnCurrentNodes || []).find(n => n.nodeId === i && !n.isMaster);
+    let text;
+    if (i === currentNodeId) {
+      text = `${letter} (current)`;
+    } else if (occupant) {
+      const name = occupant.pilotName || 'occupied';
+      text = `${letter} – ${name} (swap)`;
+    } else {
+      text = `${letter} – empty`;
+    }
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = text;
+    if (i === currentNodeId) opt.selected = true;
+    sel.appendChild(opt);
+  }
+}
+
 function mnOpenPilotModal(nodeId) {
   _mnModalNodeId = nodeId;
   const node = mnCurrentNodes.find(n => n.nodeId === nodeId);
@@ -7795,14 +7904,30 @@ function mnOpenPilotModal(nodeId) {
   if (enterSp) enterSp.textContent = enterVal;
   if (exitSp)  exitSp.textContent  = exitVal;
 
+  // Move-to-slot dropdown.  Hidden for master's own card (nodeId 0); for
+  // clients, populate with A–G showing occupant + selecting the current slot.
+  _mnPopulateMoveSlotDropdown(nodeId);
+
+  // Kick section — also hidden for master's own card.  Move + Kick are the
+  // two operations that don't apply to the host pilot; everything else
+  // (name, color, band, RSSI sliders, calibration wizard, skip flag) does.
+  const kickSection = document.getElementById('mnPilotModalKickSection');
+  if (kickSection) kickSection.style.display = (nodeId === 0) ? 'none' : '';
+
   document.getElementById('mnPilotModal').style.display = 'flex';
   setTimeout(() => document.getElementById('mnPilotModalName').focus(), 50);
 
-  // Start the live RSSI feed for this node — the helper bails out cleanly
-  // when a race is active and shows a hint instead.  Defer one tick so the
-  // canvas has its final layout dimensions before SmoothieChart's responsive
-  // measurement reads them.
-  setTimeout(() => { _mnModalRssiStart(nodeId).catch(() => {}); }, 60);
+  // Live RSSI view defaults to OFF every modal open.  Each poll is a
+  // master→client HTTP round-trip and most edits don't need the trace, so
+  // we don't burn WiFi by default — the director flips the toggle when
+  // they actually want to see the signal.
+  const rssiToggle = document.getElementById('mnPilotModalRssiToggle');
+  if (rssiToggle) rssiToggle.checked = false;
+  const valEl = document.getElementById('mnPilotModalRssiVal');
+  if (valEl) valEl.textContent = '(off)';
+  // Wipe any leftover trace from the previous pilot — the canvas keeps the
+  // last painted frame after stop() until something repaints it.
+  _mnModalRssiClearCanvas();
 }
 
 // Slider helpers for the modal — mirror updateEnterRssi / updateExitRssi /
@@ -7854,7 +7979,10 @@ function mnModalStepRssi(which, delta) {
 function mnStartCalibrationWizardForModal() {
   console.log('[mnCalWizard] click — _mnModalNodeId =', _mnModalNodeId);
   try {
-    if (!_mnModalNodeId) { alert('No pilot selected.'); return; }
+    // Explicit null/undefined check — nodeId 0 (master's own card) is a
+    // valid target and routes through _wizardPath's local-mode branch
+    // (wizardTargetNodeId > 0 ? proxy : local).
+    if (_mnModalNodeId === null || _mnModalNodeId === undefined) { alert('No pilot selected.'); return; }
     const nodeId = _mnModalNodeId;
     const node = (mnCurrentNodes || []).find(n => n.nodeId === nodeId);
     const pilotLabel = (node && node.pilotName) ? node.pilotName : ('Node ' + _slotLetter(nodeId));
@@ -7917,11 +8045,16 @@ function mnClosePilotModalBackdrop(evt) {
 }
 
 async function mnSavePilotModal() {
-  if (!_mnModalNodeId) return;
+  // Explicit null check — nodeId 0 (master's own card) is a valid Save target.
+  if (_mnModalNodeId === null || _mnModalNodeId === undefined) return;
   const nodeId     = _mnModalNodeId;
   const name       = document.getElementById('mnPilotModalName').value.trim();
-  const colorHex   = document.getElementById('mnPilotModalColor').value;
-  const pilotColor = parseInt(colorHex.replace('#', ''), 16) || 0x0080FF;
+  const colorHex     = document.getElementById('mnPilotModalColor').value;
+  // parseInt('000000', 16) === 0, and `0 || 0x0080FF` evaluates to 0x0080FF —
+  // which silently rewrote a user's Black selection back to Blue.  Check via
+  // Number.isFinite so 0 (Black) survives.
+  const _parsedColor = parseInt(colorHex.replace('#', ''), 16);
+  const pilotColor   = Number.isFinite(_parsedColor) ? _parsedColor : 0x0080FF;
   const bandSel    = document.getElementById('mnPilotModalBand');
   const chanSel    = document.getElementById('mnPilotModalChannel');
   const bandIndex      = bandSel  ? parseInt(bandSel.value)  : 0;
@@ -7929,6 +8062,11 @@ async function mnSavePilotModal() {
   const freq           = (freqLookup[bandIndex] || [])[chanIndex] || 0;
   const skipEl         = document.getElementById('mnPilotModalSkip');
   const skipMasterStart = skipEl ? (skipEl.checked ? 1 : 0) : undefined;
+  // Move-to-slot selection — only acted on if it differs from the current
+  // slot AND this isn't the master's own card (master can't move).
+  const moveEl     = document.getElementById('mnPilotModalMoveSlot');
+  const targetSlot = (moveEl && nodeId !== 0) ? (parseInt(moveEl.value, 10) || nodeId) : nodeId;
+  const movePending = (targetSlot !== nodeId);
   mnClosePilotModal();
   try {
     const body = { nodeId, pilotName: name, pilotColor, band: bandIndex, chan: chanIndex, freq };
@@ -7945,6 +8083,13 @@ async function mnSavePilotModal() {
       body: JSON.stringify(body)
     });
     if (!r.ok) alert('Update failed \u2014 is the client device reachable?');
+    // Slot move runs AFTER editPilot so the name / color / band edits land
+    // against the source slot first; the move then carries the same node
+    // (and any occupant of the target slot) to their new ids.
+    if (movePending) {
+      const mr = await fetch(`/api/multinode/move?from=${nodeId}&to=${targetSlot}`, { method: 'POST' });
+      if (!mr.ok) alert('Slot move failed \u2014 client may be offline.');
+    }
     mnRefreshNodes();
   } catch (e) { console.error('editPilot failed', e); alert('Update failed'); }
 }

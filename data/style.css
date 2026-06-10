@@ -2363,6 +2363,11 @@ button.update-btn {
   padding: 1px 6px;
   border-radius: 8px;
   white-space: nowrap;
+  /* Badges always render white text — their semi-transparent dark
+     backgrounds (Host / Me / TAP / Racing) would be unreadable if they
+     inherited the card header's flipped-to-black text colour when the
+     pilot picks a light card colour. */
+  color: #fff;
 }
 .mn-card-racing  { background: rgba(0,0,0,0.25); color: #fff; }
 .mn-card-dnf     { background: rgba(255,152,0,0.85); color: #fff; }

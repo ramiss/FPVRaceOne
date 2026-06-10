@@ -463,6 +463,54 @@ void MultiNodeManager::_checkNodeTimeouts(uint32_t currentTimeMs) {
     // Nodes are never auto-removed — use removeNode() to manually free a slot.
 }
 
+bool MultiNodeManager::moveNode(uint8_t fromNodeId, uint8_t toSlot) {
+    if (!isMasterMode()) return false;
+    if (fromNodeId == 0 || toSlot == 0) return false;  // master can't be moved or be a target
+    if (fromNodeId > MULTINODE_MAX_NODES || toSlot > MULTINODE_MAX_NODES) return false;
+    if (fromNodeId == toSlot) return true;  // no-op
+
+    NodeInfo* source = nullptr;
+    NodeInfo* target = nullptr;
+    for (auto& n : _nodes) {
+        if (n.nodeId == fromNodeId) source = &n;
+        if (n.nodeId == toSlot)     target = &n;
+    }
+    if (!source) return false;
+
+    // POST /multinode/setSlot?slot=N to the given client IP.  Best-effort:
+    // a failed POST still updates the master's _nodes list so the UI is
+    // consistent; the client will re-sync to the new slot on its next
+    // registration (it uses macMatch in handleRegister to find its NodeInfo
+    // by MAC, regardless of slot id mismatches).
+    auto sendSetSlot = [](const String& staIP, uint8_t newSlot) -> bool {
+        if (staIP.isEmpty()) return false;
+        HTTPClient http;
+        String url = "http://" + staIP + "/multinode/setSlot?slot=" + String(newSlot);
+        if (!http.begin(url)) return false;
+        http.setTimeout(800);
+        int code = http.POST("");
+        http.end();
+        return code == 200;
+    };
+
+    sendSetSlot(source->staIP, toSlot);
+    if (target) {
+        sendSetSlot(target->staIP, fromNodeId);
+        target->nodeId = fromNodeId;
+    }
+    source->nodeId = toSlot;
+    return true;
+}
+
+void MultiNodeManager::touchNode(uint8_t nodeId) {
+    for (auto& n : _nodes) {
+        if (n.nodeId == nodeId) {
+            n.lastSeen = millis();
+            return;
+        }
+    }
+}
+
 bool MultiNodeManager::removeNode(uint8_t nodeId) {
     for (auto it = _nodes.begin(); it != _nodes.end(); ++it) {
         if (it->nodeId == nodeId) {

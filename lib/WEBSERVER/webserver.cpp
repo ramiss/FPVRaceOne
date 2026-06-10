@@ -367,15 +367,16 @@ void Webserver::startAP() {
     WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
 
     DEBUG("Starting WiFi AP: %s with password: %s on ch%d\n", wifi_ap_ssid.c_str(), wifi_ap_password, apChannel);
-    // Master: 7 client STAs + 1 race-director phone = 8 expected slots; we set
-    // 9 to keep 1 buffer slot so a single stray pilot connection can't lock
-    // the director out of their own master.
-    //
-    // Single: 5 — up to 4 pilot phones + 1 reserved slot for an inbound master
-    // doing a "Recruit Nearby Units" scan.  The recruit job needs to associate
-    // as a STA to push config, and that has to fit even when the unit already
-    // has pilots connected to it.
-    uint8_t maxConn = (conf->getNodeMode() == 1) ? 9 : 5;
+    // All modes use the same 9-slot AP cap.  Master needs 7 client STAs + 1
+    // director phone + 1 buffer.  Single and client modes don't need that
+    // many normally, but a unit that was just demoted from master can have
+    // up to 7 stale ex-clients still trying to reattach at their cached
+    // SSID — capping single at 5 made it impossible for the director's
+    // phone to win a slot against them.  9 across the board keeps the
+    // recruit-job's spare slot intact in single mode too.  LwIP's 16-slot
+    // TCP ceiling has plenty of headroom over 9 WiFi stations (idle
+    // stations don't consume TCP slots).
+    uint8_t maxConn = 9;
     WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
 
     // Master: embed a 6-byte vendor IE in every beacon and probe-response so
@@ -484,14 +485,34 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
             led->blink(200);
         }
     }
-    // Client mode: probe the master's AP every 5 s when STA is down.
-    // WiFi.reconnect() targets only the last known channel (no full scan),
-    // so the radio is off-channel for just a few ms — AP clients stay connected.
-    if (wifiMode == WIFI_AP_STA && status != WL_CONNECTED &&
-        (currentTimeMs - changeTimeMs) > 5000) {
-        changeTimeMs = currentTimeMs;
-        DEBUG("[MULTINODE] STA reconnecting to master...\n");
-        WiFi.reconnect();
+    // Client mode: probe the master's AP when STA is down.  WiFi.reconnect()
+    // targets only the last known channel (no full scan), so the radio is
+    // off-channel for just a few ms — AP clients stay connected.
+    //
+    // Backoff: 5 s for the first 6 attempts (~30 s of trying), then 15 s for
+    // the next 8 (~2 min total), then 30 s thereafter.  This stops a stale
+    // ex-client from hammering an unreachable AP indefinitely — important
+    // when a master has been demoted to single and 7 ex-clients are now
+    // racing the director's phone for AP slots.  A successful association
+    // resets the counter; a real master coming back online is noticed
+    // within at most 30 s.
+    if (wifiMode == WIFI_AP_STA) {
+        if (status == WL_CONNECTED) {
+            if (staFailedReconnects > 0) {
+                DEBUG("[MULTINODE] STA reassociated, resetting backoff\n");
+            }
+            staFailedReconnects = 0;
+            staBackoffMs        = 5000;
+        } else if ((currentTimeMs - changeTimeMs) > staBackoffMs) {
+            changeTimeMs = currentTimeMs;
+            staFailedReconnects++;
+            if      (staFailedReconnects >= 14) staBackoffMs = 30000;
+            else if (staFailedReconnects >= 6)  staBackoffMs = 15000;
+            else                                staBackoffMs = 5000;
+            DEBUG("[MULTINODE] STA reconnecting (fail #%u, next probe in %u ms)\n",
+                  (unsigned)staFailedReconnects, (unsigned)staBackoffMs);
+            WiFi.reconnect();
+        }
     }
     if (changeMode != wifiMode && changeMode != WIFI_OFF && (currentTimeMs - changeTimeMs) > WIFI_RECONNECT_TIMEOUT_MS) {
         switch (changeMode) {
@@ -513,7 +534,11 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 // Client AP stays on 192.168.4.1 (pilots use the same IP as always).
                 // Master uses 192.168.5.1, so there is no subnet conflict.
                 WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
-                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, 0, 0, 4);
+                // 9 slots matches the master / single cap so a client node
+                // that was previously a master with 7 attached pilots can
+                // still let the director's phone in alongside the legacy
+                // STA reconnection storm.
+                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, 0, 0, 9);
 
                 // Disable modem power save on both interfaces for AP+STA stability
                 esp_wifi_set_ps(WIFI_PS_NONE);
@@ -950,6 +975,27 @@ EEPROM:\n\
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
+    // /multinode/setSlot?slot=N — master tells this client to adopt a new slot.
+    // Updates the in-memory _myNodeId immediately (so the next heartbeat carries
+    // the new id) and persists to NVS via Config::setMnPreferredSlot so a reboot
+    // also comes up with the new slot.  Client-mode only; master can't move
+    // itself and a single-mode device has no slot.
+    server.on("/multinode/setSlot", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isClientMode()) {
+            request->send(403, "application/json", "{\"error\":\"client only\"}"); return;
+        }
+        if (!request->hasParam("slot")) {
+            request->send(400, "application/json", "{\"error\":\"missing slot\"}"); return;
+        }
+        uint8_t newSlot = (uint8_t)request->getParam("slot")->value().toInt();
+        if (newSlot == 0 || newSlot > MULTINODE_MAX_NODES) {
+            request->send(400, "application/json", "{\"error\":\"invalid slot\"}"); return;
+        }
+        multiNode->setMyNodeId(newSlot);
+        if (conf) conf->setMnPreferredSlot(newSlot);
+        request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
+
     // /api/multinode/pauseReconnect — client pauses reconnection after being kicked by master
     server.on("/api/multinode/pauseReconnect", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (multiNode && multiNode->isClientMode()) multiNode->pauseReconnect(60000);
@@ -1125,12 +1171,18 @@ EEPROM:\n\
         led->on(200);
     });
 
-    // Snapshot of the current RSSI as a single value.  Used by the master's
-    // Edit Pilot modal to poll a client's live signal at ~5 Hz over HTTP (the
-    // master can't easily subscribe to a client's SSE channel, so we expose
-    // the value as a plain JSON poll endpoint instead).
+    // Peak-since-last-call RSSI as a single value.  Used by the master's
+    // Edit Pilot modal to poll a client's live signal at 5 Hz over HTTP.
+    // We return the PEAK rather than the instantaneous sample because a
+    // fast drone's gate pass produces a peak that may only last a few ms —
+    // sampling at 5 Hz would miss it most of the time.  The accumulator
+    // updates at full sample rate (handleLapTimerUpdate, hundreds of Hz)
+    // so we always capture the true peak between polls.
+    //
+    // The Calibration tab's chart is unaffected — it uses the separate
+    // SSE "rssi" event which still streams getRssi() at 10 Hz.
     server.on("/timer/rssi", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        uint8_t rssi = timer ? timer->getRssi() : 0;
+        uint8_t rssi = timer ? timer->getRssiPeakSinceLast() : 0;
         char buf[24];
         snprintf(buf, sizeof(buf), "{\"rssi\":%u}", rssi);
         request->send(200, "application/json", buf);
@@ -2224,6 +2276,25 @@ EEPROM:\n\
         });
     server.addHandler(mnRemoveHandler);
 
+    // /api/multinode/move?from=N&to=M — master moves a node to a new slot.
+    // If the target slot is occupied the two nodes swap.  Synchronous: the
+    // master POSTs setSlot to each affected client over WiFi before
+    // responding so the browser can refresh once with the final state.
+    server.on("/api/multinode/move", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isMasterMode()) {
+            request->send(403, "application/json", "{\"error\":\"master only\"}"); return;
+        }
+        if (!request->hasParam("from") || !request->hasParam("to")) {
+            request->send(400, "application/json", "{\"error\":\"missing from/to\"}"); return;
+        }
+        uint8_t fromId = (uint8_t)request->getParam("from")->value().toInt();
+        uint8_t toSlot = (uint8_t)request->getParam("to")->value().toInt();
+        bool ok = multiNode->moveNode(fromId, toSlot);
+        if (ok) pushMultiNodeState();
+        request->send(ok ? 200 : 400, "application/json",
+                      ok ? "{\"status\":\"OK\"}" : "{\"status\":\"FAILED\"}");
+    });
+
     // /api/multinode/kickNode — like removeNode but first tells the client to pause reconnecting
     AsyncCallbackJsonWebHandler *mnKickHandler = new AsyncCallbackJsonWebHandler(
         "/api/multinode/kickNode",
@@ -2322,6 +2393,36 @@ EEPROM:\n\
             uint8_t    enterRssi        = obj["enterRssi"]        | 0;
             bool       hasExit          = obj.containsKey("exitRssi");
             uint8_t    exitRssi         = obj["exitRssi"]         | 0;
+
+            // nodeId 0 is the master itself — short-circuit the HTTP proxy
+            // (we'd be trying to talk to ourselves) and apply the patch
+            // straight to the local Config, mirroring what /api/pilotInfo
+            // does on a client.  Push pilotInfoChanged SSE so the host's
+            // browser reflects the new values immediately.
+            if (nodeId == 0) {
+                DynamicJsonDocument patch(256);
+                if (hasPilotName)  patch["name"]              = pilotName;
+                if (hasPilotColor) patch["pilotColor"]        = pilotColor;
+                if (hasBand) {
+                    patch["band"] = bandIndex;
+                    patch["chan"] = chanIndex;
+                    patch["freq"] = freq;
+                }
+                if (hasSkip)  patch["mnSkipMasterStart"] = skipMasterStart;
+                if (hasEnter) patch["enterRssi"]         = enterRssi;
+                if (hasExit)  patch["exitRssi"]          = exitRssi;
+                conf->fromJson(patch.as<JsonObject>());
+                conf->write();
+                DynamicJsonDocument notify(128);
+                notify["name"]       = conf->getPilotName();
+                notify["pilotColor"] = conf->getPilotColor();
+                String notifyStr;
+                serializeJson(notify, notifyStr);
+                events.send(notifyStr.c_str(), "pilotInfoChanged");
+                pushMultiNodeState();
+                request->send(200, "application/json", "{\"status\":\"OK\"}");
+                return;
+            }
 
             String staIP;
             const auto& nodes = multiNode->getNodes();
@@ -2500,6 +2601,10 @@ EEPROM:\n\
         int code = http.GET();
         String body = (code == 200) ? http.getString() : String("{\"rssi\":0}");
         http.end();
+        // A successful round-trip is proof of life — bump the node's lastSeen
+        // so the heartbeat watchdog doesn't false-positive while the master
+        // is hammering the link at 5 Hz from the Edit Pilot modal.
+        if (code == 200) multiNode->touchNode(nodeId);
         request->send(code == 200 ? 200 : 502, "application/json", body);
     });
 

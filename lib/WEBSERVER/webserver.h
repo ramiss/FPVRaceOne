@@ -70,4 +70,11 @@ class Webserver : public TransportInterface {
     uint32_t rssiSentMs = 0;
     uint32_t sseKeepaliveMs = 0;
     uint8_t apChannel = 0;  // 0 = not yet scanned; first AP start picks the least-congested 1/6/11
+
+    // Client-mode STA reconnect backoff.  When the master can't be reached
+    // we stretch the reconnect interval after consecutive failures so a
+    // fleet of stale ex-clients doesn't pound an unreachable AP at 5 s
+    // intervals forever.  Resets the instant the STA reassociates.
+    uint32_t staFailedReconnects = 0;
+    uint32_t staBackoffMs        = 5000;
 };

@@ -40,6 +40,14 @@ class LapTimer {
     RssiSnapshot snapshot = {};
 #endif
     uint8_t getRssi();
+    // Peak RSSI seen since the last call to this method, then resets the
+    // accumulator to the current sample.  Used by the Edit Pilot modal's
+    // live RSSI feed so a fast drone's brief peak gets captured even if the
+    // 200 ms HTTP poll happens to land at a non-peak moment.  Reading is
+    // O(1); the accumulator updates inside handleLapTimerUpdate() so peaks
+    // are tracked at the full sample rate (hundreds of Hz), not the poll
+    // rate (5 Hz).
+    uint8_t getRssiPeakSinceLast();
     uint32_t getLapTime();
     uint8_t  getLastLapPeakRssi() const;
     bool isLapAvailable();
@@ -54,6 +62,12 @@ class LapTimer {
     uint32_t getCalibrationTimestamp(uint16_t index);
     
    private:
+    // Peak RSSI seen since the last getRssiPeakSinceLast() call.  Volatile +
+    // single-byte means reads / writes are atomic on the ESP32, so the
+    // sampling side (high-rate, Core 1 main loop) and the HTTP read side
+    // (AsyncWebServer task on Core 0) don't need a mutex.  The worst race
+    // is a single dropped peak update — acceptable.
+    volatile uint8_t rssiPeakSinceLast = 0;
     laptimer_state_e state = STOPPED;
     RX5808 *rx;
     Config *conf;

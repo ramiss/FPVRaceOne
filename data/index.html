@@ -325,9 +325,16 @@
 
     <!-- Node Pilot Edit Modal -->
     <div id="mnPilotModal" class="modal" style="display:none;" onclick="mnClosePilotModalBackdrop(event)">
-      <div class="modal-content" style="max-width:360px;">
+      <!-- modal-content is a flex column capped at 90vh: title + subtitle stay
+           fixed at the top, Cancel/Save stay fixed at the bottom, and the
+           middle section (Pilot Name through Kick From Slot) scrolls inside
+           the flex child below.  min-height:0 on the scroller is required
+           so that overflow:auto child shrinks within the flex parent rather
+           than blowing past max-height. -->
+      <div class="modal-content" style="max-width:384px; display:flex; flex-direction:column; max-height:90vh;">
         <h3 id="mnPilotModalTitle" style="margin-bottom:2px;">Edit Pilot</h3>
         <div id="mnPilotModalSubtitle" style="margin: 0 0 14px; font-size:13px; font-weight:600; color: var(--secondary-color);"></div>
+        <div id="mnPilotModalScroll" style="overflow-y:auto; flex:1 1 auto; min-height:0; padding-right:6px;">
         <div class="config-item" style="margin-bottom:14px;">
           <label for="mnPilotModalName">Pilot Name</label>
           <input type="text" id="mnPilotModalName" autocomplete="off" style="width:100%;box-sizing:border-box;">
@@ -394,9 +401,13 @@
              the firmware streams RSSI samples to the chart loop during a race
              and we don't want to interfere. -->
         <div id="mnPilotModalRssiSection" style="margin-bottom:14px;">
-          <div style="display:flex; align-items:baseline; gap:10px; margin-bottom:4px;">
+          <div style="display:flex; align-items:center; gap:10px; margin-bottom:4px;">
             <label style="font-weight:600; margin:0;">Live RSSI</label>
             <span id="mnPilotModalRssiVal" style="font-size:12px; color:var(--secondary-color);">—</span>
+            <label class="switch" style="margin-left:auto; flex-shrink:0;" title="Toggle live RSSI polling">
+              <input type="checkbox" id="mnPilotModalRssiToggle" onchange="onMnModalRssiToggle(this.checked)">
+              <span class="slider"></span>
+            </label>
           </div>
           <!-- Explicit width / height attributes — NOT just CSS — so SmoothieChart's
                first responsive measurement isn't 0×0.  The chart re-measures via
@@ -441,14 +452,25 @@
           </div>
         </div>
 
+        <!-- Move this pilot to a different slot.  If the target slot is
+             occupied, the two nodes swap places.  Hidden for the master's
+             own card (the master always lives at nodeId 0). -->
+        <div id="mnPilotModalMoveSection" class="config-item" style="margin-bottom:14px;">
+          <label for="mnPilotModalMoveSlot">Move (Swap) Pilot to Slot:</label>
+          <select id="mnPilotModalMoveSlot" style="padding:6px;"></select>
+        </div>
+
         <div class="config-item" style="margin-bottom:14px;">
           <label for="mnPilotModalSkip">Ignore Race Director Start/Stop</label>
           <input type="checkbox" id="mnPilotModalSkip">
         </div>
-        <div style="margin-top:6px;">
+        <!-- Kick section: hidden for the master's own card (nodeId 0) — the
+             master can't be kicked from itself.  Toggled in mnOpenPilotModal. -->
+        <div id="mnPilotModalKickSection" style="margin-top:6px;">
           <button onclick="mnRemoveFromModal()" style="width:100%;background:#c0392b!important;color:#fff!important;">Kick From Slot — pauses reconnect for 1 minute</button>
         </div>
-        <div style="display:flex;gap:8px;margin-top:10px;">
+        </div><!-- /#mnPilotModalScroll -->
+        <div style="display:flex;gap:8px;margin-top:10px;flex-shrink:0;">
           <button onclick="mnClosePilotModal()" style="background:var(--border-color)!important;color:var(--text-color)!important;">Cancel</button>
           <button onclick="mnSavePilotModal()" style="margin-left:auto;">Save</button>
         </div>

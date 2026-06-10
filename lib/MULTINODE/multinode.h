@@ -85,6 +85,26 @@ public:
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
     bool   handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
+    // Master-side: bump a node's lastSeen without a full heartbeat.  Used by
+    // request handlers that already proved the client is reachable (e.g. the
+    // RSSI proxy successfully completed a round-trip) — keeps the heartbeat
+    // watchdog from marking the client offline when the link is in heavy use
+    // and incoming heartbeat packets are sometimes lost in the WiFi traffic.
+    void   touchNode(uint8_t nodeId);
+
+    // Master-side: move a node to a different slot.  If the target slot is
+    // already occupied the two nodes swap places.  Both affected clients
+    // receive a setSlot command so they persist the new preferred slot to
+    // EEPROM and update their _myNodeId immediately; the master's own _nodes
+    // list is updated in-place so subsequent heartbeats arrive labelled with
+    // the new slot ids and match cleanly.  Returns true on success.
+    bool   moveNode(uint8_t fromNodeId, uint8_t toSlot);
+
+    // Client-side: set the local node id at runtime (after master sends a
+    // setSlot command following a move).  The caller is expected to also
+    // persist the new value via Config::setMnPreferredSlot.
+    void   setMyNodeId(uint8_t newId) { _myNodeId = newId; }
+
     bool   removeNode(uint8_t nodeId);     // master: manually remove a node slot
     bool   updateNodePilot(uint8_t nodeId, const String& name, uint32_t color);
     bool   updateNodeChannel(uint8_t nodeId, uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency);
