@@ -6819,7 +6819,8 @@ async function recruitNearbyUnits() {
     <div style="font-size:26px;font-weight:700;margin-bottom:14px;">Configuring nearby units as clients…</div>
     <div style="font-size:15px;opacity:0.85;margin-bottom:6px;max-width:520px;line-height:1.55;">
       This master node is currently disconnected and recruiting other FPVRaceOne units.<br>
-      The access point will return automatically when configuration is complete.
+      The access point will return automatically when configuration is complete.<br>
+      (Note you may need to reconnect to the master's wifi)
     </div>
     <div id="_recruitStatusLine" style="font-size:13px;opacity:0.7;margin-top:18px;">Waiting for master to come back…</div>`;
   document.body.appendChild(overlay);

@@ -485,17 +485,31 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
             led->blink(200);
         }
     }
-    // Client mode: probe the master's AP when STA is down.  WiFi.reconnect()
-    // targets only the last known channel (no full scan), so the radio is
-    // off-channel for just a few ms — AP clients stay connected.
+    // Client mode: probe the master's AP when STA is down.
     //
-    // Backoff: 5 s for the first 6 attempts (~30 s of trying), then 15 s for
-    // the next 8 (~2 min total), then 30 s thereafter.  This stops a stale
-    // ex-client from hammering an unreachable AP indefinitely — important
-    // when a master has been demoted to single and 7 ex-clients are now
-    // racing the director's phone for AP slots.  A successful association
-    // resets the counter; a real master coming back online is noticed
-    // within at most 30 s.
+    // Two-stage strategy:
+    //
+    //   Tiers 1+2 use WiFi.reconnect(), which targets only the cached BSSID +
+    //   channel from the last successful association.  Fast, no scan, the
+    //   radio stays on-channel so AP pilots aren't disrupted.
+    //
+    //   Tier 3 (after ~2 min of failure) promotes to WiFi.begin(ssid, pass),
+    //   which DOES scan.  Required because the master's startAP() runs
+    //   selectBestWifiChannel() afresh every boot — a master reboot can land
+    //   it on a different channel, leaving WiFi.reconnect() probing the old
+    //   channel forever ("master comes back and all but 1–2 clients never
+    //   reconnect" bug).  The off-channel cost is tolerable in tier 3
+    //   because by then there are almost certainly no pilots attached to
+    //   this client's own AP.
+    //
+    //   Backoff cadence:
+    //     attempts  1–5  : 5  s, WiFi.reconnect()   (~30 s total)
+    //     attempts  6–13 : 15 s, WiFi.reconnect()   (~2 min total)
+    //     attempts 14+   : 30 s, WiFi.begin()       (full scan, finds the
+    //                                                 master on any channel)
+    //
+    //   A successful association resets staFailedReconnects to 0 so the
+    //   normal 5 s cadence is restored the next time STA disassociates.
     if (wifiMode == WIFI_AP_STA) {
         if (status == WL_CONNECTED) {
             if (staFailedReconnects > 0) {
@@ -506,12 +520,29 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         } else if ((currentTimeMs - changeTimeMs) > staBackoffMs) {
             changeTimeMs = currentTimeMs;
             staFailedReconnects++;
-            if      (staFailedReconnects >= 14) staBackoffMs = 30000;
-            else if (staFailedReconnects >= 6)  staBackoffMs = 15000;
-            else                                staBackoffMs = 5000;
-            DEBUG("[MULTINODE] STA reconnecting (fail #%u, next probe in %u ms)\n",
+            bool useFullScan = false;
+            if (staFailedReconnects >= 14) {
+                staBackoffMs = 30000;
+                useFullScan  = true;
+            } else if (staFailedReconnects >= 6) {
+                staBackoffMs = 15000;
+            } else {
+                staBackoffMs = 5000;
+            }
+            DEBUG("[MULTINODE] STA %s (fail #%u, next probe in %u ms)\n",
+                  useFullScan ? "begin (full scan)" : "reconnect",
                   (unsigned)staFailedReconnects, (unsigned)staBackoffMs);
-            WiFi.reconnect();
+            if (useFullScan) {
+                // Re-issue full SSID-based connect — scans all channels.
+                // Required when the master rebooted onto a different channel
+                // (selectBestWifiChannel can land elsewhere if interference
+                // changed) and the cached BSSID/channel that WiFi.reconnect
+                // targets no longer exists.
+                WiFi.disconnect(false, false);
+                WiFi.begin(conf->getMasterSSID(), conf->getMasterPassword());
+            } else {
+                WiFi.reconnect();
+            }
         }
     }
     if (changeMode != wifiMode && changeMode != WIFI_OFF && (currentTimeMs - changeTimeMs) > WIFI_RECONNECT_TIMEOUT_MS) {
