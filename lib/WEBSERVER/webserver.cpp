@@ -281,9 +281,30 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     String pilotName = conf && conf->getPilotName() ? String(conf->getPilotName()) : String();
     uint32_t pilotColor = conf ? conf->getPilotColor() : 0x0080FFu;
 
+    // Mirror EVERY field the Edit Pilot modal reads when it populates the
+    // form for the host card.  Without these, the modal showed defaults
+    // (Band 0 / Chan 1 / skip off / Enter 120 / Exit 100) regardless of
+    // what was actually stored, AND clicking Save then wrote those
+    // defaults back to the master's Config — silently nuking real
+    // settings.  The Edit Pilot modal sends every field on every Save
+    // (mnSavePilotModal in script.js), so the populate path is the only
+    // gate.
+    uint8_t  masterEnter   = conf ? conf->getEnterRssi()         : 0;
+    uint8_t  masterExit    = conf ? conf->getExitRssi()          : 0;
+    uint8_t  masterBand    = conf ? conf->getBandIndex()         : 0;
+    uint8_t  masterChan    = conf ? conf->getChannelIndex()      : 0;
+    uint16_t masterFreq    = conf ? conf->getFrequency()         : 0;
+    bool     masterSkip    = conf ? conf->getMnSkipMasterStart() : false;
+
     String  masterStr     = "{\"nodeId\":0,\"isMaster\":true,\"online\":true";
     masterStr += ",\"pilotName\":\""; masterStr += _jsonEscape(pilotName); masterStr += "\"";
     masterStr += ",\"pilotColor\":";  masterStr += pilotColor;
+    masterStr += ",\"bandIndex\":";   masterStr += masterBand;
+    masterStr += ",\"channelIndex\":"; masterStr += masterChan;
+    masterStr += ",\"frequency\":";   masterStr += masterFreq;
+    masterStr += ",\"skipEnabled\":"; masterStr += masterSkip ? "true" : "false";
+    masterStr += ",\"enterRssi\":";   masterStr += masterEnter;
+    masterStr += ",\"exitRssi\":";    masterStr += masterExit;
     masterStr += ",\"running\":";  masterStr += masterRunning ? "true" : "false";
     masterStr += ",\"lapCount\":"; masterStr += masterCnt;
     masterStr += ",\"laps\":[";
@@ -1239,6 +1260,16 @@ EEPROM:\n\
         // and we don't lose changes if the unit reboots before the periodic
         // EEPROM handler runs.
         conf->write();
+
+        // Master mode: republish the multi-node state so the master's browser
+        // refreshes its mnCurrentNodes cache.  Without this, anything the
+        // Edit Pilot modal reads off the host card (pilotName, pilotColor,
+        // band/chan/freq, enterRssi, exitRssi, skipEnabled) stays stale
+        // after a Settings or Calibration-tab Save until the next periodic
+        // poll fires — and "the modal and the Calibration tab disagree on
+        // enterRssi" is the most visible symptom of that staleness.
+        // pushMultiNodeState() no-ops outside master mode.
+        pushMultiNodeState();
 
         request->send(200, "application/json", "{\"status\": \"OK\"}");
         led->on(200);

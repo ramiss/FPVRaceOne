@@ -300,7 +300,7 @@
         <div id="calibrationOverviewNotice" style="display:none; margin: 10px 0; font-weight: 600;">
           Calibration updated. Tweak as necessary to your peaks and click one of the buttons below to continue
         </div>
-        <button onclick="saveRSSIThresholds()">Save RSSI Thresholds</button>
+        <button id="saveRssiBtn" onclick="saveRSSIThresholds()">Save RSSI Thresholds</button>
         <button
           id="pauseCalibBtn"
           class="btn"
@@ -516,6 +516,7 @@
               <li>Fly through the gate 3 times <strong>at full racing speed</strong></li>
               <li>The wizard measures your narrowest peak so the smoothing filter doesn't crush fast passes</li>
               <li>Click "Stop Recording" when finished</li>
+              <li>Note: It is highly recommended that VTX power be set to the same fixed number for calibration and racing.</li>
             </ol>
           </div>
           <div class="wizard-status">

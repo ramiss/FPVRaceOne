@@ -104,6 +104,34 @@ const ota = document.getElementById("ota");
 
 var enterRssi = 120,
   exitRssi = 100;
+
+// Last-persisted enter / exit values — kept separate from `enterRssi` /
+// `exitRssi` (the live slider values) so the Save RSSI Thresholds button
+// can light up "dirty" the moment a slider moves and clear the instant
+// the values are persisted.  The Settings modal's saveConfigBtn tracks
+// dirty via stagedConfig, but enter / exit have multiple save paths
+// (Calibration tab's Save RSSI, the wizard's Apply, /api/multinode/editPilot
+// self-edit) and stagedConfig isn't kept in sync across all of them.  A
+// dedicated baseline avoids piggy-backing on that flaky state.
+let _rssiSavedEnter = null;
+let _rssiSavedExit  = null;
+
+function _rssiHasUnsavedChanges() {
+  return (_rssiSavedEnter !== null && enterRssi !== _rssiSavedEnter)
+      || (_rssiSavedExit  !== null && exitRssi  !== _rssiSavedExit);
+}
+
+function updateRssiSaveButton() {
+  const btn = document.getElementById('saveRssiBtn');
+  if (!btn) return;
+  btn.classList.toggle('dirty', _rssiHasUnsavedChanges());
+}
+
+function _markRssiSaved(enter, exit) {
+  if (Number.isFinite(enter)) _rssiSavedEnter = enter;
+  if (Number.isFinite(exit))  _rssiSavedExit  = exit;
+  updateRssiSaveButton();
+}
 var frequency = 0;
 var announcerRate = 1.0;
 
@@ -953,6 +981,16 @@ onload = async function (e) {
       updateExitRssi(exitRssiInput, exitRssiInput.value);
     }
 
+    // Seed the RSSI saved-baseline.  updateEnterRssi/updateExitRssi above
+    // ran updateRssiSaveButton() against a still-null baseline, so the
+    // button looked clean — but only because the comparison short-circuits.
+    // Calling _markRssiSaved here pins the freshly-loaded values as the
+    // baseline so subsequent slider moves correctly flip the button dirty.
+    _markRssiSaved(
+      configData.enterRssi !== undefined ? parseInt(configData.enterRssi) : enterRssi,
+      configData.exitRssi  !== undefined ? parseInt(configData.exitRssi)  : exitRssi
+    );
+
     if (configData.name !== undefined && pilotNameInput) pilotNameInput.value = configData.name;
     if (configData.ssid !== undefined && ssidInput) ssidInput.value = configData.ssid;
     if (configData.pwd !== undefined && pwdInput) pwdInput.value = configData.pwd;
@@ -1379,6 +1417,16 @@ function setRssiPaused(paused) {
 }
 
 function toggleRssiPaused() {
+  // "Exit Wizard" path: in overview mode the pause/resume button's text
+  // changes to "Exit Wizard", and unpausing tears down the overview to
+  // return to the live scanner.  If the user adjusted Enter / Exit since
+  // the last save (manually after the wizard, or before clicking Save
+  // RSSI) they're about to leave with unsaved values — confirm first.
+  if (calibOverviewMode && rssiPaused && _rssiHasUnsavedChanges()) {
+    if (!confirm('You have not saved the new values.\n\nAre you sure you want to exit?')) {
+      return;
+    }
+  }
   setRssiPaused(!rssiPaused);
 }
 
@@ -1930,6 +1978,9 @@ function updateEnterRssi(obj, value) {
 
   // NEW: if paused, redraw overlay so the line moves immediately
   redrawCalibrationLinesIfPaused();
+  // Flip the Save RSSI Thresholds button to dirty/clean based on the new
+  // values vs. the last-persisted baseline.
+  updateRssiSaveButton();
 }
 
 
@@ -1949,6 +2000,7 @@ function updateExitRssi(obj, value) {
 
   // NEW: if paused, redraw overlay so the line moves immediately
   redrawCalibrationLinesIfPaused();
+  updateRssiSaveButton();
 }
 
 function stageBandChan() {
@@ -2144,6 +2196,11 @@ function saveRSSIThresholds() {
   if (enterEl) stageConfig('enterRssi', parseInt(enterEl.value || 0));
   if (exitEl)  stageConfig('exitRssi',  parseInt(exitEl.value  || 0));
   saveConfig();
+  // saveConfig is async fire-and-forget — advance the baseline optimistically
+  // so the dirty indicator clears immediately.  If /config actually fails
+  // the next slider drag will still re-trigger updateRssiSaveButton; this
+  // matches the UX of the other Save paths.
+  _markRssiSaved(enterRssi, exitRssi);
 }
 
 async function saveConfig() {
@@ -5647,10 +5704,17 @@ async function applyCalculatedThresholds() {
   const enter = wizardState.calculatedEnter;
   const exit  = wizardState.calculatedExit;
 
-  if (wizardTargetNodeId > 0) {
-    // Remote wizard — push the new thresholds to the client via the master's
-    // editPilot proxy.  Only enterRssi/exitRssi are sent so the rest of the
-    // client's config (pilot name, freq, etc.) is untouched.
+  // In master mode — for both a client target (wizardTargetNodeId > 0) AND
+  // the master's own card (wizardTargetNodeId === 0) — route through the
+  // /api/multinode/editPilot endpoint.  The firmware-side handler has a
+  // self-edit branch that applies the patch to the master's own Config when
+  // nodeId === 0, which is the persistent save path for the host case.
+  //
+  // The old "wizardTargetNodeId > 0 ? proxy : local" split sent the master
+  // self-edit through a full-snapshot saveConfig() that didn't advance
+  // baselineConfig or clear stagedConfig — leaving the dirty-tracking
+  // flags stuck and effectively never re-syncing the Calibration tab UI.
+  if (mnNodeMode === 1) {
     const nodeId = wizardTargetNodeId;
     try {
       const r = await fetch('/api/multinode/editPilot', {
@@ -5659,26 +5723,61 @@ async function applyCalculatedThresholds() {
         body: JSON.stringify({ nodeId, enterRssi: enter, exitRssi: exit }),
       });
       if (!r.ok) {
-        alert('Could not push calibration to client — is the node still connected?');
+        const target = (nodeId === 0) ? 'master' : 'client';
+        alert(`Could not push calibration to ${target} — is the node still connected?`);
         return;
       }
-      // Reflect on master's cached nodes so the Edit Pilot modal reopens with
-      // the new values without waiting for the next heartbeat.
+      // Update the cached node entry so a reopen of the Edit Pilot modal
+      // shows the new values without waiting for the next director-state
+      // push.  Works for the master entry too now that
+      // _buildDirectorStatePayload includes enterRssi/exitRssi on it.
       const node = (mnCurrentNodes || []).find(n => n.nodeId === nodeId);
       if (node) { node.enterRssi = enter; node.exitRssi = exit; }
+
+      // Master-self case: also sync the Calibration tab's local state so
+      // visiting that tab later shows the up-to-date values, the staged-
+      // config "dirty" indicator clears (we just persisted), and the
+      // Start Wizard button isn't gated behind a phantom Save RSSI click.
+      if (nodeId === 0) {
+        enterRssi = enter;
+        exitRssi  = exit;
+        if (enterRssiInput)  enterRssiInput.value  = enter;
+        if (exitRssiInput)   exitRssiInput.value   = exit;
+        if (enterRssiSpan)   enterRssiSpan.textContent = enter;
+        if (exitRssiSpan)    exitRssiSpan.textContent  = exit;
+        if (baselineConfig && typeof baselineConfig === 'object') {
+          baselineConfig.enterRssi = enter;
+          baselineConfig.exitRssi  = exit;
+        }
+        delete stagedConfig.enterRssi;
+        delete stagedConfig.exitRssi;
+        if (Object.keys(stagedConfig).length === 0) stagedDirty = false;
+        if (typeof updateSaveButton === 'function') updateSaveButton();
+        _markRssiSaved(enter, exit);
+      }
+
+      // For BOTH master-self and client wizards launched from the modal,
+      // the master's Calibration tab is now sitting in overview mode with
+      // Start Wizard disabled — the user never opened that tab and won't
+      // expect to need a Save RSSI click to re-arm.  Clear it.
+      if (calibOverviewMode) exitCalibrationOverviewModeByUserAction();
     } catch (e) {
-      alert('Could not push calibration to client: ' + (e && e.message ? e.message : e));
+      alert('Could not push calibration: ' + (e && e.message ? e.message : e));
       return;
     }
     closeCalibrationWizard();
     return;
   }
 
-  // Local single-mode wizard — original behaviour: update the page's own
-  // enter/exit sliders and persist via /config.
+  // Single mode (mnNodeMode === 0): original local behaviour.  The wizard
+  // was launched from the Calibration tab itself, so leaving overview mode
+  // active is intentional — the user can fine-tune the recommended
+  // thresholds against the visible recording before committing via the
+  // Save RSSI button.
   if (enterRssiInput) { enterRssiInput.value = enter; updateEnterRssi(enterRssiInput, enter); }
   if (exitRssiInput)  { exitRssiInput.value  = exit;  updateExitRssi(exitRssiInput,  exit);  }
   saveConfig();
+  _markRssiSaved(enter, exit);
   closeCalibrationWizard();
 }
 
@@ -7651,14 +7750,11 @@ async function _mnModalRssiStart(nodeId) {
   const canvas  = document.getElementById('mnPilotModalRssiChart');
   const hint    = document.getElementById('mnPilotModalRssiHint');
 
-  // Don't poll while a race is in progress — the firmware is busy streaming
-  // samples to the chart on the device's own SSE channel, and we don't want
-  // to add HTTP load mid-race.  Just show a hint and bail.
-  if (mnRaceRunning) {
-    if (canvas) canvas.style.display = 'none';
-    if (hint)   hint.style.display   = '';
-    return;
-  }
+  // The race-mode block that used to live here is now in onMnModalRssiToggle —
+  // it puts up a confirmation dialog when the user flips the switch ON during
+  // a race so they accept the bandwidth + latency cost explicitly.  By the
+  // time we get here the user has either OK'd that prompt or never saw it,
+  // so we just bring the chart up unconditionally.
   if (canvas) canvas.style.display = '';
   if (hint)   hint.style.display   = 'none';
 
@@ -7692,9 +7788,27 @@ async function _mnModalRssiStart(nodeId) {
 // Off: stop polling and gray out the readout — useful when the director
 // just wants to see / adjust thresholds without burning WiFi bandwidth.
 // On: resume polling for whichever node the modal is currently editing.
+// If a race is in progress we surface a confirm() first — every poll is
+// a master→client HTTP round-trip at 5 Hz that competes with lap-event
+// traffic on the same WiFi, so the director should opt in to that cost
+// explicitly.  If they decline, snap the toggle back to OFF.
 function onMnModalRssiToggle(checked) {
   const valEl = document.getElementById('mnPilotModalRssiVal');
   if (checked) {
+    if (mnRaceRunning) {
+      const ok = confirm(
+        'A race is in progress.\n\n' +
+        'Turning on the live RSSI view will poll this node at 5 Hz over WiFi while the race is running. ' +
+        'That can introduce noticeable lag in lap-event delivery and other multi-node traffic until you turn it back off.\n\n' +
+        'Enable live view anyway?'
+      );
+      if (!ok) {
+        const t = document.getElementById('mnPilotModalRssiToggle');
+        if (t) t.checked = false;
+        if (valEl) valEl.textContent = '(off)';
+        return;
+      }
+    }
     if (_mnModalNodeId !== null && _mnModalNodeId !== undefined) {
       _mnModalRssiStart(_mnModalNodeId).catch(e => console.warn('[mnRssi] resume failed:', e));
     }
@@ -8001,7 +8115,8 @@ function mnStartCalibrationWizardForModal() {
     const ok = confirm(
       `Run the calibration wizard for ${pilotLabel}?\n\n` +
       `${pilotLabel} will need to fly past the gate while you mark each pass. ` +
-      `This will overwrite the current Enter/Exit RSSI on that node.`
+      `This will overwrite the current Enter/Exit RSSI on that node.\n\n`
+      `It is highly recommended that VTX power be set to the same fixed number for calibration and racing.`
     );
     if (!ok) return;
 
@@ -8084,6 +8199,36 @@ async function mnSavePilotModal() {
       body: JSON.stringify(body)
     });
     if (!r.ok) alert('Update failed \u2014 is the client device reachable?');
+    // Master self-edit: also sync the Calibration tab's local inputs +
+    // staged-config tracking so switching to that tab shows the new
+    // values and doesn't surface a phantom "dirty" indicator.  The
+    // firmware /api/multinode/editPilot self-edit branch fires
+    // pushMultiNodeState which refreshes mnCurrentNodes via SSE, but
+    // the Calibration tab's <input id="enter"> / <input id="exit">
+    // and the global enterRssi / exitRssi values are local JS state
+    // that the SSE handler doesn't touch.
+    if (r.ok && nodeId === 0) {
+      if (body.enterRssi !== undefined) {
+        enterRssi = body.enterRssi;
+        if (enterRssiInput) enterRssiInput.value = body.enterRssi;
+        if (enterRssiSpan)  enterRssiSpan.textContent = body.enterRssi;
+        if (baselineConfig && typeof baselineConfig === 'object') baselineConfig.enterRssi = body.enterRssi;
+        delete stagedConfig.enterRssi;
+      }
+      if (body.exitRssi !== undefined) {
+        exitRssi = body.exitRssi;
+        if (exitRssiInput) exitRssiInput.value = body.exitRssi;
+        if (exitRssiSpan)  exitRssiSpan.textContent = body.exitRssi;
+        if (baselineConfig && typeof baselineConfig === 'object') baselineConfig.exitRssi = body.exitRssi;
+        delete stagedConfig.exitRssi;
+      }
+      if (Object.keys(stagedConfig).length === 0) stagedDirty = false;
+      if (typeof updateSaveButton === 'function') updateSaveButton();
+      _markRssiSaved(
+        body.enterRssi !== undefined ? body.enterRssi : enterRssi,
+        body.exitRssi  !== undefined ? body.exitRssi  : exitRssi
+      );
+    }
     // Slot move runs AFTER editPilot so the name / color / band edits land
     // against the source slot first; the move then carries the same node
     // (and any occupant of the target slot) to their new ids.

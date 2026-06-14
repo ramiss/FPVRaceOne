@@ -246,15 +246,19 @@ class AudioAnnouncer {
         const usePiperExclusively = (selectedVoice === 'piper');
         
         try {
-            // If PiperTTS is selected, use it exclusively without trying pre-recorded files
+            // If PiperTTS is selected, use it exclusively without trying pre-recorded files.
+            // Preprocess any lap-time floats >= 60 s into "X minute(s) Y.YY" form so
+            // the TTS reads them as minutes — the digit-clip path below (which would
+            // otherwise do the splitting via speakTime) is skipped on this branch.
             if (usePiperExclusively) {
                 console.log('[AudioAnnouncer] PiperTTS selected - using exclusively');
+                const ttsText = this._preprocessTimeForTts(cleanText);
                 if (this.piperLoaded) {
-                    await this.playPiper(cleanText);
+                    await this.playPiper(ttsText);
                     return;
                 } else {
                     console.warn('[AudioAnnouncer] PiperTTS not loaded, fallback to Web Speech');
-                    await this.playWebSpeech(cleanText);
+                    await this.playWebSpeech(ttsText);
                     return;
                 }
             }
@@ -291,7 +295,7 @@ class AudioAnnouncer {
             if (timeOnlyMatch) {
                 const lapTime = parseFloat(timeOnlyMatch[1]);
                 console.log('[AudioAnnouncer] Detected time-only format:', lapTime);
-                await this.speakNumber(lapTime);
+                await this.speakTime(lapTime);
                 return;
             }
             
@@ -406,7 +410,7 @@ class AudioAnnouncer {
         
         // If PiperTTS is selected, use it exclusively
         if (usePiperExclusively) {
-            const fullText = `${pilot} Lap ${lapNumber}, ${lapTime}`;
+            const fullText = `${pilot} Lap ${lapNumber}, ${this._timeToTtsText(lapTime)}`;
             console.log('[AudioAnnouncer] PiperTTS selected - speaking complex announcement exclusively:', fullText);
             await this.useTtsFallback(fullText);
             return;
@@ -429,8 +433,10 @@ class AudioAnnouncer {
                 console.log('[AudioAnnouncer] Using complex speech with pre-recorded chunks');
                 await this.playPrerecorded(pilotLapPath);
                 await this.speakNumber(lapNumber);
-                // No pause - immediate transition to lap time
-                await this.speakNumber(lapTime);
+                // No pause - immediate transition to lap time.  speakTime
+                // handles the >= 60 s "minute(s)" split so a long lap reads
+                // as "1 minute 15.42" instead of "75.42".
+                await this.speakTime(lapTime);
                 return;
             } else {
                 console.log('[AudioAnnouncer] Pilot-specific audio not found, using split fallback');
@@ -440,13 +446,14 @@ class AudioAnnouncer {
         }
 
         // Split fallback: pilot-name + lap-number through TTS, then the lap
-        // TIME through speakNumber so the digits go through playPrerecorded
-        // (audio.playbackRate honors this.rate reliably).  Dumping the whole
-        // phrase into Web Speech makes the announcer-speed setting feel like
-        // it has no effect on race speech in browsers that handle Web Speech
+        // TIME through speakTime so the digits go through playPrerecorded
+        // (audio.playbackRate honors this.rate reliably) AND a long lap
+        // picks up the "minute(s)" split.  Dumping the whole phrase into
+        // Web Speech makes the announcer-speed setting feel like it has
+        // no effect on race speech in browsers that handle Web Speech
         // rate poorly.
         await this.useTtsFallback(`${pilot} Lap ${lapNumber}`);
-        await this.speakNumber(lapTime);
+        await this.speakTime(lapTime);
     }
     
     /**
@@ -461,7 +468,7 @@ class AudioAnnouncer {
         
         // If PiperTTS is selected, use it exclusively
         if (usePiperExclusively) {
-            const fullText = `Lap ${lapNumber}, ${lapTime}`;
+            const fullText = `Lap ${lapNumber}, ${this._timeToTtsText(lapTime)}`;
             console.log('[AudioAnnouncer] PiperTTS selected - speaking lap+time exclusively:', fullText);
             await this.useTtsFallback(fullText);
             return;
@@ -477,19 +484,21 @@ class AudioAnnouncer {
             if (lapNumber >= 1 && lapNumber <= 50 && await this.hasPrerecordedAudio(lapPath)) {
                 console.log('[AudioAnnouncer] Using pre-recorded lap number:', lapPath);
                 await this.playPrerecorded(lapPath);
-                // No pause - immediate transition to lap time
-                await this.speakNumber(lapTime);
+                // No pause - immediate transition to lap time.  speakTime
+                // handles the >= 60 s "minute(s)" split.
+                await this.speakTime(lapTime);
                 return;
             }
         } catch (e) {
             console.error('[AudioAnnouncer] Lap+time speech failed:', e);
         }
 
-        // Split fallback: lap-number portion via TTS, time via speakNumber so
-        // the digits get audio.playbackRate (honors this.rate reliably).  See
+        // Split fallback: lap-number portion via TTS, time via speakTime so
+        // the digits get audio.playbackRate (honors this.rate reliably) AND
+        // a long lap picks up the "minute(s)" split.  See
         // speakComplexWithPilot for the rationale.
         await this.useTtsFallback(`Lap ${lapNumber}`);
-        await this.speakNumber(lapTime);
+        await this.speakTime(lapTime);
     }
 
     /**
@@ -515,6 +524,63 @@ class AudioAnnouncer {
      * Speak a number naturally (e.g., 11.44 -> "eleven point forty-four")
      * Supports numbers 0-99 as words
      */
+    /**
+     * Speak a duration in seconds.  Below 60 s, behaves exactly like
+     * speakNumber.  At or above 60 s, splits into "X minute(s)" via the TTS
+     * fallback (there's no pre-recorded "minute"/"minutes" clip on the SD
+     * card across voice directories) plus the remaining seconds + centi-
+     * seconds via speakNumber so the digits still come from playPrerecorded
+     * — keeping the announcer rate behaviour consistent for the tail of the
+     * announcement.
+     */
+    async speakTime(seconds) {
+        const totalCs = Math.round(seconds * 100);
+        if (totalCs < 6000) {
+            await this.speakNumber(seconds);
+            return;
+        }
+        const minutes = Math.floor(totalCs / 6000);
+        const remCs   = totalCs - (minutes * 6000);
+        const word    = (minutes === 1) ? 'minute' : 'minutes';
+        await this.useTtsFallback(`${minutes} ${word}`);
+        if (remCs === 0) return;
+        await this.speakNumber(remCs / 100);
+    }
+
+    /**
+     * Render a duration in seconds as a TTS-friendly string.  Used to
+     * interpolate lap times into the Piper-exclusive whole-phrase paths.
+     * Below 60 s returns the raw number ("12.34"); at or above 60 s returns
+     * a phrase the TTS engine reads naturally ("1 minute 15.42").
+     */
+    _timeToTtsText(seconds) {
+        const totalCs = Math.round(seconds * 100);
+        if (totalCs < 6000) return String(seconds);
+        const minutes = Math.floor(totalCs / 6000);
+        const remCs   = totalCs - (minutes * 6000);
+        const word    = (minutes === 1) ? 'minute' : 'minutes';
+        if (remCs === 0) return `${minutes} ${word}`;
+        return `${minutes} ${word} ${(remCs / 100).toFixed(2)}`;
+    }
+
+    /**
+     * Rewrite any float >= 60 seconds in a raw TTS string to its
+     * "X minute(s) Y.YY" form.  Applied to cleanText before sending to
+     * Piper / Web Speech so the user hears the "minutes" word even when
+     * the entire announcement bypasses the format-match digit-clip path
+     * (i.e. when Piper TTS is selected as the exclusive voice).  Integer
+     * "minutes"-less numbers like lap counts ("5") and the seconds piece
+     * of an already-formatted phrase ("15.42" once split) are left alone
+     * because the regex requires a decimal point.
+     */
+    _preprocessTimeForTts(text) {
+        return text.replace(/(\d+\.\d+)/g, (match) => {
+            const f = parseFloat(match);
+            if (f >= 60) return this._timeToTtsText(f);
+            return match;
+        });
+    }
+
     async speakNumber(num) {
         const numStr = num.toString();
         console.log('[AudioAnnouncer] Speaking number:', numStr);
