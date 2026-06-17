@@ -5,13 +5,12 @@
 **Personal FPV Lap Timer**
 
 A single node lap timer that can be networked for multi-pilot (multi-node) racing.
-Fly solo. Race together!
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions, small indoor tracks, and training. No transponders, no complex infrastructure — just plug in, calibrate, and fly.
+A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions or small indoor tracks up to large scale race events. No transponders, no complex infrastructure — just plug in, calibrate, and fly.
 
-**Up to 8 devices can network together over WiFi for head-to-head racing** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required.
+**Up to 8 devices can mesh network together for head-to-head racing** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required. Even while meshed, each lap timer is still accessible by its own pilot.
 
 ---
 
