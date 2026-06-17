@@ -1,5 +1,7 @@
 # FPVRaceOne
 
+![Poster](screenshots/FPVRaceOne_Poster.png.png)
+
 **Personal FPV Lap Timer**
 
 A single node lap timer that can be networked for multi-pilot (multi-node) racing.
