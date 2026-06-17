@@ -10,7 +10,7 @@ A single node lap timer that can be networked for multi-pilot (multi-node) racin
 
 A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions or small indoor tracks up to large scale race events. No transponders, no complex infrastructure — just plug in, calibrate, and fly.
 
-**Up to 8 devices can mesh network together for head-to-head racing** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required. Even while meshed, each lap timer is still accessible by its own pilot.
+**Up to 8 devices can mesh network and sync together for head-to-head racing** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required. Even while meshed, each lap timer is still accessible by its own pilot.
 
 ---
 
@@ -52,15 +52,11 @@ The time between consecutive peaks is your lap time. The signal processing pipel
 
 ### Connectivity
 - **WiFi Access Point** — works with any browser on any device with wifi, no app required
+- **Mesh Network** — up to 7 lap timers can connect to a designated master unit, in addition to the standard Wifi Access Points.
 
 ### Signal Processing
-
 A single 5-stage RSSI processing pipeline based on the upstream FPVGate algorithm:
 **Kalman → Median-of-3 → 7-sample moving average → EMA → step limiter**
-
-- Optional Gate-1 Bootstrap for first-lap detection in close-pattern layouts
-- 3-second ceiling-drift watchdog prevents phantom laps from RSSI drift
-- Tunable EMA smoothing slider (0–10, default 5 = upstream behaviour)
 
 ### RSSI Automatic Calibration Wizard
 - Guided fly-over recording with real-time RSSI chart
@@ -70,9 +66,9 @@ A single 5-stage RSSI processing pipeline based on the upstream FPVGate algorith
 - Live RSSI chart shows exactly what the lap detector sees (final pipeline output)
 
 ### Multi-Node Racing — Built-In Race Directing
-
 Network **up to 8 devices** together with no router and no extra hardware. One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically.
 
+- **Master Recruit** — the master can force recruit (auto-connect) all nearby devices for a quick and painless networking setup.
 - **One-tap Start All / Stop All** — broadcast a synchronised race start to every pilot on the network
 - **Live per-pilot dashboard on the master** — each client renders as a card with pilot name, running indicator (●/○), live lap count, and last lap time, updated via Server-Sent Events with sub-second latency
 - **DNF tracking** — a pilot who taps Stop locally during a master race shows up as **DNF** on the director's screen; the rest of the heat continues uninterrupted
