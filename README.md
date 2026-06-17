@@ -1,6 +1,6 @@
 # FPVRaceOne
 
-![Poster](screenshots/FPVRaceOne_Poster.png.png)
+![Poster](screenshots/FPVRaceOne_Poster.png)
 
 **Personal FPV Lap Timer**
 
