@@ -55,7 +55,7 @@ The time between consecutive peaks is your lap time. The signal processing pipel
 - **Mesh Network** — up to 7 lap timers can connect to a designated master unit, in addition to the standard Wifi Access Points.
 
 ### Signal Processing
-A single 5-stage RSSI processing pipeline based on the upstream FPVGate algorithm:
+A single 5-stage RSSI processing pipeline: 
 **Kalman → Median-of-3 → 7-sample moving average → EMA → step limiter**
 
 ### RSSI Automatic Calibration Wizard
