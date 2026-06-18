@@ -432,11 +432,13 @@ void USBTransport::sendStatusResponse(uint32_t id) {
     JsonObject network = data.createNestedObject("network");
     network["ip"] = WiFi.localIP().toString();
     network["mac"] = WiFi.macAddress();
-    
-    // Battery
-    float voltage = (float)monitor->getBatteryVoltage() / 10;
-    data["batteryVoltage"] = voltage;
-    
+
+    // Battery monitoring was removed (monitor is always nullptr here); previously
+    // this unconditionally dereferenced `monitor`, crashing on any `status` command.
+    if (monitor) {
+        data["batteryVoltage"] = (float)monitor->getBatteryVoltage() / 10.0f;
+    }
+
     serializeJson(doc, Serial);
     Serial.println();
 }

@@ -74,12 +74,22 @@ bool RaceHistory::saveRace(const RaceSession& race) {
         lapsArray.add(lap);
     }
     
+    // Bail before writing if the document overflowed its 16 KB capacity — otherwise
+    // serializeJson() emits truncated/invalid JSON that silently fails to parse on the
+    // next load (the race is then dropped). Failing loudly here is preferable to
+    // persisting a corrupt file.
+    if (doc.overflowed()) {
+        DEBUG("Race JSON overflowed 16384-byte buffer (%u laps); not saving %s\n",
+              (unsigned)race.lapTimes.size(), filepath.c_str());
+        return false;
+    }
+
     String json;
     serializeJson(doc, json);
-    
+
     DEBUG("Saving race JSON: totalDistance=%.2f\n", race.totalDistance);
     DEBUG("JSON content: %s\n", json.c_str());
-    
+
     bool success = storage->writeFile(filepath, json);
     if (success) {
         DEBUG("Saved race to %s (%d bytes)\n", filepath.c_str(), json.length());
@@ -271,10 +281,17 @@ bool RaceHistory::updateRace(uint32_t timestamp, const String& name, const Strin
     for (uint32_t lap : targetRace->lapTimes) {
         lapsArray.add(lap);
     }
-    
+
+    // Don't overwrite the existing file with truncated JSON if we overflowed.
+    if (doc.overflowed()) {
+        DEBUG("Race JSON overflowed 16384-byte buffer on update; keeping previous file %s\n",
+              filepath.c_str());
+        return false;
+    }
+
     String json;
     serializeJson(doc, json);
-    
+
     return storage->writeFile(filepath, json);
 }
 
@@ -368,10 +385,17 @@ bool RaceHistory::updateLaps(uint32_t timestamp, const std::vector<uint32_t>& ne
     for (uint32_t lap : targetRace->lapTimes) {
         lapsArray.add(lap);
     }
-    
+
+    // Don't overwrite the file with truncated JSON if we overflowed.
+    if (doc.overflowed()) {
+        DEBUG("Race JSON overflowed 16384-byte buffer on updateLaps; keeping previous file %s\n",
+              filepath.c_str());
+        return false;
+    }
+
     String json;
     serializeJson(doc, json);
-    
+
     bool success = storage->writeFile(filepath, json);
     if (success) {
         DEBUG("Updated laps for race %u\n", timestamp);

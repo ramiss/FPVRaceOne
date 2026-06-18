@@ -224,6 +224,16 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     snapshot.lapEvent = false;
 #endif
 
+    // While the RX5808 is mid-tune its RSSI line is invalid (readRssi() returns 0).
+    // Pushing those zeros through the Kalman/MA/EMA filters drags the whole pipeline
+    // toward 0 and can suppress a real peak for many samples right after a channel
+    // change. Skip the tick entirely instead. handleFrequencyChange() on the main
+    // loop clears this flag ~RX5808_MIN_TUNETIME+100 ms after the write, so this can
+    // never wedge detection.
+    if (rx->recentSetFreqFlag) {
+        return;
+    }
+
     // --- Stage 1: raw RSSI ---
     const uint8_t rawRssi = rx->readRssi();
 
@@ -259,8 +269,17 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     uint8_t out = lp;
     if (v1OutInit) {
         const int delta = (int)lp - (int)v1OutPrev;
-        if      (delta >  kMaxStepPerSample) out = (uint8_t)(v1OutPrev + kMaxStepPerSample);
-        else if (delta < -kMaxStepPerSample) out = (uint8_t)(v1OutPrev - kMaxStepPerSample);
+        // Clamp to [0,255]. Previously `(uint8_t)(v1OutPrev + kMaxStepPerSample)`
+        // wrapped 256->0 on strong-signal passes near 255 (and the negative branch
+        // wrapped below 0 -> ~255), corrupting peak tracking exactly on the loudest
+        // crossings.
+        if (delta > kMaxStepPerSample) {
+            const int v = (int)v1OutPrev + kMaxStepPerSample;
+            out = (uint8_t)(v > 255 ? 255 : v);
+        } else if (delta < -kMaxStepPerSample) {
+            const int v = (int)v1OutPrev - kMaxStepPerSample;
+            out = (uint8_t)(v < 0 ? 0 : v);
+        }
     } else {
         v1OutInit = true;
     }
@@ -576,12 +595,14 @@ void LapTimer::startLap() {
 }
 
 void LapTimer::finishLap() {
-    lapTimes[lapCount] = rssiPeakTimeMs - startTimeMs;
-    if (lapCount == 0 && lapCountWraparound == false) {
-        lapTimes[0] = rssiPeakTimeMs - raceStartTimeMs;
-    } else {
-        lapTimes[lapCount] = rssiPeakTimeMs - startTimeMs;
-    }
+    // Gate 1 measures from the race start; all other laps from the previous lap's
+    // peak time. Compute signed and clamp at 0: in the Gate-1 in-gate bootstrap path
+    // rssiPeakTimeMs can be seeded at/just before the start reference, and an unsigned
+    // subtraction there would underflow into a ~49-day bogus lap time.
+    const uint32_t startRef = (lapCount == 0 && lapCountWraparound == false)
+                              ? raceStartTimeMs : startTimeMs;
+    const int32_t lapDelta = (int32_t)(rssiPeakTimeMs - startRef);
+    lapTimes[lapCount] = (lapDelta > 0) ? (uint32_t)lapDelta : 0;
     lastLapPeakRssi = rssiPeak;
     DEBUG("Lap finished, lap time = %u\n", lapTimes[lapCount]);
 

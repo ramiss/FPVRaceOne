@@ -31,8 +31,11 @@ bool SelfTest::runAllTests() {
     allPassed = true;
 
     // Test RX5808
-    RX5808 *rx;
-    TestResult RX5808Test = testRX5808(rx);  // Pass nullptr for RX5808 instance
+    // Must be explicitly nullptr: an uninitialized pointer is indeterminate, and if it
+    // happened to be non-null testRX5808()'s null-check would pass and then dereference
+    // a wild pointer. testRX5808() handles nullptr gracefully.
+    RX5808 *rx = nullptr;
+    TestResult RX5808Test = testRX5808(rx);
     results.push_back(RX5808Test);  
     if (!RX5808Test.passed) allPassed = false;
     

@@ -140,6 +140,22 @@ bool Storage::writeFile(const String& path, const String& data) {
     return written > 0;
 }
 
+// Read an open File fully into `out` using bounded chunk reads. File::readString()
+// truncates large files on LittleFS silently (documented project pitfall), which
+// produces invalid JSON that is then dropped on parse. Reserve the known size and
+// read in fixed chunks instead.
+static bool readFileToString(File& file, String& out) {
+    out = "";
+    out.reserve(file.size() + 1);   // best-effort; concat() still grows if this fails
+    uint8_t buf[512];
+    while (file.available()) {
+        size_t n = file.read(buf, sizeof(buf));
+        if (n == 0) break;
+        out.concat((const char*)buf, n);
+    }
+    return true;
+}
+
 bool Storage::readFile(const String& path, String& data) {
 #ifdef ESP32S3
     if (sdAvailable) {
@@ -151,7 +167,7 @@ bool Storage::readFile(const String& path, String& data) {
             DEBUG("Failed to open file on SD: %s\n", path.c_str());
             return false;
         }
-        data = file.readString();
+        readFileToString(file, data);
         file.close();
         return true;
     }

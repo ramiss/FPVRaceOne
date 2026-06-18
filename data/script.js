@@ -341,15 +341,16 @@ function hideDisconnectedBanner() {
   if (banner) banner.style.display = 'none';
 }
 
-// Watchdog: if the SSE connection appears open but no keepalive arrives in 35s,
-// the connection is stale (TCP alive but server silent). Force a reconnect.
+// Watchdog: if the SSE connection appears open but no keepalive arrives within
+// KEEPALIVE_TIMEOUT_MS (12s ≈ 2+ missed 5s server pings), the connection is stale
+// (TCP alive but server silent). Force a reconnect.
 function startKeepaliveWatchdog() {
   lastKeepaliveMs = Date.now();
   if (keepaliveWatchdogTimer) clearInterval(keepaliveWatchdogTimer);
   keepaliveWatchdogTimer = setInterval(() => {
     if (!eventSource || eventSource.readyState !== EventSource.OPEN) return;
     if (Date.now() - lastKeepaliveMs > KEEPALIVE_TIMEOUT_MS) {
-      console.warn('[Keepalive] No keepalive in 35s — connection is stale, forcing reconnect');
+      console.warn(`[Keepalive] No keepalive in ${KEEPALIVE_TIMEOUT_MS / 1000}s — connection is stale, forcing reconnect`);
       showDisconnectedBanner(mnNodeMode === 2 ? 'Connection to master node stalled — reconnecting...' : 'Connection stalled — reconnecting...');
       setupWiFiEvents();
     }
@@ -457,6 +458,21 @@ function setupWiFiEvents() {
     eventSourceReconnectTimer = null;
   }
 
+  // Tear down the previous connection's periodic timers up front. setupWiFiEvents()
+  // is re-entered from several paths (reconnect timer, keepalive watchdog,
+  // changeConnectionMode, USB fallback). If two calls land before the new SSE 'open'
+  // fires, the old watchdog + status interval keep running and a second EventSource
+  // can briefly coexist, each re-issuing /timer/rssiStart — compounding TCP-slot
+  // pressure on the C6's 16-slot LwIP limit. Clearing them here makes re-entry safe.
+  if (keepaliveWatchdogTimer) {
+    clearInterval(keepaliveWatchdogTimer);
+    keepaliveWatchdogTimer = null;
+  }
+  if (connectionStatusUpdateInterval) {
+    clearInterval(connectionStatusUpdateInterval);
+    connectionStatusUpdateInterval = null;
+  }
+
   if (eventSource) {
     eventSource.close();
   }
@@ -504,8 +520,8 @@ function setupWiFiEvents() {
     }
   }, false);
 
-  // Server sends a keepalive ping every 15s. Track it so the watchdog can detect
-  // a stale-but-open TCP connection before the browser notices.
+  // Server sends a keepalive ping every 5s (WEB_SSE_KEEPALIVE_MS). Track it so the
+  // watchdog can detect a stale-but-open TCP connection before the browser notices.
   eventSource.addEventListener("keepalive", function () {
     lastKeepaliveMs = Date.now();
   }, false);
@@ -1604,8 +1620,13 @@ function addRssiPoint() {
       // processing.  Take the newest sample instead and discard the rest —
       // the chart only renders one point per cycle anyway, so older samples
       // would never have been drawn.
-      rssiValue = parseInt(rssiBuffer[rssiBuffer.length - 1]);
+      rssiValue = parseInt(rssiBuffer[rssiBuffer.length - 1], 10);
       rssiBuffer.length = 0;
+      // A malformed/empty SSE frame yields NaN. Math.max/min(x, NaN) === NaN, which
+      // would poison maxRssiValue/minRssiValue (and thus the chart's axis range) for
+      // the rest of the session, and the crossing comparisons silently evaluate false.
+      // Drop the bad sample instead.
+      if (!Number.isFinite(rssiValue)) return;
       if (crossing && rssiValue < exitRssi) {
         crossing = false;
       } else if (!crossing && rssiValue > enterRssi) {
@@ -2910,6 +2931,23 @@ function addLap(lapStr) {
   // Highlight fastest lap
   highlightFastestLap();
 
+  // "Every 2/3 laps" announcer modes speak the combined time of the last N laps,
+  // on an N-lap cadence. These were previously read from undeclared variables
+  // (last2lapStr / last3lapStr), throwing a ReferenceError that aborted addLap()
+  // before the lap counter, analysis view, and max-lap auto-stop could run. Compute
+  // them locally from lapTimes (seconds); empty string means "nothing to announce
+  // this lap".
+  let last2lapStr = "";
+  let last3lapStr = "";
+  if (lapNo >= 2 && lapNo % 2 === 0 && lapTimes.length >= 2) {
+    last2lapStr = String(lapTimes[lapTimes.length - 1] + lapTimes[lapTimes.length - 2]);
+  }
+  if (lapNo >= 3 && lapNo % 3 === 0 && lapTimes.length >= 3) {
+    last3lapStr = String(lapTimes[lapTimes.length - 1] +
+                         lapTimes[lapTimes.length - 2] +
+                         lapTimes[lapTimes.length - 3]);
+  }
+
   // The audio-announcer's pattern matchers expect raw numeric time (e.g.
   // "12.34") so they can route the spoken time through speakNumber's
   // pre-recorded digit clips — those honor this.rate (audio.playbackRate)
@@ -4005,7 +4043,13 @@ function renderFastestRound() {
 }
 
 function createBarItemWithColor(label, time, maxTime, displayTime, colorIndex) {
-  const percentage = (time / maxTime) * 100;
+  // Guard the width math: an all-zero or imported race can make maxTime 0 (or the
+  // caller can pass -Infinity from Math.max() of an empty slice), giving NaN/Infinity
+  // percentages and a broken `width: NaN%`. Clamp to a valid [0,100] range.
+  const safeMax = (Number.isFinite(maxTime) && maxTime > 0) ? maxTime : 1;
+  const safeTime = Number.isFinite(time) ? time : 0;
+  let percentage = (safeTime / safeMax) * 100;
+  percentage = Math.max(0, Math.min(100, Number.isFinite(percentage) ? percentage : 0));
   const colors = barColors[colorIndex % barColors.length];
   return `
     <div class="bar-item">
@@ -4235,6 +4279,10 @@ function renderRaceHistory() {
 function viewRaceDetails(index) {
   currentDetailRace = raceHistoryData[index];
   const race = currentDetailRace;
+  // Inline onclick="viewRaceDetails(N)" handlers are baked into the rendered HTML and
+  // can go stale if raceHistoryData shrinks (a race was deleted) between render and
+  // click. Also imported races may omit lapTimes. Guard before dereferencing.
+  if (!race || !Array.isArray(race.lapTimes)) return;
   const date = new Date(race.timestamp * 1000);
   const dateStr = date.toLocaleDateString() + ' ' + date.toLocaleTimeString();
 
@@ -4638,7 +4686,10 @@ let editingRaceIndex = null;
 function openEditModal(index) {
   editingRaceIndex = index;
   const race = raceHistoryData[index];
-  
+  // Same stale-index risk as viewRaceDetails: the index comes from baked-in HTML and
+  // may no longer be valid. Bail rather than throw on an undefined race.
+  if (!race) return;
+
   document.getElementById('raceName').value = race.name || '';
   document.getElementById('raceTag').value = race.tag || '';
   document.getElementById('raceDistance').value = race.totalDistance || 0;

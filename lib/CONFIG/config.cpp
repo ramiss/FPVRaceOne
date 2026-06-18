@@ -67,6 +67,19 @@ void Config::load(void) {
         conf.announcerRate = 10;
         modified = true;
     }
+
+    // Clamp values that are later used as array indices / loop bounds. The config
+    // "magic" is only a 2-bit mask, so corrupt or stale flash can pass the version
+    // check with garbage. The most dangerous case is webhookCount: toJson() and
+    // getWebhookIP() loop/index webhookIPs[webhookCount], and webhookIPs is only
+    // [10][16] — an out-of-range count is an out-of-bounds read. Cap it to the array
+    // size so a corrupt count can never read past the buffer.
+    const uint8_t kMaxWebhooks = sizeof(conf.webhookIPs) / sizeof(conf.webhookIPs[0]); // 10
+    if (conf.webhookCount > kMaxWebhooks) {
+        DEBUG("Invalid webhookCount=%u; clamping to %u\n", conf.webhookCount, kMaxWebhooks);
+        conf.webhookCount = kMaxWebhooks;
+        modified = true;
+    }
 }
 
 void Config::write(void) {

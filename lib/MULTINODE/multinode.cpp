@@ -898,12 +898,18 @@ static int  _masterBssidCount = 0;
 static void _scanPromiscuousCb(void* buf, wifi_promiscuous_pkt_type_t type) {
     if (type != WIFI_PKT_MGMT) return;
     const wifi_promiscuous_pkt_t* pkt = (const wifi_promiscuous_pkt_t*)buf;
-    const uint8_t* p = pkt->payload;
+    if (!pkt) return;
     int len = (int)pkt->rx_ctrl.sig_len - 4; // exclude FCS
+
+    // Validate length BEFORE dereferencing the payload. sig_len is attacker-controllable
+    // RF input; a truncated/malformed frame could otherwise over-read p[0] (and below,
+    // the fixed 36-byte mgmt header + BSSID at bytes 16-21). 37 = header(36) + 1 IE byte.
+    if (len < 37) return;
+    const uint8_t* p = pkt->payload;
 
     // Beacon = 0x80, Probe Response = 0x50 (frame-control byte masked to type+subtype)
     uint8_t fc = p[0] & 0xFC;
-    if (len < 37 || (fc != 0x80 && fc != 0x50)) return;
+    if (fc != 0x80 && fc != 0x50) return;
 
     // 802.11 mgmt header (24 B) + timestamp(8) + beacon-interval(2) + capability(2) = 36 B
     // BSSID = Address 3, bytes 16-21
