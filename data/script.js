@@ -7924,24 +7924,28 @@ function _mnModalRssiSyncThresholds() {
     { color: "hsl(8.2, 86.5%, 53.7%)", lineWidth: 1.7, value: enterVal },
     { color: "hsl(25, 85%, 55%)",       lineWidth: 1.7, value: exitVal  },
   ];
-  // Lock the y-axis range the first time this runs after modal open.  Pad
-  // generously around the current thresholds so both lines are visible AND
-  // there's headroom for trace data to land on either side.  After this
-  // initial set, the axis is only ever EXPANDED (in _mnModalRssiPoll, when
-  // a trace sample lands outside it) — slider drags never reshape it, so
-  // dragging one threshold doesn't visually move the other line or the
-  // trace.
-  if (!_mnModalRssiAxisInit) {
-    _mnModalRssiAxisMin = Math.max(0,   exitVal  - 20);
-    _mnModalRssiAxisMax = Math.min(255, enterVal + 20);
-    _mnModalRssiChart.options.maxValue = _mnModalRssiAxisMax;
-    _mnModalRssiChart.options.minValue = _mnModalRssiAxisMin;
-    _mnModalRssiAxisInit = true;
-  }
+  // Auto-zoom the y-axis on every sync (slider drag OR poll tick) so the
+  // chart reframes around the dragged threshold without the user needing
+  // to close and reopen the modal.  Range is whichever is broader between
+  // (a) the current Enter/Exit slider values padded by 15 either side,
+  // and (b) the observed trace min/max padded by 10.  Both clauses are
+  // included with Math.min/max so a threshold pushed far above the trace
+  // (or vice versa) still keeps everything visible.
+  //
+  // The previous "lock-once-then-only-expand" behaviour kept the other
+  // threshold visually pinned during slider drags but at the cost of the
+  // dragged line eventually sliding off-screen — the director then had
+  // to close and reopen to recalibrate.  Live zoom is the explicit ask.
+  const PAD = 15;
+  const haveTrace = (_mnModalRssiMin < 255 && _mnModalRssiMax > 0);
+  const traceLow  = haveTrace ? _mnModalRssiMin : exitVal;
+  const traceHigh = haveTrace ? _mnModalRssiMax : enterVal;
+  const axisMin   = Math.max(0,   Math.min(exitVal  - PAD, traceLow  - 10));
+  const axisMax   = Math.min(255, Math.max(enterVal + PAD, traceHigh + 10));
+  _mnModalRssiChart.options.minValue = axisMin;
+  _mnModalRssiChart.options.maxValue = axisMax;
   if (window.__mnRssiDebug) {
-    console.log('[mnRssi] thresholds:', { enterVal, exitVal,
-      maxV: _mnModalRssiChart.options.maxValue,
-      minV: _mnModalRssiChart.options.minValue });
+    console.log('[mnRssi] thresholds:', { enterVal, exitVal, axisMin, axisMax });
   }
 }
 
@@ -7973,18 +7977,10 @@ async function _mnModalRssiPoll() {
     _mnModalRssiMax = Math.max(_mnModalRssiMax, rssi);
     _mnModalRssiMin = Math.min(_mnModalRssiMin, rssi);
 
+    // sync now consults _mnModalRssiMin/Max directly, so wandering trace
+    // values flow into the axis range without a separate expansion clause
+    // here.  Slider drags and poll ticks both go through the same path.
     _mnModalRssiSyncThresholds();
-    // Expand (never shrink) the locked axis when a trace sample lands close
-    // to or past the edge.  Without this, a wandering signal would just
-    // disappear off-screen and the trace would clip flat at the boundary.
-    if (rssi > _mnModalRssiAxisMax - 3) {
-      _mnModalRssiAxisMax = Math.min(255, rssi + 10);
-      _mnModalRssiChart.options.maxValue = _mnModalRssiAxisMax;
-    }
-    if (rssi < _mnModalRssiAxisMin + 3) {
-      _mnModalRssiAxisMin = Math.max(0, rssi - 10);
-      _mnModalRssiChart.options.minValue = _mnModalRssiAxisMin;
-    }
     _mnModalRssiSeries.append(Date.now(), rssi);
   } catch (e) {
     if (valEl) valEl.textContent = '(fetch error)';
@@ -8234,7 +8230,12 @@ async function mnSavePilotModal() {
   const moveEl     = document.getElementById('mnPilotModalMoveSlot');
   const targetSlot = (moveEl && nodeId !== 0) ? (parseInt(moveEl.value, 10) || nodeId) : nodeId;
   const movePending = (targetSlot !== nodeId);
-  mnClosePilotModal();
+  // Don't auto-close on Save anymore — director typically wants to tweak,
+  // save, watch the Live RSSI react, tweak again, etc.  The modal closes
+  // explicitly via the Close button.  Exception: a pending slot Move/Swap
+  // changes _mnModalNodeId out from under the form, so we close at the
+  // end of that path to avoid leaving the user editing a now-mismatched
+  // pilot card.
   try {
     const body = { nodeId, pilotName: name, pilotColor, band: bandIndex, chan: chanIndex, freq };
     if (skipMasterStart !== undefined) body.skipMasterStart = skipMasterStart;
@@ -8286,6 +8287,20 @@ async function mnSavePilotModal() {
     if (movePending) {
       const mr = await fetch(`/api/multinode/move?from=${nodeId}&to=${targetSlot}`, { method: 'POST' });
       if (!mr.ok) alert('Slot move failed \u2014 client may be offline.');
+      // After a swap the modal's _mnModalNodeId refers to a different pilot
+      // than what's visually on screen \u2014 close so the next interaction
+      // starts from the refreshed Race tab.
+      mnClosePilotModal();
+    } else {
+      // Stayed-on-card path: briefly flash the Save button so the user
+      // knows the write happened (no auto-close to signal success).
+      const saveBtn = document.querySelector('#mnPilotModal button[onclick="mnSavePilotModal()"]');
+      if (saveBtn) {
+        const orig = saveBtn.textContent;
+        saveBtn.textContent = 'Saved \u2713';
+        saveBtn.disabled = true;
+        setTimeout(() => { saveBtn.textContent = orig; saveBtn.disabled = false; }, 900);
+      }
     }
     mnRefreshNodes();
   } catch (e) { console.error('editPilot failed', e); alert('Update failed'); }

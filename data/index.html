@@ -470,9 +470,14 @@
           <button onclick="mnRemoveFromModal()" style="width:100%;background:#c0392b!important;color:#fff!important;">Kick From Slot — pauses reconnect for 1 minute</button>
         </div>
         </div><!-- /#mnPilotModalScroll -->
+        <!-- Save persists the form fields but keeps the modal open so the
+             director can continue tuning (drag a slider, save again, watch
+             the live RSSI react, etc.).  Close dismisses the modal — saved
+             values are already persisted, unsaved field changes are
+             discarded (matching the previous Cancel semantics). -->
         <div style="display:flex;gap:8px;margin-top:10px;flex-shrink:0;">
-          <button onclick="mnClosePilotModal()" style="background:var(--border-color)!important;color:var(--text-color)!important;">Cancel</button>
-          <button onclick="mnSavePilotModal()" style="margin-left:auto;">Save</button>
+          <button onclick="mnSavePilotModal()">Save</button>
+          <button onclick="mnClosePilotModal()" style="margin-left:auto;background:var(--border-color)!important;color:var(--text-color)!important;">Close</button>
         </div>
       </div>
     </div>

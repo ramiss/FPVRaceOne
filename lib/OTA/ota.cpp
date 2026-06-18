@@ -10,8 +10,47 @@
 #include <HTTPUpdate.h>
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
+#include <Preferences.h>
 
 OtaManager otaManager;
+
+// ── Filesystem-update sentinel (NVS) ────────────────────────────────────────
+// The spiffs/LittleFS partition has no A/B copy, so its image is written in place;
+// a power-loss or failed download mid-write leaves it corrupt with no rollback.
+// Record the write window in NVS so an interrupted update is detectable on the next
+// boot (surfaced via OtaManager::isFsRecoveryPending(); re-running the update heals
+// it). Writes are tiny and infrequent — no flash-wear concern.
+namespace {
+constexpr char    OTA_NVS_NS[]       = "ota";
+constexpr char    OTA_KEY_FSSTATE[]  = "fsState";
+constexpr char    OTA_KEY_FSURL[]    = "fsUrl";
+constexpr char    OTA_KEY_FSVER[]    = "fsVer";
+constexpr uint8_t OTA_FS_OK            = 0;  // filesystem consistent
+constexpr uint8_t OTA_FS_WRITING       = 1;  // write started, not yet confirmed complete
+constexpr uint8_t OTA_FS_PENDING_RETRY = 2;  // write failed/interrupted — re-run update
+
+void otaSetFsState(uint8_t state, const String& url = String(), const String& ver = String()) {
+    Preferences p;
+    if (!p.begin(OTA_NVS_NS, false)) return;   // read-write
+    p.putUChar(OTA_KEY_FSSTATE, state);
+    if (url.length()) p.putString(OTA_KEY_FSURL, url);
+    if (ver.length()) p.putString(OTA_KEY_FSVER, ver);
+    p.end();
+}
+
+uint8_t otaGetFsState() {
+    Preferences p;
+    if (!p.begin(OTA_NVS_NS, true)) return OTA_FS_OK;   // read-only; absent namespace => OK
+    uint8_t state = p.getUChar(OTA_KEY_FSSTATE, OTA_FS_OK);
+    p.end();
+    return state;
+}
+} // namespace
+
+bool OtaManager::filesystemUpdateIncomplete() {
+    const uint8_t st = otaGetFsState();
+    return (st == OTA_FS_WRITING || st == OTA_FS_PENDING_RETRY);
+}
 
 // Strip a leading "v" or "V" from a tag name so "v1.2.3" compares equal to "1.2.3".
 static String stripVersionPrefix(const String& s) {
@@ -176,6 +215,22 @@ void OtaManager::init(Config* config, LapTimer* timer, AsyncEventSource* events)
     _state  = STATE_IDLE;
     _progressPercent = 0;
     _statusMessage   = "";
+
+    // Detect an interrupted filesystem update from a previous boot. WRITING means we
+    // lost power mid-write, so the partition is presumed corrupt — promote it to
+    // PENDING_RETRY. Either way, flag it so the rest of the system can surface that
+    // the web assets may be incomplete and the update should be re-run.
+    uint8_t fsState = otaGetFsState();
+    if (fsState == OTA_FS_WRITING) {
+        DEBUG("[OTA] Filesystem update was interrupted (sentinel=WRITING); marking for retry\n");
+        otaSetFsState(OTA_FS_PENDING_RETRY);
+        _fsRecoveryPending = true;
+    } else if (fsState == OTA_FS_PENDING_RETRY) {
+        _fsRecoveryPending = true;
+    }
+    if (_fsRecoveryPending) {
+        DEBUG("[OTA] Filesystem may be incomplete — re-run the update to restore web assets.\n");
+    }
 }
 
 void OtaManager::setState(State s, const String& msg) {
@@ -471,6 +526,52 @@ bool OtaManager::downloadAndFlash(const String& url, int target, const char* lab
     }
 }
 
+bool OtaManager::preflightCheck(const String& fwUrl, const String& fsUrl, String& err) {
+    // Fetch headers only (GET, then end() without reading the body) for BOTH assets
+    // and confirm each resolves to a 200 of a plausible size. This is the guard
+    // against the catastrophic case: wiping the filesystem and only then discovering
+    // the firmware asset is missing/404, leaving the device with neither image.
+    struct Target { const String& url; const char* label; long minBytes; };
+    const Target targets[] = {
+        { fwUrl, "firmware",   400L * 1024 },
+        { fsUrl, "filesystem",  64L * 1024 },
+    };
+
+    for (const Target& t : targets) {
+        if (t.url.length() == 0) {
+            err = String("Pre-flight: missing ") + t.label + " URL";
+            return false;
+        }
+        WiFiClientSecure client;
+        client.setInsecure();
+        client.setTimeout(15);   // seconds
+        HTTPClient http;
+        http.setUserAgent("FPVRaceOne-OTA");
+        http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub → CDN redirect
+        http.setTimeout(10000);
+        if (!http.begin(client, t.url)) {
+            err = String("Pre-flight: HTTP init failed for ") + t.label + " asset";
+            return false;
+        }
+        int  code = http.GET();
+        long len  = http.getSize();   // final Content-Length after redirects, or -1 if unknown
+        http.end();
+
+        if (code != HTTP_CODE_OK) {
+            err = String("Pre-flight: ") + t.label + " asset returned HTTP " + String(code)
+                  + " — the release may be missing its " + t.label + " image";
+            return false;
+        }
+        if (len >= 0 && len < t.minBytes) {
+            err = String("Pre-flight: ") + t.label + " asset is implausibly small ("
+                  + String(len) + " bytes)";
+            return false;
+        }
+        DEBUG("[OTA] Pre-flight OK: %s asset reachable (%ld bytes)\n", t.label, len);
+    }
+    return true;
+}
+
 void OtaManager::loop() {
     if (!_pendingApply) return;
     _pendingApply = false;
@@ -499,20 +600,23 @@ void OtaManager::loop() {
         return;
     }
 
-    // Filesystem first.  If something goes wrong here the firmware partition is
-    // still untouched; the device boots cleanly on the existing app + (now
-    // half-written) SPIFFS.  SPIFFS is recoverable via re-running the update.
-    setState(STATE_DOWNLOADING_FS, "Downloading filesystem image...");
+    // Pre-flight: confirm BOTH assets are reachable and sanely sized *before* writing
+    // any partition. Prevents the worst case — wiping the filesystem, then finding the
+    // firmware asset is a 404 and ending up with neither a working app nor a UI.
+    setState(STATE_CHECKING, "Verifying update assets...");
     setProgress(0);
-    if (!downloadAndFlash(fsUrl, U_SPIFFS, "Filesystem", err)) {
+    if (!preflightCheck(fwUrl, fsUrl, err)) {
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
         return;
     }
 
-    // Firmware last.  HTTPUpdate writes the new app to the inactive OTA slot
-    // and flips the boot pointer.  If power is lost mid-write, the bootloader
-    // falls back to the previously-good slot we're currently running from.
+    // Firmware FIRST (was: filesystem first). HTTPUpdate streams the app into the
+    // *inactive* OTA slot and only flips the boot pointer on a fully MD5-verified
+    // image, so a failure here leaves the filesystem completely untouched and we
+    // abort cleanly on the current image. Firmware is also the larger, more
+    // failure-prone download, so doing it while the FS is still pristine shrinks the
+    // window in which a network drop can leave a corrupt filesystem.
     setState(STATE_DOWNLOADING_FW, "Downloading firmware image...");
     setProgress(0);
     if (!downloadAndFlash(fwUrl, U_FLASH, "Firmware", err)) {
@@ -520,6 +624,25 @@ void OtaManager::loop() {
         disconnectFromHomeWifi();
         return;
     }
+
+    // Filesystem LAST. The spiffs/LittleFS partition has no A/B copy — this write is
+    // in place and destructive, with no bootloader rollback. Bracket it with the NVS
+    // sentinel so a power-loss or failure mid-write is detectable on the next boot
+    // (OtaManager::isFsRecoveryPending()).
+    otaSetFsState(OTA_FS_WRITING, fsUrl,
+                  _lastInfoValid ? _lastInfo.latestVersion : String());
+    setState(STATE_DOWNLOADING_FS, "Downloading filesystem image...");
+    setProgress(0);
+    if (!downloadAndFlash(fsUrl, U_SPIFFS, "Filesystem", err)) {
+        // The firmware slot is already updated and its boot pointer flipped, so the
+        // safest recovery is to re-run the update (which re-flashes the filesystem)
+        // BEFORE power-cycling. Record the pending state and say so.
+        otaSetFsState(OTA_FS_PENDING_RETRY, fsUrl);
+        setState(STATE_ERROR, err + " — filesystem update incomplete. Re-run the update now (do not reboot first).");
+        disconnectFromHomeWifi();
+        return;
+    }
+    otaSetFsState(OTA_FS_OK);
 
     setState(STATE_REBOOTING, "Update complete — rebooting in 3 seconds...");
     setProgress(100);

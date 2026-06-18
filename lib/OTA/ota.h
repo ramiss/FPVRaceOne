@@ -71,6 +71,17 @@ public:
     const UpdateInfo& getLastInfo() const { return _lastInfo; }
     bool   hasLastInfo() const { return _lastInfoValid; }
 
+    // True if a previous filesystem update did not complete (interrupted mid-write
+    // or failed its download). Set at init() from an NVS sentinel. Re-running the
+    // update clears it. Lets the UI/status surface "web assets may be incomplete".
+    bool   isFsRecoveryPending() const { return _fsRecoveryPending; }
+
+    // Static, NVS-backed equivalent of the above, safe to call before init() and
+    // from any context (reads NVS directly). The boot filesystem-mount path uses
+    // this to avoid auto-formatting a partition that re-running the update can still
+    // restore.
+    static bool filesystemUpdateIncomplete();
+
 private:
     Config*           _config = nullptr;
     LapTimer*         _timer  = nullptr;
@@ -93,6 +104,11 @@ private:
     bool connectToHomeWifi(uint32_t timeoutMs, String& errorMessage);
     void disconnectFromHomeWifi();
     bool downloadAndFlash(const String& url, int target, const char* label, String& errorMessage);
+    // Verify both release assets are reachable & plausibly sized before any flash
+    // write, so we never wipe the filesystem and then find the firmware is missing.
+    bool preflightCheck(const String& fwUrl, const String& fsUrl, String& errorMessage);
+
+    bool _fsRecoveryPending = false;  // set at init() from the NVS filesystem sentinel
 
     void setState(State s, const String& msg);
     void setProgress(int percent);

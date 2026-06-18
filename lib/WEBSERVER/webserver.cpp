@@ -745,6 +745,17 @@ static void handleNotFound(AsyncWebServerRequest *request) {
 static bool startLittleFS() {
     Serial.println("[INFO] Attempting to mount LittleFS...");
     if (!LittleFS.begin(false)) {
+        // Mount failed. If an OTA filesystem update was interrupted or failed
+        // (NVS sentinel), do NOT auto-format: formatting would wipe the partition
+        // that re-running the update can still restore, and leave the device booting
+        // "healthy" with an empty FS (blank UI) that masks the real problem. Preserve
+        // the partition and report failure instead — the update can be re-run to
+        // re-flash the filesystem.
+        if (OtaManager::filesystemUpdateIncomplete()) {
+            Serial.println("[WARN] LittleFS mount failed and an OTA filesystem update is incomplete — NOT formatting. Re-run the update to restore web assets.");
+            DEBUG("LittleFS mount failed during pending FS recovery; skipping format\n");
+            return false;
+        }
         Serial.println("[WARN] LittleFS mount failed, attempting to format...");
         DEBUG("LittleFS mount failed, attempting to format...\n");
         if (!LittleFS.begin(true)) {
