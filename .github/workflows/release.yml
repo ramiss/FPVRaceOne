@@ -118,13 +118,70 @@ jobs:
         run: |
           set -x
           mkdir -p release-assets
-          cp .pio/build/seeed_xiao_esp32c6/firmware.bin  release-assets/FPVRaceOne-firmware.bin
-          cp .pio/build/seeed_xiao_esp32c6/littlefs.bin  release-assets/FPVRaceOne-littlefs.bin
+          BUILD=.pio/build/seeed_xiao_esp32c6
+          cp "$BUILD/firmware.bin"  release-assets/FPVRaceOne-firmware.bin
+          cp "$BUILD/littlefs.bin"  release-assets/FPVRaceOne-littlefs.bin
+
+          # ── Full-flash "merged" image for bricked-device recovery ────────────
+          # The OTA flow (and FPVRaceOne-firmware.bin alone) never touches the
+          # bootloader / partition table / boot_app0, because they already live
+          # on the device.  A customer with a bricked board has no such luxury,
+          # so we bake a single image spanning 0x0..end-of-app that the portable
+          # flasher writes at offset 0x0.  The littlefs image stays separate and
+          # is flashed alongside it at 0x320000 for a complete restore.
+          #
+          # Offsets MUST match the device's partition layout — keep in sync with
+          # partitions_two_ota_XIAO_ESP32_C6.csv, platformio.ini
+          # (board_upload.offset_address), and scripts/flash_published_release.py.
+          BOOT_APP0=$(find ~/.platformio -path '*tools/partitions/boot_app0.bin' | head -1)
+          test -s "$BOOT_APP0" || { echo "::error::boot_app0.bin not found under ~/.platformio"; exit 1; }
+          test -s "$BUILD/bootloader.bin" || { echo "::error::bootloader.bin missing"; exit 1; }
+          test -s "$BUILD/partitions.bin" || { echo "::error::partitions.bin missing"; exit 1; }
+          pip install --upgrade esptool
+          # esptool v5 CLI: `merge-bin` + hyphenated flags. `--flash-size 4MB`
+          # only sets the header value (does NOT pad — padding is --pad-to-size),
+          # so the output spans 0x0..end-of-app and never overlaps the LittleFS
+          # partition at 0x320000 that gets flashed separately.
+          python -m esptool --chip esp32c6 merge-bin \
+            -o release-assets/FPVRaceOne-merged.bin \
+            --flash-mode dio --flash-freq 80m --flash-size 4MB \
+            0x0     "$BUILD/bootloader.bin" \
+            0x8000  "$BUILD/partitions.bin" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$BUILD/firmware.bin"
+
+          # ── Machine-readable flash manifest ──────────────────────────────────
+          # The portable flasher reads this from the release instead of
+          # hardcoding offsets, so it never drifts when the partition table
+          # changes.  `schema` lets the tool refuse manifests it's too old to
+          # understand.
+          cat > release-assets/flash-manifest.json <<EOF
+          {
+            "schema": 1,
+            "product": "FPVRaceOne",
+            "chip": "esp32c6",
+            "baud": 460800,
+            "version": "${{ steps.version.outputs.version }}",
+            "tag": "${{ steps.version.outputs.tag }}",
+            "assets": {
+              "firmware":   { "name": "FPVRaceOne-firmware.bin", "offset": "0x10000"  },
+              "filesystem": { "name": "FPVRaceOne-littlefs.bin", "offset": "0x320000" },
+              "merged":     { "name": "FPVRaceOne-merged.bin",   "offset": "0x0"      }
+            },
+            "flash_modes": {
+              "update":   ["firmware", "filesystem"],
+              "recovery": ["merged", "filesystem"]
+            }
+          }
+          EOF
+
           echo "----- staged assets -----"
           ls -la release-assets/
-          # Sanity: print firmware size (must fit in the 1.5 MB OTA app slot)
+          # Sanity: print sizes (firmware must fit in the 1.5 MB OTA app slot)
           stat --printf "firmware.bin: %s bytes\n" release-assets/FPVRaceOne-firmware.bin
           stat --printf "littlefs.bin: %s bytes\n" release-assets/FPVRaceOne-littlefs.bin
+          stat --printf "merged.bin:   %s bytes\n" release-assets/FPVRaceOne-merged.bin
+          cat release-assets/flash-manifest.json
 
       - name: Diagnostics on failure
         if: failure()
@@ -157,6 +214,21 @@ jobs:
           name: ${{ steps.version.outputs.tag }}
           generate_release_notes: true
           fail_on_unmatched_files: true
+          # `body` renders ABOVE the auto-generated notes (generate_release_notes
+          # appends to it), so this header sits at the top of every release.  It
+          # links to the FPVRaceOne Flasher's stable "latest" download — a single
+          # canonical copy that lives in the flasher repo, so the firmware
+          # release never has to carry or re-upload the .exe itself.
+          body: |
+            ## 🛠️ Recover or flash your device
+
+            Bricked your timer, or want to (re)flash without OTA? Download the
+            **[FPVRaceOne Flasher (Windows)](https://github.com/ramiss/FPVRaceOne-Flasher/releases/latest/download/FPVRaceOne-Flasher.exe)**
+            — a portable app that flashes any release straight from GitHub. Pick
+            this release in the app, or use **Recovery** mode to fully restore a
+            bricked device.
+
+            ---
           # Tags with a `-` after the version triple (e.g. v0.1.2-beta.1)
           # are pushed by the `publish_prerelease` PIO target.  Flag them as
           # GitHub Pre-releases so they're excluded from /releases/latest —
@@ -166,3 +238,5 @@ jobs:
           files: |
             release-assets/FPVRaceOne-firmware.bin
             release-assets/FPVRaceOne-littlefs.bin
+            release-assets/FPVRaceOne-merged.bin
+            release-assets/flash-manifest.json
