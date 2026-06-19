@@ -94,6 +94,34 @@ jobs:
           cp .pio/build/seeed_xiao_esp32c6/firmware.bin /tmp/fw-stash.bin
           echo "Stashed firmware.bin to /tmp/fw-stash.bin"
 
+          # ── Build the full-flash "merged" recovery image HERE ────────────────
+          # bootloader.bin + partitions.bin only exist right after the firmware
+          # build — the later `buildfs` step wipes the build dir (that's why
+          # firmware.bin is stashed above).  So we merge now, while all the
+          # inputs are present, and stash the result for the staging step.
+          #
+          # Offsets MUST match the device's partition layout — keep in sync with
+          # partitions_two_ota_XIAO_ESP32_C6.csv, platformio.ini
+          # (board_upload.offset_address), and scripts/flash_published_release.py.
+          BUILD=.pio/build/seeed_xiao_esp32c6
+          BOOT_APP0=$(find ~/.platformio -path '*tools/partitions/boot_app0.bin' | head -1)
+          test -s "$BOOT_APP0"          || { echo "::error::boot_app0.bin not found under ~/.platformio"; exit 1; }
+          test -s "$BUILD/bootloader.bin" || { echo "::error::bootloader.bin missing after firmware build"; exit 1; }
+          test -s "$BUILD/partitions.bin" || { echo "::error::partitions.bin missing after firmware build"; exit 1; }
+          pip install --upgrade esptool
+          # esptool v5 CLI: `merge-bin` + hyphenated flags. `--flash-size 4MB`
+          # only sets the header value (does NOT pad — padding is --pad-to-size),
+          # so the output spans 0x0..end-of-app and never overlaps the LittleFS
+          # partition at 0x320000 that gets flashed separately.
+          python -m esptool --chip esp32c6 merge-bin \
+            -o /tmp/merged-stash.bin \
+            --flash-mode dio --flash-freq 80m --flash-size 4MB \
+            0x0     "$BUILD/bootloader.bin" \
+            0x8000  "$BUILD/partitions.bin" \
+            0xe000  "$BOOT_APP0" \
+            0x10000 "$BUILD/firmware.bin"
+          echo "Stashed merged image to /tmp/merged-stash.bin"
+
       - name: Build filesystem image
         run: |
           set -x
@@ -122,33 +150,14 @@ jobs:
           cp "$BUILD/firmware.bin"  release-assets/FPVRaceOne-firmware.bin
           cp "$BUILD/littlefs.bin"  release-assets/FPVRaceOne-littlefs.bin
 
-          # ── Full-flash "merged" image for bricked-device recovery ────────────
-          # The OTA flow (and FPVRaceOne-firmware.bin alone) never touches the
-          # bootloader / partition table / boot_app0, because they already live
-          # on the device.  A customer with a bricked board has no such luxury,
-          # so we bake a single image spanning 0x0..end-of-app that the portable
-          # flasher writes at offset 0x0.  The littlefs image stays separate and
-          # is flashed alongside it at 0x320000 for a complete restore.
-          #
-          # Offsets MUST match the device's partition layout — keep in sync with
-          # partitions_two_ota_XIAO_ESP32_C6.csv, platformio.ini
-          # (board_upload.offset_address), and scripts/flash_published_release.py.
-          BOOT_APP0=$(find ~/.platformio -path '*tools/partitions/boot_app0.bin' | head -1)
-          test -s "$BOOT_APP0" || { echo "::error::boot_app0.bin not found under ~/.platformio"; exit 1; }
-          test -s "$BUILD/bootloader.bin" || { echo "::error::bootloader.bin missing"; exit 1; }
-          test -s "$BUILD/partitions.bin" || { echo "::error::partitions.bin missing"; exit 1; }
-          pip install --upgrade esptool
-          # esptool v5 CLI: `merge-bin` + hyphenated flags. `--flash-size 4MB`
-          # only sets the header value (does NOT pad — padding is --pad-to-size),
-          # so the output spans 0x0..end-of-app and never overlaps the LittleFS
-          # partition at 0x320000 that gets flashed separately.
-          python -m esptool --chip esp32c6 merge-bin \
-            -o release-assets/FPVRaceOne-merged.bin \
-            --flash-mode dio --flash-freq 80m --flash-size 4MB \
-            0x0     "$BUILD/bootloader.bin" \
-            0x8000  "$BUILD/partitions.bin" \
-            0xe000  "$BOOT_APP0" \
-            0x10000 "$BUILD/firmware.bin"
+          # ── Full-flash "merged" recovery image ───────────────────────────────
+          # Built in the "Build firmware" step (its bootloader/partitions inputs
+          # are wiped by buildfs) and stashed; just restore it here.  It spans
+          # 0x0..end-of-app and is flashed at 0x0; the littlefs image is written
+          # separately at 0x320000 for a complete restore of a bricked device.
+          test -s /tmp/merged-stash.bin \
+            || { echo "::error::merged image stash missing — Build firmware step did not produce it"; exit 1; }
+          cp /tmp/merged-stash.bin release-assets/FPVRaceOne-merged.bin
 
           # ── Machine-readable flash manifest ──────────────────────────────────
           # The portable flasher reads this from the release instead of
