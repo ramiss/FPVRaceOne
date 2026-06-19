@@ -11,6 +11,15 @@
 // Defined in webserver.cpp.  Format: "FPVRaceOne_<6-hex>".
 extern String wifi_ap_ssid;
 
+// Map nodeId (1..7 for clients, 0 for the master itself, max 26) to the same
+// slot letter the browser UI uses (A..G in normal operation).  Matches
+// _slotLetter() in data/script.js so trace lines line up with what the
+// director sees on screen.  Returns '?' for out-of-range ids (including 0
+// for master, which we don't expect to appear in per-client log lines).
+static inline char slotLetter(uint8_t nodeId) {
+    return (nodeId >= 1 && nodeId <= 26) ? (char)('A' + nodeId - 1) : '?';
+}
+
 // Read the device's STA MAC directly from eFuse, bypassing WiFi.macAddress().
 // init() runs before any WiFi.mode(...) call, so WiFi is in WIFI_MODE_NULL —
 // in that state Arduino-ESP32's WiFi.macAddress() takes a code path that has
@@ -107,6 +116,29 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
     } else if (isMasterMode()) {
         _checkNodeTimeouts(currentTimeMs);
 
+        // Periodic "who's actually connected right now" summary.  Every 10 s
+        // log a single line listing slot=name for every online node — replaces
+        // the firehose of per-heartbeat re-registration lines that used to
+        // confirm fleet health.  Stack-allocated buffer (no heap pressure).
+        static uint32_t lastNodeSummaryMs = 0;
+        if (currentTimeMs - lastNodeSummaryMs > 10000) {
+            lastNodeSummaryMs = currentTimeMs;
+            char buf[256];
+            size_t pos = (size_t)snprintf(buf, sizeof(buf), "[MULTINODE] connected:");
+            bool any = false;
+            for (const auto& n : _nodes) {
+                if (!n.online) continue;
+                any = true;
+                int w = snprintf(buf + pos, sizeof(buf) - pos, " %c=%s",
+                                 slotLetter(n.nodeId), n.pilotName.c_str());
+                if (w < 0) break;
+                pos += (size_t)w;
+                if (pos >= sizeof(buf) - 8) break;   // leave room for trailing " (none)" / newline
+            }
+            if (!any) snprintf(buf + pos, sizeof(buf) - pos, " (none)");
+            DEBUG("%s\n", buf);
+        }
+
         // Deferred broadcasts — queued by the async handler, executed here on Core 0
         if (_racePreArmPending) {
             _racePreArmPending = false;
@@ -120,8 +152,17 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             _raceStopPending = false;
             _broadcastRaceStop();
         }
-        if (_directorStateBroadcastPending) {
+        // Throttled director-state broadcast.  When the pending flag is set
+        // but it's been less than MIN_DIRECTOR_BROADCAST_INTERVAL_MS since
+        // the previous fanout, leave it pending — it'll be picked up on a
+        // later tick once the interval has elapsed.  The latest payload from
+        // _directorStatePayload is what actually ships, so coalesced bursts
+        // still publish the final state without burning Core 0 on every
+        // one of them.
+        if (_directorStateBroadcastPending &&
+            (currentTimeMs - _lastDirectorBroadcastMs) >= MIN_DIRECTOR_BROADCAST_INTERVAL_MS) {
             _directorStateBroadcastPending = false;
+            _lastDirectorBroadcastMs       = currentTimeMs;
             _broadcastDirectorState();
         }
         if (_recruitPending) {
@@ -200,7 +241,7 @@ void MultiNodeManager::_sendRegistration() {
             if (id > 0) {
                 _myNodeId        = id;
                 _masterConnected = true;
-                DEBUG("[MULTINODE] Registered as node %u\n", _myNodeId);
+                DEBUG("[MULTINODE] Registered as node %c\n", slotLetter(_myNodeId));
                 // Persist the assigned slot so we can request it again on the
                 // next boot.  Only writes when the slot actually changed —
                 // setMnPreferredSlot is a no-op if the stored value matches.
@@ -307,7 +348,9 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
                                        const String& staIP, const String& clientIP,
                                        const String& macAddress,
                                        const String& apSuffix,
-                                       uint8_t& assignedNodeId) {
+                                       uint8_t& assignedNodeId,
+                                       bool& stateChanged) {
+    stateChanged = false;  // default — set true only when there's real new info
     // Re-registration matching.  Only MAC and nodeId are reliable identifiers —
     // STA IPs can be reassigned by DHCP to a different physical client, so a
     // bare IP match would silently merge two distinct units into the same slot
@@ -322,6 +365,25 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
         bool macMismatch = macKnown && macAddress != n.macAddress;
         bool idMatch     = incomingNodeId > 0 && n.nodeId == incomingNodeId;
         if (macMatch || (idMatch && !macMismatch)) {
+            // Detect whether this is a true re-registration (something the
+            // director would care about changed) or just the periodic 5 s
+            // keep-alive from a steady client.  Keep-alives outnumber real
+            // re-registrations ~100:1 — logging both at the same volume
+            // turned the serial monitor into noise that buried real events
+            // (timeouts, crashes, the [HEAP] watermark).
+            bool wasOffline = !n.online;
+            bool changed =
+                (n.pilotName    != pilotName)    ||
+                (n.pilotColor   != pilotColor)   ||
+                (n.bandIndex    != bandIndex)    ||
+                (n.channelIndex != channelIndex) ||
+                (n.frequency    != frequency)    ||
+                (n.enterRssi    != enterRssi)    ||
+                (n.exitRssi     != exitRssi)     ||
+                (n.clientIP     != clientIP)     ||
+                (n.staIP        != staIP)        ||
+                (apSuffix.length() > 0 && n.apSuffix != apSuffix);
+
             n.pilotName     = pilotName;
             n.pilotColor    = pilotColor;
             n.bandIndex     = bandIndex;
@@ -336,8 +398,25 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
             n.lastSeen      = millis();
             n.online        = true;
             assignedNodeId  = n.nodeId;
-            DEBUG("[MULTINODE] Re-registered node %u (mac=%s ip=%s suffix=%s): %s\n",
-                  n.nodeId, n.macAddress.c_str(), staIP.c_str(), n.apSuffix.c_str(), pilotName.c_str());
+            // Loud message for the events that warrant operator attention:
+            // a node that was offline coming back, OR any identity field
+            // change.  Silent steady-state keep-alives.
+            if (wasOffline || changed) {
+                DEBUG("[MULTINODE] %s node %c (mac=%s ip=%s suffix=%s): %s\n",
+                      wasOffline ? "Re-registered" : "Updated",
+                      slotLetter(n.nodeId), n.macAddress.c_str(), staIP.c_str(), n.apSuffix.c_str(), pilotName.c_str());
+                // Same gate flags the broadcast.  THIS is the fix for the
+                // Core-0 stall storm: with 7 clients each re-registering
+                // every 5 s, the caller used to fire pushMultiNodeState()
+                // 1.4 times/sec.  Each broadcast iterates 7 clients with an
+                // 800 ms HTTPClient timeout per POST, so one slow client
+                // alone burns 600-800 ms of Core 0 — observable in the
+                // [CORE0] sub-call log as "multinode blocked for ~750 ms"
+                // back-to-back forever.  Skipping the broadcast when nothing
+                // actually changed drops the trigger rate to ~zero in
+                // steady state.
+                stateChanged = true;
+            }
             return true;
         }
     }
@@ -390,8 +469,9 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     _nodes.push_back(n);
 
     assignedNodeId = newId;
-    DEBUG("[MULTINODE] New node %u (mac=%s ip=%s suffix=%s): %s\n",
-          newId, macAddress.c_str(), staIP.c_str(), apSuffix.c_str(), pilotName.c_str());
+    DEBUG("[MULTINODE] New node %c (mac=%s ip=%s suffix=%s): %s\n",
+          slotLetter(newId), macAddress.c_str(), staIP.c_str(), apSuffix.c_str(), pilotName.c_str());
+    stateChanged = true;   // brand-new slot occupant — broadcast so all clients learn about it
     return true;
 }
 
@@ -415,12 +495,23 @@ bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lap
 bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged) {
     for (auto& n : _nodes) {
         if (n.nodeId == nodeId) {
+            // Capture the offline-to-online edge before the write so we can
+            // log the recovery.  Without this, a node that timed out and
+            // then resumed via a heartbeat (the common case after a brief
+            // RF blip) would silently flip back to online and the serial
+            // trace looked like the node had never recovered — which made
+            // every transient timeout look permanent in the log.
+            bool wasOffline = !n.online;
             stateChanged  = (n.running != running || n.independent != independent || n.skipEnabled != skipEnabled);
             n.running     = running;
             n.independent = independent;
             n.skipEnabled = skipEnabled;
             n.lastSeen    = millis();
             n.online      = true;
+            if (wasOffline) {
+                DEBUG("[MULTINODE] Node %c (%s) reconnected via heartbeat\n",
+                      slotLetter(n.nodeId), n.pilotName.c_str());
+            }
             return true;
         }
     }
@@ -433,7 +524,7 @@ bool MultiNodeManager::handleQuit(uint8_t nodeId) {
         if (n.nodeId == nodeId) {
             n.quitEarly = true;
             n.running   = false;
-            DEBUG("[MULTINODE] Node %u (%s) quit early\n", n.nodeId, n.pilotName.c_str());
+            DEBUG("[MULTINODE] Node %c (%s) quit early\n", slotLetter(n.nodeId), n.pilotName.c_str());
             return true;
         }
     }
@@ -452,13 +543,33 @@ void MultiNodeManager::clearAllLaps() {
     DEBUG("[MULTINODE] All laps cleared\n");
 }
 
-void MultiNodeManager::_checkNodeTimeouts(uint32_t currentTimeMs) {
+void MultiNodeManager::_checkNodeTimeouts(uint32_t /*currentTimeMs*/) {
+    // The `currentTimeMs` parameter is a TRAP and we deliberately ignore it.
+    // It was captured at the start of parallelTask's iteration in main.cpp,
+    // BEFORE eight other sub-calls (buzzer, led, ota, webUpdate, usb,
+    // eeprom, rxFreq, webhooks) ran in front of us.  During those tens of
+    // milliseconds, AsyncTCP can — and does, at every heartbeat tick —
+    // preempt parallelTask and run handleHeartbeat / handleRegister, both
+    // of which set n.lastSeen = millis() with the actual current millis,
+    // which is by then ahead of the snapshot we were passed.  Computing
+    // (snapshot - lastSeen) with uint32_t then underflows to ~4 billion
+    // and we falsely declare the node timed out — milliseconds after it
+    // checked in.  This was the cause of the "Node X reconnected via
+    // heartbeat / Node X timed out within 2 ms" pairs in serial traces.
+    //
+    // Fix: refresh `now` HERE so it can't be staler than any concurrent
+    // lastSeen write, AND defensively skip any node whose lastSeen still
+    // somehow lands ahead of `now` (impossible after this refresh, but
+    // belt-and-braces — single read, no division, basically free).
+    uint32_t now = millis();
     for (auto& n : _nodes) {
-        if (n.online && (currentTimeMs - n.lastSeen) > MULTINODE_NODE_TIMEOUT_MS) {
-            n.online  = false;
-            n.running = false;
-            DEBUG("[MULTINODE] Node %u (%s) timed out\n", n.nodeId, n.pilotName.c_str());
-        }
+        if (!n.online) continue;
+        uint32_t lastSeen = n.lastSeen;
+        if (lastSeen > now) continue;                       // race: lastSeen newer than `now`
+        if ((now - lastSeen) <= MULTINODE_NODE_TIMEOUT_MS) continue;
+        n.online  = false;
+        n.running = false;
+        DEBUG("[MULTINODE] Node %c (%s) timed out\n", slotLetter(n.nodeId), n.pilotName.c_str());
     }
     // Nodes are never auto-removed — use removeNode() to manually free a slot.
 }
@@ -514,7 +625,7 @@ void MultiNodeManager::touchNode(uint8_t nodeId) {
 bool MultiNodeManager::removeNode(uint8_t nodeId) {
     for (auto it = _nodes.begin(); it != _nodes.end(); ++it) {
         if (it->nodeId == nodeId) {
-            DEBUG("[MULTINODE] Node %u (%s) manually removed\n", it->nodeId, it->pilotName.c_str());
+            DEBUG("[MULTINODE] Node %c (%s) manually removed\n", slotLetter(it->nodeId), it->pilotName.c_str());
             _nodes.erase(it);
             return true;
         }
@@ -527,7 +638,7 @@ bool MultiNodeManager::updateNodePilot(uint8_t nodeId, const String& name, uint3
         if (n.nodeId == nodeId) {
             n.pilotName  = name;
             n.pilotColor = color;
-            DEBUG("[MULTINODE] Node %u pilot updated locally: %s\n", nodeId, name.c_str());
+            DEBUG("[MULTINODE] Node %c pilot updated locally: %s\n", slotLetter(nodeId), name.c_str());
             return true;
         }
     }
@@ -588,7 +699,7 @@ void MultiNodeManager::_broadcastRacePreArm() {
         bool excluded = false;
         for (uint8_t id : _excludeNodes) { if (id == n.nodeId) { excluded = true; break; } }
         if (excluded) {
-            DEBUG("[MULTINODE] Race pre-arm → node %u (%s): SKIPPED (excluded)\n", n.nodeId, n.staIP.c_str());
+            DEBUG("[MULTINODE] Race pre-arm → node %c (%s): SKIPPED (excluded)\n", slotLetter(n.nodeId), n.staIP.c_str());
             continue;
         }
         HTTPClient http;
@@ -597,7 +708,7 @@ void MultiNodeManager::_broadcastRacePreArm() {
             http.setTimeout(500);
             int code = http.POST("");
             http.end();
-            DEBUG("[MULTINODE] Race pre-arm → node %u (%s): HTTP %d\n", n.nodeId, n.staIP.c_str(), code);
+            DEBUG("[MULTINODE] Race pre-arm → node %c (%s): HTTP %d\n", slotLetter(n.nodeId), n.staIP.c_str(), code);
         }
         vTaskDelay(1);
     }
@@ -615,7 +726,7 @@ void MultiNodeManager::_broadcastRaceStart() {
         for (uint8_t id : _excludeNodes) { if (id == n.nodeId) { excluded = true; break; } }
         n.excludedFromCurrentRace = excluded;
         if (excluded) {
-            DEBUG("[MULTINODE] Race start → node %u (%s): SKIPPED (excluded)\n", n.nodeId, n.staIP.c_str());
+            DEBUG("[MULTINODE] Race start → node %c (%s): SKIPPED (excluded)\n", slotLetter(n.nodeId), n.staIP.c_str());
             continue;
         }
         HTTPClient http;
@@ -624,7 +735,7 @@ void MultiNodeManager::_broadcastRaceStart() {
             http.setTimeout(500);
             int code = http.POST("");
             http.end();
-            DEBUG("[MULTINODE] Race start → node %u (%s): HTTP %d\n", n.nodeId, n.staIP.c_str(), code);
+            DEBUG("[MULTINODE] Race start → node %c (%s): HTTP %d\n", slotLetter(n.nodeId), n.staIP.c_str(), code);
         }
         vTaskDelay(1);  // yield between nodes so async_tcp stays fed
     }
@@ -846,7 +957,7 @@ void MultiNodeManager::_broadcastRaceStop() {
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) { n.excludedFromCurrentRace = false; continue; }
         if (n.excludedFromCurrentRace) {
-            DEBUG("[MULTINODE] Race stop → node %u (%s): SKIPPED (was excluded)\n", n.nodeId, n.staIP.c_str());
+            DEBUG("[MULTINODE] Race stop → node %c (%s): SKIPPED (was excluded)\n", slotLetter(n.nodeId), n.staIP.c_str());
             n.excludedFromCurrentRace = false;
             continue;
         }
@@ -858,7 +969,7 @@ void MultiNodeManager::_broadcastRaceStop() {
             int code = http.POST("");
             http.end();
             acked = (code == 200);
-            DEBUG("[MULTINODE] Race stop → node %u (%s): HTTP %d\n", n.nodeId, n.staIP.c_str(), code);
+            DEBUG("[MULTINODE] Race stop → node %c (%s): HTTP %d\n", slotLetter(n.nodeId), n.staIP.c_str(), code);
         }
         // Optimistically mark the client stopped on successful ack so the
         // master's view doesn't flag the last few clients as "Solo race in

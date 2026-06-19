@@ -75,27 +75,85 @@ static RssiLogger rssiLogger;
 static TaskHandle_t xTimerTask = NULL;
 static bool sdInitAttempted = false;
 
+// Core-0 stall instrumentation.  Tracks the worst single sub-call duration
+// across each 10 s window plus the worst gap between consecutive ticks (the
+// latter catches FreeRTOS preemption by higher-priority tasks like AsyncTCP).
+// If a sub-call takes ≥100 ms it's logged immediately with its name; the 10 s
+// summary line then shows the worst seen across the window even if it was
+// under that loud-log threshold.
+//
+// Why this matters: the multi-node timeout symptom is "4 clients flagged
+// offline in the same millisecond, all recovering 2 s later" — only possible
+// if Core 0 didn't run multiNodeManager.process() for 3+ s.  Finding the
+// offender call is the prerequisite for fixing it.
+struct Core0CallSample { const char* name = nullptr; uint32_t ms = 0; };
+static Core0CallSample worstCallThisWindow;
+static uint32_t        worstTickGapThisWindow = 0;
+static uint32_t        lastTickEndMs          = 0;
+static uint32_t        coreReportLastMs       = 0;
+
+static inline void timeCall(const char* name, void (*invoke)()) {
+    // Helper unused — we expand the timing inline below to avoid forcing
+    // every sub-call through an indirection.  Kept as documentation.
+    (void)name; (void)invoke;
+}
+
+#define CORE0_TIME(NAME, EXPR) do {                                         \
+    uint32_t _t0 = millis();                                                \
+    EXPR;                                                                   \
+    uint32_t _dt = millis() - _t0;                                          \
+    if (_dt > worstCallThisWindow.ms) {                                     \
+        worstCallThisWindow.ms   = _dt;                                     \
+        worstCallThisWindow.name = NAME;                                    \
+    }                                                                       \
+    if (_dt >= 100) {                                                       \
+        DEBUG("[CORE0] %s blocked for %u ms\n", NAME, (unsigned)_dt);       \
+    }                                                                       \
+} while (0)
+
 static void parallelTask(void *pvArgs) {
     for (;;) {
-        uint32_t currentTimeMs = millis();
-        buzzer.handleBuzzer(currentTimeMs);
-        led.handleLed(currentTimeMs);
+        uint32_t tickStart = millis();
+        if (lastTickEndMs != 0) {
+            uint32_t gap = tickStart - lastTickEndMs;
+            if (gap > worstTickGapThisWindow) worstTickGapThisWindow = gap;
+        }
+
+        uint32_t currentTimeMs = tickStart;
+        CORE0_TIME("buzzer",     buzzer.handleBuzzer(currentTimeMs));
+        CORE0_TIME("led",        led.handleLed(currentTimeMs));
 #ifdef ESP32S3
-        rgbLed.handleRgbLed(currentTimeMs);
+        CORE0_TIME("rgbLed",     rgbLed.handleRgbLed(currentTimeMs));
 #endif
         // OTA update work runs here (blocking) when an apply is pending.  The
         // RSSI loop on Core 1 is unaffected; only this Core-0 task pauses
         // during the download.
-        otaManager.loop();
-        ws.handleWebUpdate(currentTimeMs);
-        usbTransport.update(currentTimeMs);
-        config.handleEeprom(currentTimeMs);
-        rx.handleFrequencyChange(currentTimeMs, config.getFrequency());
-        webhookManager.process();      // HTTP I/O belongs on Core 0, not in the RSSI loop
-        multiNodeManager.process(currentTimeMs);  // Client: heartbeats/registration; Master: timeout checks
-        // Battery monitoring removed
-        // monitor.checkBatteryState(currentTimeMs, config.getAlarmThreshold());
-        
+        CORE0_TIME("ota",        otaManager.loop());
+        CORE0_TIME("webUpdate",  ws.handleWebUpdate(currentTimeMs));
+        CORE0_TIME("usb",        usbTransport.update(currentTimeMs));
+        CORE0_TIME("eeprom",     config.handleEeprom(currentTimeMs));
+        CORE0_TIME("rxFreq",     rx.handleFrequencyChange(currentTimeMs, config.getFrequency()));
+        CORE0_TIME("webhooks",   webhookManager.process());
+        CORE0_TIME("multinode",  multiNodeManager.process(currentTimeMs));
+
+        uint32_t tickEnd = millis();
+        lastTickEndMs = tickEnd;
+
+        // Roll up the window every 10 s.  Even if no individual sub-call
+        // crossed the 100 ms loud threshold, this line surfaces the worst
+        // measured tick + the worst preemption gap so you can see whether
+        // Core 0 is healthy across the whole period.
+        if (tickEnd - coreReportLastMs >= 10000) {
+            coreReportLastMs = tickEnd;
+            DEBUG("[CORE0] window 10s: longest sub-call %s=%u ms, longest tick gap=%u ms\n",
+                  worstCallThisWindow.name ? worstCallThisWindow.name : "(idle)",
+                  (unsigned)worstCallThisWindow.ms,
+                  (unsigned)worstTickGapThisWindow);
+            worstCallThisWindow.ms   = 0;
+            worstCallThisWindow.name = nullptr;
+            worstTickGapThisWindow   = 0;
+        }
+
         // Let other tasks run (WiFi/AsyncWebServer/etc.)
         vTaskDelay(1);
     }

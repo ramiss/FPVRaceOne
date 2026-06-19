@@ -8,7 +8,14 @@
 #define MULTINODE_HEARTBEAT_FAIL_LIMIT      5   // consecutive failures before declaring disconnected
 #define MULTINODE_REGISTER_INTERVAL_MS   5000   // re-register interval when already connected
 #define MULTINODE_RECONNECT_INTERVAL_MS   800   // retry interval when disconnected
-#define MULTINODE_NODE_TIMEOUT_MS        4000   // mark node offline after 4 s without heartbeat
+#define MULTINODE_NODE_TIMEOUT_MS        6000   // mark node offline after 6 s without heartbeat
+                                                 // (was 4 s — too tight on top of a 2 s heartbeat;
+                                                 //  one missed heartbeat + scheduler jitter would
+                                                 //  fire a false timeout right after a legitimate
+                                                 //  re-register, then the node would immediately
+                                                 //  recover.  6 s gives breathing room for two
+                                                 //  missed heartbeats and pushes the cross-core
+                                                 //  race window in _checkNodeTimeouts out of reach.)
 #define MULTINODE_MASTER_IP              "192.168.5.1"
 #define MULTINODE_CLIENT_AP_IP           "192.168.4.1"
 
@@ -81,7 +88,12 @@ public:
                           const String& staIP, const String& clientIP,
                           const String& macAddress,
                           const String& apSuffix,
-                          uint8_t& assignedNodeId);
+                          uint8_t& assignedNodeId,
+                          bool& stateChanged);   // out: true on new-node insert,
+                                                 //   offline→online recovery,
+                                                 //   or any user-visible field change.
+                                                 //   false for steady-state keep-alives
+                                                 //   so the caller can skip broadcasts.
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
     bool   handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
@@ -181,7 +193,18 @@ private:
 
     // Director-state broadcast queue (master-side push to clients).
     // Setting _directorStateBroadcastPending coalesces multiple bursts into one push.
+    // _lastDirectorBroadcastMs throttles the actual HTTP fanout to once every
+    // MIN_DIRECTOR_BROADCAST_INTERVAL_MS — during a multi-node recovery storm
+    // a dozen pushMultiNodeState() calls can stack up in <100 ms, and running
+    // them serially with a 300 ms-per-client HTTPClient timeout stalls Core 0
+    // long enough that the recovered nodes' next heartbeats expire and we get
+    // a cascade.  With throttling, the latest payload is broadcast at most
+    // every interval; Race View UIs see at most that much lag on host-side
+    // changes.  Race-critical broadcasts (pre-arm/start/stop) are NOT
+    // throttled because their timing matters.
     volatile bool     _directorStateBroadcastPending = false;
+    uint32_t          _lastDirectorBroadcastMs       = 0;
+    static constexpr uint32_t MIN_DIRECTOR_BROADCAST_INTERVAL_MS = 2000;
     String            _directorStatePayload;
 
     // Pre-arm phase: master entered the countdown but the race hasn't actually started yet.

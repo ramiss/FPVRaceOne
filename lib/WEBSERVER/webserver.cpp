@@ -170,6 +170,63 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     WiFi.mode(WIFI_OFF);
     delay(50);
 
+    // ── Diagnostic: log AP station connect / disconnect events ──────────────
+    // Registered once at boot.  When a station joins or leaves the master's
+    // AP — whether it's a client unit's STA, the director's browser, or a
+    // random pilot phone — print the MAC and the resulting station count.
+    // This is the only way to tell whether a "master wedged" symptom
+    // started with all clients losing their slots simultaneously (suggests
+    // an AP / WiFi-stack failure) vs. the browser silently dropping (which
+    // doesn't normally take everyone else down).
+    WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+        if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
+            const uint8_t* mac = info.wifi_ap_staconnected.mac;
+            DEBUG("[AP] STA connected: %02x:%02x:%02x:%02x:%02x:%02x  (now %u stations)\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                  WiFi.softAPgetStationNum());
+        } else if (event == ARDUINO_EVENT_WIFI_AP_STADISCONNECTED) {
+            const uint8_t* mac = info.wifi_ap_stadisconnected.mac;
+            DEBUG("[AP] STA disconnected: %02x:%02x:%02x:%02x:%02x:%02x  (now %u stations)\n",
+                  mac[0], mac[1], mac[2], mac[3], mac[4], mac[5],
+                  WiFi.softAPgetStationNum());
+
+            // SSE zombie cleanup.  AsyncEventSource doesn't notice when a
+            // client's WiFi peer goes silent — its internal client list
+            // still reports count=1 long after the browser disconnects.
+            // Every subsequent events.send() queues a message destined for
+            // a dead client, slowly bleeding heap (~1 KB/sec observed) and
+            // shredding it into fragments small enough that AsyncTCP can't
+            // allocate a new PCB — which is the actual root cause of the
+            // master-wedges-when-browser-drops bug.
+            //
+            // We don't know the SSE client's IP from this event, only the
+            // station's MAC.  Cross-reference against multiNode's
+            // registered client list: if this MAC is one of the 7 race
+            // units, leave SSE alone (race units don't open SSE anyway).
+            // If it's any other MAC, treat it as a director's browser and
+            // close every SSE client.  Worst case a second legitimate
+            // viewer's EventSource auto-reconnects within a couple of
+            // seconds — vastly preferable to the master crashing.
+            char macStr[18];
+            snprintf(macStr, sizeof(macStr), "%02X:%02X:%02X:%02X:%02X:%02X",
+                     mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+            bool isRegisteredClient = false;
+            if (multiNode) {
+                for (const auto& n : multiNode->getNodes()) {
+                    if (n.macAddress.equalsIgnoreCase(macStr)) {
+                        isRegisteredClient = true;
+                        break;
+                    }
+                }
+            }
+            if (!isRegisteredClient && events.count() > 0) {
+                DEBUG("[AP] non-client station left — closing %u SSE client(s) to reclaim heap\n",
+                      (unsigned)events.count());
+                events.close();
+            }
+        }
+    });
+
     // Determine initial WiFi mode based on node mode.
     //
     // Single + Master always boot AP-only.  Home WiFi credentials (conf.ssid /
@@ -273,22 +330,25 @@ static String _jsonEscape(const String& s) {
 
 // Build the {"nodes":[master,...clients],"race":{...}} payload used by both the
 // local /api/multinode/nodes endpoint and the broadcast-to-clients push.
+//
+// History: the original implementation built FOUR Strings (masterStr,
+// clientsJson, nodesArray, out) plus an 8 KB DynamicJsonDocument inside
+// MultiNodeManager::getNodesToJson(), all concatenated together.  Every
+// call malloc-and-freed ~12 KB while shredding the heap into fragments.
+// On a master with 7 clients at heartbeat cadence this dropped the largest
+// free block from 25 KB to ~1.7 KB over a minute, after which AsyncTCP
+// couldn't allocate a new PCB and the master wedged.
+//
+// This version builds the whole payload into ONE String pre-reserved to a
+// realistic upper bound based on actual node + lap counts.  Underestimating
+// causes a single reallocation; overestimating wastes a few KB briefly.
+// Either way, the heap pressure is dramatically reduced.
 static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *timer, Config *conf) {
-    // Master entry (nodeId=0) built by hand to avoid an extra JSON allocation.
-    bool    masterRunning = timer && timer->isRunning();
-    uint8_t masterCnt     = timer ? timer->getLapCount() : 0;
+    bool     masterRunning = timer && timer->isRunning();
+    uint8_t  masterCnt     = timer ? timer->getLapCount() : 0;
+    String   pilotName     = conf && conf->getPilotName() ? String(conf->getPilotName()) : String();
+    uint32_t pilotColor    = conf ? conf->getPilotColor() : 0x0080FFu;
 
-    String pilotName = conf && conf->getPilotName() ? String(conf->getPilotName()) : String();
-    uint32_t pilotColor = conf ? conf->getPilotColor() : 0x0080FFu;
-
-    // Mirror EVERY field the Edit Pilot modal reads when it populates the
-    // form for the host card.  Without these, the modal showed defaults
-    // (Band 0 / Chan 1 / skip off / Enter 120 / Exit 100) regardless of
-    // what was actually stored, AND clicking Save then wrote those
-    // defaults back to the master's Config — silently nuking real
-    // settings.  The Edit Pilot modal sends every field on every Save
-    // (mnSavePilotModal in script.js), so the populate path is the only
-    // gate.
     uint8_t  masterEnter   = conf ? conf->getEnterRssi()         : 0;
     uint8_t  masterExit    = conf ? conf->getExitRssi()          : 0;
     uint8_t  masterBand    = conf ? conf->getBandIndex()         : 0;
@@ -296,56 +356,81 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     uint16_t masterFreq    = conf ? conf->getFrequency()         : 0;
     bool     masterSkip    = conf ? conf->getMnSkipMasterStart() : false;
 
-    String  masterStr     = "{\"nodeId\":0,\"isMaster\":true,\"online\":true";
-    masterStr += ",\"pilotName\":\""; masterStr += _jsonEscape(pilotName); masterStr += "\"";
-    masterStr += ",\"pilotColor\":";  masterStr += pilotColor;
-    masterStr += ",\"bandIndex\":";   masterStr += masterBand;
-    masterStr += ",\"channelIndex\":"; masterStr += masterChan;
-    masterStr += ",\"frequency\":";   masterStr += masterFreq;
-    masterStr += ",\"skipEnabled\":"; masterStr += masterSkip ? "true" : "false";
-    masterStr += ",\"enterRssi\":";   masterStr += masterEnter;
-    masterStr += ",\"exitRssi\":";    masterStr += masterExit;
-    masterStr += ",\"running\":";  masterStr += masterRunning ? "true" : "false";
-    masterStr += ",\"lapCount\":"; masterStr += masterCnt;
-    masterStr += ",\"laps\":[";
-    for (uint8_t i = 0; i < masterCnt; i++) {
-        if (i > 0) masterStr += ',';
-        masterStr += "{\"lapNumber\":";
-        masterStr += (int)i;
-        masterStr += ",\"lapTimeMs\":";
-        masterStr += (int)timer->getLapTimeAt(i);
-        masterStr += '}';
+    uint32_t elapsedMs     = timer ? timer->getElapsedMs() : 0;
+    bool     prearmActive  = multiNode && multiNode->getPrearmPhase();
+
+    // Pre-size: master skeleton ~300 B, each client base ~400 B, each lap
+    // entry ~40 B.  Count laps across all sources so reserve fits without
+    // a realloc even in long races.
+    size_t lapEstimate = masterCnt;
+    size_t clientCount = 0;
+    if (multiNode) {
+        const auto& nodes = multiNode->getNodes();
+        clientCount = nodes.size();
+        for (const auto& n : nodes) lapEstimate += n.laps.size();
     }
-    masterStr += "]}";
-
-    String clientsJson = multiNode ? multiNode->getNodesToJson() : String("{\"nodes\":[]}");
-    String nodesArray;
-    // clientsJson is either {"nodes":[]} or {"nodes":[{...},...]}
-    String clientsTail = clientsJson.substring(10);  // "]}" when empty
-    nodesArray.reserve(masterStr.length() + clientsTail.length() + 16);
-    if (clientsTail == "]}") {
-        nodesArray = "[" + masterStr + "]";
-    } else {
-        // Strip trailing "]}" from clientsTail and prepend master entry.
-        nodesArray  = "[" + masterStr + "," + clientsTail.substring(0, clientsTail.length() - 2) + "]";
-    }
-
-    // Race state: include elapsed so clients can extrapolate a ticking timer
-    // between pushes without polling. prearmActive flags the countdown window
-    // so client Race View tabs can show "Arm your quad".
-    uint32_t elapsedMs    = timer ? timer->getElapsedMs() : 0;
-    bool     prearmActive = multiNode && multiNode->getPrearmPhase();
-
     String out;
-    out.reserve(nodesArray.length() + 80);
-    out  = "{\"nodes\":";
-    out += nodesArray;
-    out += ",\"race\":{\"running\":";
-    out += masterRunning ? "true" : "false";
-    out += ",\"elapsedMs\":";
-    out += (uint32_t)elapsedMs;
-    out += ",\"prearmActive\":";
-    out += prearmActive ? "true" : "false";
+    out.reserve(400 + clientCount * 400 + lapEstimate * 40);
+
+    // ── Header + master entry ─────────────────────────────────────────────
+    out += "{\"nodes\":[{\"nodeId\":0,\"isMaster\":true,\"online\":true";
+    out += ",\"pilotName\":\"";  out += _jsonEscape(pilotName); out += "\"";
+    out += ",\"pilotColor\":";   out += pilotColor;
+    out += ",\"bandIndex\":";    out += masterBand;
+    out += ",\"channelIndex\":"; out += masterChan;
+    out += ",\"frequency\":";    out += masterFreq;
+    out += ",\"skipEnabled\":";  out += masterSkip ? "true" : "false";
+    out += ",\"enterRssi\":";    out += masterEnter;
+    out += ",\"exitRssi\":";     out += masterExit;
+    out += ",\"running\":";      out += masterRunning ? "true" : "false";
+    out += ",\"lapCount\":";     out += masterCnt;
+    out += ",\"laps\":[";
+    for (uint8_t i = 0; i < masterCnt; i++) {
+        if (i > 0) out += ',';
+        out += "{\"lapNumber\":"; out += (int)i;
+        out += ",\"lapTimeMs\":"; out += (int)timer->getLapTimeAt(i);
+        out += '}';
+    }
+    out += "]}";
+
+    // ── Client entries inline ─────────────────────────────────────────────
+    // Replaces the old multiNode->getNodesToJson() path that allocated a
+    // DynamicJsonDocument(8192) just to immediately serialize-and-discard.
+    if (multiNode) {
+        for (const auto& n : multiNode->getNodes()) {
+            out += ",{\"nodeId\":";        out += (int)n.nodeId;
+            out += ",\"pilotName\":\"";    out += _jsonEscape(n.pilotName); out += "\"";
+            out += ",\"pilotColor\":";     out += n.pilotColor;
+            out += ",\"bandIndex\":";      out += (int)n.bandIndex;
+            out += ",\"channelIndex\":";   out += (int)n.channelIndex;
+            out += ",\"frequency\":";      out += (int)n.frequency;
+            out += ",\"online\":";         out += n.online ? "true" : "false";
+            out += ",\"running\":";        out += n.running ? "true" : "false";
+            out += ",\"quitEarly\":";      out += n.quitEarly ? "true" : "false";
+            out += ",\"independent\":";    out += n.independent ? "true" : "false";
+            out += ",\"skipEnabled\":";    out += n.skipEnabled ? "true" : "false";
+            out += ",\"excludedFromCurrentRace\":"; out += n.excludedFromCurrentRace ? "true" : "false";
+            out += ",\"lapCount\":";       out += (int)n.lapCount;
+            out += ",\"clientIP\":\"";     out += _jsonEscape(n.clientIP); out += "\"";
+            out += ",\"mac\":\"";          out += _jsonEscape(n.macAddress); out += "\"";
+            out += ",\"apSuffix\":\"";     out += _jsonEscape(n.apSuffix); out += "\"";
+            out += ",\"enterRssi\":";      out += (int)n.enterRssi;
+            out += ",\"exitRssi\":";       out += (int)n.exitRssi;
+            out += ",\"laps\":[";
+            for (size_t i = 0; i < n.laps.size(); i++) {
+                if (i > 0) out += ',';
+                out += "{\"lapNumber\":"; out += (int)n.laps[i].lapNumber;
+                out += ",\"lapTimeMs\":"; out += (int)n.laps[i].lapTimeMs;
+                out += '}';
+            }
+            out += "]}";
+        }
+    }
+
+    // ── Race state tail ───────────────────────────────────────────────────
+    out += "],\"race\":{\"running\":"; out += masterRunning ? "true" : "false";
+    out += ",\"elapsedMs\":";          out += (uint32_t)elapsedMs;
+    out += ",\"prearmActive\":";       out += prearmActive ? "true" : "false";
     out += "}}";
     return out;
 }
@@ -412,6 +497,14 @@ void Webserver::startAP() {
     esp_wifi_set_bandwidth(WIFI_IF_AP, WIFI_BW_HT20);
     esp_wifi_set_protocol(WIFI_IF_AP, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
 
+    // Shorten the AP's per-station inactivity window from the IDF default
+    // (5 min) to 60 s.  When a browser drops WiFi abruptly — sleep, range
+    // loss, OS toggle — no deauth frame is sent, so by default the AP
+    // holds the slot reserved for the full 5 minutes.  A defensive measure
+    // on its own; not sufficient to explain a full wedge but reduces the
+    // window for ghost slots to accumulate and contend with reconnects.
+    esp_wifi_set_inactive_time(WIFI_IF_AP, 60);
+
     DEBUG("WiFi AP started: SSID=%s ch=%d HT20\n", WiFi.softAPSSID().c_str(), apChannel);
     startServices();
 }
@@ -427,6 +520,70 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     if (sendRssi && ((currentTimeMs - rssiSentMs) > WEB_RSSI_SEND_TIMEOUT_MS)) {
         sendRssiEvent(timer->getRssi());
         rssiSentMs = currentTimeMs;
+    }
+
+    // ── Heap + connection-pool watermark every 5 s ──────────────────────────
+    // The fields we log here are the prime suspects for a "master wedged
+    // and won't accept new connections" failure mode:
+    //
+    //   free      — current free heap.  Trending steadily down across
+    //               consecutive logs == memory leak.  Sudden drop == burst
+    //               allocation (e.g. SSE broadcast, JSON build).
+    //   min       — minimum free heap ever observed since boot.  Floor
+    //               under which the master nearly OOM'd.
+    //   maxBlk    — largest contiguous free block.  Even with free heap
+    //               looking healthy, allocations larger than maxBlk fail
+    //               (heap fragmentation).  AsyncTCP needs ~1 KB contiguous
+    //               for each new connection's pcb.
+    //   sta       — count of stations currently associated to our AP.
+    //               Sudden drop to 0 while we still expect 7 clients ==
+    //               the AP went down on us.
+    //   sse       — count of attached AsyncEventSource clients.  Climbs
+    //               unbounded under SSE-zombie-leak scenarios.
+    //
+    // Logged unconditionally (gated only by interval) so a postmortem
+    // serial capture always has the 5-second window prior to a wedge.
+    //
+    // The low-heap watchdog underneath uses the same sample.  Thresholds
+    // tuned for the C6's ~300 KB heap; adjust if you change partitions or
+    // build flags significantly.
+    static uint32_t lastHeapLogMs    = 0;
+    static uint32_t lowHeapSinceMs   = 0;     // 0 = not low; otherwise millis at first dip
+    const  uint32_t HEAP_LOG_PERIOD  = 10000; // 10 s — quiet enough for normal monitoring,
+                                              //   still inside the watchdog window.
+    const  uint32_t HEAP_LOW_FREE    = 20000; // 20 KB free triggers concern
+    const  uint32_t HEAP_LOW_MAXBLK  = 8000;  // <8 KB contiguous == AsyncTCP can't accept
+    const  uint32_t HEAP_REBOOT_AFTER = 10000; // sustained low for 10 s => reboot
+
+    if (currentTimeMs - lastHeapLogMs > HEAP_LOG_PERIOD) {
+        lastHeapLogMs = currentTimeMs;
+        uint32_t freeHeap = ESP.getFreeHeap();
+        uint32_t minHeap  = ESP.getMinFreeHeap();
+        uint32_t maxBlk   = ESP.getMaxAllocHeap();
+        uint8_t  sta      = WiFi.softAPgetStationNum();
+        size_t   sseCnt   = events.count();
+        DEBUG("[HEAP] free=%u min=%u maxBlk=%u sta=%u sse=%u\n",
+              (unsigned)freeHeap, (unsigned)minHeap, (unsigned)maxBlk,
+              (unsigned)sta, (unsigned)sseCnt);
+
+        bool low = (freeHeap < HEAP_LOW_FREE) || (maxBlk < HEAP_LOW_MAXBLK);
+        if (low) {
+            if (lowHeapSinceMs == 0) {
+                lowHeapSinceMs = currentTimeMs;
+                DEBUG("[HEAP] WARN: heap low (free=%u maxBlk=%u) — watching\n",
+                      (unsigned)freeHeap, (unsigned)maxBlk);
+            } else if (currentTimeMs - lowHeapSinceMs > HEAP_REBOOT_AFTER) {
+                DEBUG("[HEAP] FATAL: heap low for %u ms (free=%u maxBlk=%u) — rebooting\n",
+                      (unsigned)(currentTimeMs - lowHeapSinceMs),
+                      (unsigned)freeHeap, (unsigned)maxBlk);
+                delay(50);  // give the serial DEBUG a chance to drain
+                ESP.restart();
+            }
+        } else if (lowHeapSinceMs != 0) {
+            DEBUG("[HEAP] OK: heap recovered (free=%u maxBlk=%u)\n",
+                  (unsigned)freeHeap, (unsigned)maxBlk);
+            lowHeapSinceMs = 0;
+        }
     }
 
     // Send SSE keepalive ping to prevent connection timeout
@@ -599,6 +756,10 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 esp_wifi_set_bandwidth(WIFI_IF_STA, WIFI_BW_HT20);
                 esp_wifi_set_protocol(WIFI_IF_AP,  WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
                 esp_wifi_set_protocol(WIFI_IF_STA, WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G | WIFI_PROTOCOL_11N);
+                // Match the master's 60 s AP inactivity window so ghost
+                // pilot-phone slots on a client unit's AP don't accumulate
+                // either (see startAP comment for rationale).
+                esp_wifi_set_inactive_time(WIFI_IF_AP, 60);
 
                 changeTimeMs = currentTimeMs;
                 // Manual reconnect only — auto-reconnect triggers full channel scans that
@@ -1264,6 +1425,25 @@ EEPROM:\n\
         serializeJsonPretty(jsonObj, DEBUG_OUT);
         DEBUG("\n");
 #endif
+        // Capture which fields the Save touched BEFORE fromJson runs.  We
+        // only republish multi-node state when one of the fields the Edit
+        // Pilot host card actually reads has changed — most /config Saves
+        // touch theme / voice / WiFi / etc. and don't need the rebroadcast.
+        // Avoiding the broadcast on every Save reduces heap pressure
+        // significantly: each pushMultiNodeState builds the ~3 KB JSON
+        // payload, queues it to every connected client, AND fires an SSE
+        // event on the master's own browser.  Coalescing to only the
+        // relevant cases preserves UI freshness without burning the heap.
+        bool needsBroadcast =
+            jsonObj.containsKey("name")             ||
+            jsonObj.containsKey("pilotColor")       ||
+            jsonObj.containsKey("band")             ||
+            jsonObj.containsKey("chan")             ||
+            jsonObj.containsKey("freq")             ||
+            jsonObj.containsKey("enterRssi")        ||
+            jsonObj.containsKey("exitRssi")         ||
+            jsonObj.containsKey("mnSkipMasterStart");
+
         conf->fromJson(jsonObj);
 
         // This endpoint is only hit on an explicit user "Save" action.
@@ -1272,15 +1452,10 @@ EEPROM:\n\
         // EEPROM handler runs.
         conf->write();
 
-        // Master mode: republish the multi-node state so the master's browser
-        // refreshes its mnCurrentNodes cache.  Without this, anything the
-        // Edit Pilot modal reads off the host card (pilotName, pilotColor,
-        // band/chan/freq, enterRssi, exitRssi, skipEnabled) stays stale
-        // after a Settings or Calibration-tab Save until the next periodic
-        // poll fires — and "the modal and the Calibration tab disagree on
-        // enterRssi" is the most visible symptom of that staleness.
-        // pushMultiNodeState() no-ops outside master mode.
-        pushMultiNodeState();
+        // Master mode only: republish so mnCurrentNodes' host entry refreshes
+        // (Edit Pilot modal reads from it).  pushMultiNodeState() no-ops
+        // outside master mode, so the guard is cheap when nothing matched.
+        if (needsBroadcast) pushMultiNodeState();
 
         request->send(200, "application/json", "{\"status\": \"OK\"}");
         led->on(200);
@@ -2239,12 +2414,20 @@ EEPROM:\n\
             uint8_t enterRssi   = obj["enterRssi"] | 0;
             uint8_t exitRssi    = obj["exitRssi"]  | 0;
             uint8_t assignedId  = obj["nodeId"]   | 0;    // client's self-reported nodeId (0 on first registration)
+            bool stateChanged = false;
             bool ok = multiNode->handleRegister(pilotName,
                                                  pilotColor, bandIndex, channelIndex, freq,
                                                  enterRssi, exitRssi,
                                                  staIP, clientIP,
-                                                 macAddress, apSuffix, assignedId);
-            if (ok) pushMultiNodeState();  // give the new client an immediate Race View snapshot
+                                                 macAddress, apSuffix, assignedId,
+                                                 stateChanged);
+            // Only push when something actually changed.  The 5 s keep-alive
+            // re-registrations from all 7 clients used to fire this 1.4×/sec,
+            // queueing back-to-back broadcasts that stalled Core 0 for
+            // 600-800 ms each (one unreachable client's HTTPClient hits the
+            // 800 ms timeout per cycle).  New-node insert / offline recovery
+            // / pilot info change still push, so Race View tabs stay in sync.
+            if (ok && stateChanged) pushMultiNodeState();
 
             DynamicJsonDocument resp(64);
             if (ok) {
