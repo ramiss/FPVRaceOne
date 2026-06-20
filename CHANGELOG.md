@@ -8,6 +8,36 @@ All notable changes to FPVRaceOne will be documented in this file.
 > features were stripped during the rename / re-platform from FPVGate.
 > Treat 1.4.x entries as historical context, not as feature claims.
 
+## [Unreleased]
+
+### Added — OTA: multi-node pause/resume
+
+- **Check for Updates now safe to run on a master with connected pilots, or
+  on a client connected to a master.** Previously the home-WiFi excursion
+  starved the STA radio (on a client) or churned the LwIP TCP slot pool
+  alongside active client traffic (on a master), surfacing as a `HTTP -1`
+  connection-refused error against GitHub
+- Before reaching for home WiFi, the device temporarily pauses multi-node
+  networking: master-side handlers reject client polls so TCP slots free up,
+  and a client disconnects its STA from the master so the radio is free for
+  home WiFi. The persisted multi-node mode is unchanged — when the check (or
+  apply, or cancel) finishes, the mesh wakes back up automatically
+- Confirm dialog before the check explains the consequence in plain English
+  ("there are 3 pilots currently connected to this master…") so a director
+  can bail out without committing
+- 5-minute safety auto-resume catches the case where the user closes the tab
+  mid-flow, so the mesh never stays paused indefinitely
+
+### Changed — OTA: human-readable error messages
+
+- GitHub API failures now translate ESP HTTPClient's negative error codes
+  (`-1`, `-7`, etc.) into actionable English. Previously surfaced as the
+  cryptic `"GitHub API returned HTTP -1"`; now reads e.g. *"Could not reach
+  GitHub releases API — your home WiFi may have no internet (or a captive
+  portal is blocking it). Verify the saved network is online and try again."*
+- Asset preflight and download-and-flash errors use the same translation,
+  with a "likely cause + next step" line replacing the bare numeric code
+
 ## [1.5.0] - 2026-06-19
 
 Major refresh covering Q1–Q2 2026 work on multi-node race directing, heap /

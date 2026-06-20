@@ -6,6 +6,7 @@
 class Config;
 class LapTimer;
 class AsyncEventSource;
+class MultiNodeManager;
 
 // Drives the GitHub-based OTA update flow.
 //
@@ -44,7 +45,12 @@ public:
         String filesystemUrl;    // browser_download_url for littlefs asset
     };
 
-    void init(Config* config, LapTimer* timer, AsyncEventSource* events);
+    // multinode is optional — if provided, the check/apply flows pause it
+    // (disconnect clients on master, drop master STA on client) for the
+    // duration of the home-WiFi excursion to free TCP slots and the STA radio,
+    // then resume automatically.  Pass nullptr to skip the pause.
+    void init(Config* config, LapTimer* timer, AsyncEventSource* events,
+              MultiNodeManager* multinode = nullptr);
     void loop();  // call from parallel task — drains pending apply work
 
     // Synchronous: connects, queries GitHub, fills `out`.
@@ -82,10 +88,16 @@ public:
     // restore.
     static bool filesystemUpdateIncomplete();
 
+    // Exposed so the webserver's /api/update/resume-multinode endpoint can
+    // call it from the frontend's cancel path without reaching into multinode
+    // directly (keeps the dependency one-way: webserver → ota → multinode).
+    void resumeMultinodeIfPaused();
+
 private:
-    Config*           _config = nullptr;
-    LapTimer*         _timer  = nullptr;
-    AsyncEventSource* _events = nullptr;
+    Config*           _config    = nullptr;
+    LapTimer*         _timer     = nullptr;
+    AsyncEventSource* _events    = nullptr;
+    MultiNodeManager* _multinode = nullptr;
 
     State   _state           = STATE_IDLE;
     int     _progressPercent = 0;

@@ -1125,6 +1125,33 @@ void Webserver::startServices() {
         request->send(200, "application/json", body);
     });
 
+    // ── OTA: multinode disruption check ─────────────────────────────────────
+    // Called by the frontend BEFORE /api/update/check to find out whether
+    // proceeding would disrupt the multi-node mesh.  Returns wouldDisrupt=true
+    // for a client (will disconnect from master) or a master with online
+    // clients (clients will be temporarily disconnected), with a UI-ready
+    // message.  Standalone single-mode devices always return wouldDisrupt=false.
+    server.on("/api/update/disruption-check", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        bool   would = multiNode && multiNode->wouldOtaDisruptMultinode();
+        String msg   = (multiNode ? multiNode->getOtaDisruptionMessage() : String());
+        msg.replace("\\", "\\\\");
+        msg.replace("\"", "\\\"");
+        String body = String("{\"wouldDisrupt\":") + (would ? "true" : "false") +
+                      ",\"message\":\"" + msg + "\"}";
+        request->send(200, "application/json", body);
+    });
+
+    // ── OTA: resume multinode ───────────────────────────────────────────────
+    // Frontend cancel path.  If the user closes the "Update Available" dialog
+    // without proceeding, the multinode was left paused by the check phase so
+    // the apply could reuse the freed resources.  Cancel calls this to wake
+    // multinode networking back up immediately rather than waiting for the
+    // 5-minute safety auto-resume to fire.
+    server.on("/api/update/resume-multinode", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        otaManager.resumeMultinodeIfPaused();
+        request->send(200, "application/json", "{\"status\":\"resumed\"}");
+    });
+
     server.on("/status", [this](AsyncWebServerRequest *request) {
         char buf[1536];
         char configBuf[512];

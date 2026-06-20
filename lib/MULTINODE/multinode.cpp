@@ -66,6 +66,18 @@ void MultiNodeManager::init(Config* config, Led* led, Webserver* webserver) {
 void MultiNodeManager::process(uint32_t currentTimeMs) {
     if (!_conf) return;
 
+    // While paused for OTA we skip all multinode networking.  Safety auto-
+    // resume covers the case where the caller (frontend / OTA) forgot to
+    // resume — e.g. the user closed the browser tab mid-flow.
+    if (_pausedForOta) {
+        if (_pauseExpiresAtMs > 0 && currentTimeMs > _pauseExpiresAtMs) {
+            DEBUG("[MULTINODE] OTA pause timed out — auto-resuming\n");
+            resumeFromOta();
+        } else {
+            return;
+        }
+    }
+
     if (isClientMode()) {
         bool prevConnected = _masterConnected;
         bool pauseActive   = (_reconnectPausedUntilMs > 0 && currentTimeMs < _reconnectPausedUntilMs);
@@ -205,6 +217,79 @@ bool MultiNodeManager::isClientMode() const {
 
 bool MultiNodeManager::isMasterMode() const {
     return _conf && _conf->getNodeMode() == 1;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+//  OTA pause / resume
+// ──────────────────────────────────────────────────────────────────────
+
+void MultiNodeManager::pauseForOta() {
+    if (_pausedForOta) return;
+    _savedNodeModeForOta = _conf ? _conf->getNodeMode() : 0;
+    if (_savedNodeModeForOta == 0) return;   // already single — nothing to pause
+
+    _pausedForOta     = true;
+    _pauseExpiresAtMs = millis() + OTA_PAUSE_TIMEOUT_MS;
+    DEBUG("[MULTINODE] Paused for OTA (was mode %u)\n", _savedNodeModeForOta);
+
+    if (_savedNodeModeForOta == 2) {
+        // Client mode: free the STA radio so OTA can associate with home WiFi.
+        // The ESP32 has one STA — without this disconnect, WiFi.begin(homeSsid)
+        // would have to wait for the existing association to drop on its own.
+        WiFi.disconnect(false);   // keep stored creds; just drop the association
+        _masterConnected     = false;
+        _heartbeatFailCount  = 0;
+    }
+    // Master mode: leave the AP up so the director's browser stays connected at
+    // 192.168.5.1.  Active clients will hit master-side handlers that early-
+    // return false (see handleRegister/handleHeartbeat/handleLap/handleQuit),
+    // their TCP connections close fast, and the freed slots are available for
+    // the outbound HTTPS call to GitHub.
+}
+
+void MultiNodeManager::resumeFromOta() {
+    if (!_pausedForOta) return;
+    DEBUG("[MULTINODE] Resumed from OTA (restoring mode %u)\n", _savedNodeModeForOta);
+    _pausedForOta     = false;
+    _pauseExpiresAtMs = 0;
+    // process() picks back up naturally on the next tick: client re-associates
+    // to master, master starts heartbeating its clients again.
+}
+
+bool MultiNodeManager::wouldOtaDisruptMultinode() const {
+    if (!_conf) return false;
+    if (isClientMode()) return true;
+    if (isMasterMode()) {
+        for (const auto& n : _nodes) {
+            if (n.online) return true;
+        }
+    }
+    return false;
+}
+
+String MultiNodeManager::getOtaDisruptionMessage() const {
+    if (!_conf) return String();
+    if (isClientMode()) {
+        return String(F(
+                 "This device is currently a client of a master race director. "
+                 "Checking for updates will disconnect this device from the master "
+                 "for the duration of the check (and the update, if you apply one). "
+                 "The master will mark you offline. You will reconnect automatically "
+                 "when the check or update finishes - or if you cancel."));
+    }
+    if (isMasterMode()) {
+        int onlineCount = 0;
+        for (const auto& n : _nodes) if (n.online) onlineCount++;
+        if (onlineCount == 0) return String();
+        String s = onlineCount == 1
+            ? String(F("There is 1 pilot currently connected to this master. "))
+            : String(onlineCount) + F(" pilots are currently connected to this master. ");
+        s += F("Checking for updates will pause the mesh: connected pilots will be "
+               "temporarily disconnected and will reconnect automatically when the "
+               "check or update finishes - or if you cancel.");
+        return s;
+    }
+    return String();
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -350,6 +435,7 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
                                        const String& apSuffix,
                                        uint8_t& assignedNodeId,
                                        bool& stateChanged) {
+    if (_pausedForOta) { stateChanged = false; return false; }   // master is OTA-busy
     stateChanged = false;  // default — set true only when there's real new info
     // Re-registration matching.  Only MAC and nodeId are reliable identifiers —
     // STA IPs can be reassigned by DHCP to a different physical client, so a
@@ -476,6 +562,7 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
 }
 
 bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber) {
+    if (_pausedForOta) return false;   // master is OTA-busy
     for (auto& n : _nodes) {
         if (n.nodeId == nodeId) {
             MultiNodeLap lap;
@@ -493,6 +580,7 @@ bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lap
 }
 
 bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged) {
+    if (_pausedForOta) { stateChanged = false; return false; }   // master is OTA-busy
     for (auto& n : _nodes) {
         if (n.nodeId == nodeId) {
             // Capture the offline-to-online edge before the write so we can
@@ -520,6 +608,7 @@ bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool indepe
 }
 
 bool MultiNodeManager::handleQuit(uint8_t nodeId) {
+    if (_pausedForOta) return false;   // master is OTA-busy
     for (auto& n : _nodes) {
         if (n.nodeId == nodeId) {
             n.quitEarly = true;

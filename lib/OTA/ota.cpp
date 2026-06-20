@@ -3,6 +3,7 @@
 #include "config.h"
 #include "laptimer.h"
 #include "debug.h"
+#include "multinode.h"
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -64,6 +65,43 @@ static bool isAllDigits(const String& s) {
         if (s[i] < '0' || s[i] > '9') return false;
     }
     return true;
+}
+
+// HTTPClient::GET() returns a positive HTTP status code on success (200, 404, …)
+// or a negative HTTPC_ERROR_* on a pre-response failure (TLS handshake, DNS,
+// timeout, captive portal, etc.).  Raw "-1"/"-7" codes mean nothing to a pilot;
+// translate them into actionable English.
+static String describeHttpFailure(int code, const char* what) {
+    if (code > 0) {
+        // Positive == real HTTP status.  Leave the number — these are
+        // recognisable and Google-able (403, 404, 500…).
+        return String(what) + " returned HTTP " + String(code);
+    }
+    switch (code) {
+        case HTTPC_ERROR_CONNECTION_REFUSED:
+            return String("Could not reach ") + what +
+                   " — your home WiFi may have no internet (or a captive portal is blocking it). "
+                   "Verify the saved network is online and try again.";
+        case HTTPC_ERROR_NOT_CONNECTED:
+        case HTTPC_ERROR_CONNECTION_LOST:
+            return String("Network connection to ") + what + " dropped mid-request. "
+                   "Check your home WiFi signal and try again.";
+        case HTTPC_ERROR_READ_TIMEOUT:
+            return String(what) + " did not respond in time. "
+                   "The network is slow or unreachable — try again, or use a stronger signal.";
+        case HTTPC_ERROR_SEND_HEADER_FAILED:
+        case HTTPC_ERROR_SEND_PAYLOAD_FAILED:
+            return String("Could not send request to ") + what +
+                   ". This usually means a TLS handshake failed or the WiFi requires a captive-portal login.";
+        case HTTPC_ERROR_NO_HTTP_SERVER:
+            return String("Reached the network but no HTTPS server answered for ") + what +
+                   ". The home WiFi may be a captive portal.";
+        case HTTPC_ERROR_TOO_LESS_RAM:
+            return "Not enough memory to complete the update request. Reboot the device and try again.";
+        default:
+            return String(what) + " network error (" +
+                   HTTPClient::errorToString(code) + "). Check that your home WiFi has internet access.";
+    }
 }
 
 // `git describe --tags --always --dirty` produces strings like
@@ -208,10 +246,12 @@ static int compareSemver(const String& a, const String& b) {
     return comparePrereleaseIds(preA, preB);
 }
 
-void OtaManager::init(Config* config, LapTimer* timer, AsyncEventSource* events) {
-    _config = config;
-    _timer  = timer;
-    _events = events;
+void OtaManager::init(Config* config, LapTimer* timer, AsyncEventSource* events,
+                      MultiNodeManager* multinode) {
+    _config    = config;
+    _timer     = timer;
+    _events    = events;
+    _multinode = multinode;
     _state  = STATE_IDLE;
     _progressPercent = 0;
     _statusMessage   = "";
@@ -258,6 +298,10 @@ void OtaManager::emitProgress() {
              "{\"state\":%d,\"progress\":%d,\"message\":\"%s\"}",
              (int)_state, _progressPercent, msg.c_str());
     _events->send(buf, "updateProgress");
+}
+
+void OtaManager::resumeMultinodeIfPaused() {
+    if (_multinode) _multinode->resumeFromOta();
 }
 
 bool OtaManager::connectToHomeWifi(uint32_t timeoutMs, String& err) {
@@ -314,11 +358,18 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     // succeeds we'll repopulate `_lastInfo` below.
     _lastInfoValid = false;
 
+    // Pause multinode networking for the duration of the home-WiFi excursion.
+    // Idempotent — no-op if we're already in single mode.  Left paused on the
+    // STATE_UPDATE_AVAILABLE exit so the apply phase can keep using the freed
+    // STA radio / TCP slots; resumed on every other exit.
+    if (_multinode) _multinode->pauseForOta();
+
     setState(STATE_CONNECTING, "Connecting to home WiFi...");
     setProgress(10);
     if (!connectToHomeWifi(15000, err)) {
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return false;
     }
 
@@ -352,6 +403,7 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         err = "HTTP client init failed";
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return false;
     }
 
@@ -372,14 +424,18 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         setState(STATE_UP_TO_DATE, "No releases published yet for this device's firmware repo.");
         setProgress(100);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return true;
     }
     if (code != 200) {
         // Any other non-200 (rate limit, auth, server error) is a real failure.
-        err = "GitHub API returned HTTP " + String(code);
+        // Negative codes are HTTPClient pre-response errors (TLS, DNS, timeout);
+        // describeHttpFailure translates them into pilot-readable English.
+        err = describeHttpFailure(code, "GitHub releases API");
         http.end();
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return false;
     }
 
@@ -394,6 +450,7 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         err = String("JSON parse error: ") + jerr.c_str();
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return false;
     }
 
@@ -423,6 +480,7 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
             setState(STATE_UP_TO_DATE, "No releases published yet for this device's firmware repo.");
             setProgress(100);
             disconnectFromHomeWifi();
+            if (_multinode) _multinode->resumeFromOta();
             return true;
         }
     } else {
@@ -448,6 +506,7 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
               + UPDATE_FW_ASSET + ", " + UPDATE_FS_ASSET + ")";
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return false;
     }
 
@@ -479,6 +538,13 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
 
     // Drop STA — apply phase will reconnect when the user confirms.
     disconnectFromHomeWifi();
+    // Leave multinode paused IFF an update is available, so the apply phase can
+    // reuse the freed STA radio / TCP slots without a races-with-clients gap
+    // between check and apply.  If we're up-to-date, resume now — the user is
+    // done with home WiFi.
+    if (_state != STATE_UPDATE_AVAILABLE && _multinode) {
+        _multinode->resumeFromOta();
+    }
     return true;
 }
 
@@ -520,8 +586,12 @@ bool OtaManager::downloadAndFlash(const String& url, int target, const char* lab
             return false;
         case HTTP_UPDATE_FAILED:
         default:
-            err = String(label) + " download failed: " + httpUpdate.getLastErrorString()
-                  + " (code " + String(httpUpdate.getLastError()) + ")";
+            // getLastErrorString() returns things like "Stream Read Timeout" or
+            // "Wrong HTTP code: 404" — usable but cryptic on its own. Add a
+            // plain-English next step so a pilot knows what to do.
+            err = String(label) + " download failed (" + httpUpdate.getLastErrorString() +
+                  "). Likely cause: home WiFi dropped, GitHub blocked the request, "
+                  "or the device ran low on memory. Re-run the update.";
             return false;
     }
 }
@@ -558,8 +628,12 @@ bool OtaManager::preflightCheck(const String& fwUrl, const String& fsUrl, String
         http.end();
 
         if (code != HTTP_CODE_OK) {
-            err = String("Pre-flight: ") + t.label + " asset returned HTTP " + String(code)
-                  + " — the release may be missing its " + t.label + " image";
+            const String what = String(t.label) + " asset download";
+            err = String("Pre-flight: ") + describeHttpFailure(code, what.c_str());
+            if (code > 0 && code != HTTP_CODE_OK) {
+                // For real HTTP statuses (404 etc.) tack on the most likely cause.
+                err += " — the release may be missing its " + String(t.label) + " image.";
+            }
             return false;
         }
         if (len >= 0 && len < t.minBytes) {
@@ -591,12 +665,20 @@ void OtaManager::loop() {
     }
 
     String err;
+
+    // Defensive pause — the check path already paused if it found an update,
+    // but if the user took longer than the 5-minute safety auto-resume to
+    // click Update Now, or somehow reached apply without going through check,
+    // we need to pause again.  Idempotent — no-op if already paused.
+    if (_multinode) _multinode->pauseForOta();
+
     setState(STATE_CONNECTING, "Connecting to home WiFi for download...");
     setProgress(0);
     if (!connectToHomeWifi(20000, err)) {
         setState(STATE_ERROR, err);
         // Recover gracefully — failed before any flash write, safe to keep running.
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return;
     }
 
@@ -608,6 +690,7 @@ void OtaManager::loop() {
     if (!preflightCheck(fwUrl, fsUrl, err)) {
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return;
     }
 
@@ -622,6 +705,7 @@ void OtaManager::loop() {
     if (!downloadAndFlash(fwUrl, U_FLASH, "Firmware", err)) {
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
         return;
     }
 
@@ -640,10 +724,16 @@ void OtaManager::loop() {
         otaSetFsState(OTA_FS_PENDING_RETRY, fsUrl);
         setState(STATE_ERROR, err + " — filesystem update incomplete. Re-run the update now (do not reboot first).");
         disconnectFromHomeWifi();
+        // Leave multinode PAUSED on this specific failure: the user is expected
+        // to immediately re-run the update without rebooting, and we want the
+        // STA radio / TCP slots free for that retry.  The 5-minute safety
+        // auto-resume will rescue them if they walk away instead.
         return;
     }
     otaSetFsState(OTA_FS_OK);
 
+    // Success — device reboots in 3 s; the boot path restores the persisted
+    // multinode mode from NVS naturally, so no explicit resume needed here.
     setState(STATE_REBOOTING, "Update complete — rebooting in 3 seconds...");
     setProgress(100);
 

@@ -1666,6 +1666,8 @@ button.update-btn {
 .wizard-modal {
   max-width: 800px;
   width: 95%;
+  max-height: 90vh;
+  overflow-y: auto;
 }
 
 .wizard-instructions {

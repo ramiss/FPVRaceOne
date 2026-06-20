@@ -291,8 +291,10 @@ void setup() {
 
     ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &webhookManager, &multiNodeManager);
 
-    // OTA manager — uses the webserver's SSE channel for progress events.
-    otaManager.init(&config, &timer, ws.getEvents());
+    // OTA manager — uses the webserver's SSE channel for progress events,
+    // and pauses multinode networking during home-WiFi excursions so the
+    // STA radio (client mode) and TCP slot pool (master mode) are free.
+    otaManager.init(&config, &timer, ws.getEvents(), &multiNodeManager);
 
     // Initialize USB transport
     usbTransport.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx);
