@@ -96,7 +96,7 @@ If the three peaks differ in height by more than ~15 %, the wizard shows a warni
 The wizard calculates thresholds with conservative safety margins:
 
 - **Enter RSSI** ≈ 95 % of the *weakest* of the three peaks (~5 % headroom for lap-to-lap variation)
-- **Exit RSSI** = Enter − 7 (tight enough for tiny-whoop tracks where gates are close together; raised above the recording's noise floor if needed)
+- **Exit RSSI** = Enter − 4 (tight hysteresis tuned for close-pattern tracks; raised above the recording's noise floor if needed)
 
 Review the values, tweak manually if you have a specific reason, then tap **Apply Thresholds**. The values are saved immediately.
 
@@ -130,7 +130,20 @@ If you have a second device — or up to seven of them — pair them as a single
 3. Set **Node Mode** = `Master` and tap **Apply Multi-Node & Reboot**
 4. After reboot, note the master's AP name (e.g. `FPVRaceOne_AB12CD`)
 
-### Set Up Each Client
+### Set Up Each Client — Option A: Master Recruit (one tap)
+
+1. On the **master**, open **Settings → Multi-Node Timing → Recruit Nearby Units**
+2. The master scans for every `FPVRaceOne_*` AP in range, joins each one,
+   switches it into Client mode, points it at the master's SSID, and reboots it
+3. A full-screen overlay shows progress; the master's own AP drops for
+   ~60 seconds during the pass — reconnect when it returns
+4. By default, units already in `Client` or `Master` mode are skipped — tick
+   "Force recruit nodes already configured as clients" to re-target them too
+
+This is the fastest setup for ad-hoc events where pilots haven't pre-configured
+their timers.
+
+### Set Up Each Client — Option B: Manual
 
 1. On the next device, open **Settings → Multi-Node Timing**
 2. Set **Node Mode** = `Client`
@@ -140,9 +153,32 @@ If you have a second device — or up to seven of them — pair them as a single
 
 ### Race
 
-- On the **master**, every connected client appears as a card on the Race tab with the pilot's name, lap count, and live state (● Running, ○ Stopped, ⚠ DNF)
+- On the **master**, every connected client appears as a card on the Race
+  tab with the pilot's name, lap count, and live state (● Running, ○
+  Stopped, ⚠ DNF). Slot labels are letters **A** through **G**
 - Tap **Start All** to start every pilot at once; tap **Stop All** to end the heat
-- Each client also keeps its own local Start / Stop — useful for a pilot to drop out mid-heat (their card shows **DNF** on the master, the heat keeps going)
+- Each client also keeps its own local Start / Stop — useful for a pilot
+  to drop out mid-heat (their card shows **DNF** on the master, the heat
+  keeps going)
+
+### Editing pilots from the master
+
+Every slot card (including the **Host** card for the master itself) has a
+pencil icon. Tap it to open the Edit Pilot modal where you can:
+
+- Change pilot name, color, band, channel, RSSI thresholds, or skip flag
+- Run the **Calibration Wizard** for that client remotely (the wizard
+  records on the target client and pushes thresholds back) or locally
+  for the host
+- View **Live RSSI** from the selected client (toggle on the right of
+  the title) — peak-detected at the firmware so even a 5 Hz poll catches
+  brief gate passes
+- **Move (Swap) Pilot to Slot** — pick a target letter; if occupied, the
+  two pilots swap places, both clients persist the new slot to NVS
+- **Kick from Slot** (clients only) — pauses the client's reconnect
+  attempts for one minute so another unit can take its place
+
+Save commits and keeps the modal open; Close dismisses.
 
 ### Tip — Solo Practice During a Heat
 

@@ -2,6 +2,146 @@
 
 All notable changes to FPVRaceOne will be documented in this file.
 
+> Entries 1.4.x and earlier describe code paths that predate the C6 product
+> configuration. **Track Management, SD-card race storage, distance tracking,
+> and on-device PiperTTS are NOT present in current C6 builds** — those
+> features were stripped during the rename / re-platform from FPVGate.
+> Treat 1.4.x entries as historical context, not as feature claims.
+
+## [1.5.0] - 2026-06-19
+
+Major refresh covering Q1–Q2 2026 work on multi-node race directing, heap /
+Core-0 robustness, and Edit-Pilot UX. Versions 1.4.2 through 1.4.x were
+never tagged; this entry replaces them.
+
+### Added — Edit Pilot Modal & Master-Side Pilot Control
+
+- Edit Pilot modal accessible from the pencil icon on **every** slot card on
+  the master's Race tab — including the master's own host card. Same modal
+  for client and master; controls that don't apply to host (Move/Swap,
+  Kick) hide automatically when `nodeId === 0`
+- **Move (Swap) Pilot to Slot** dropdown — letter list A–G shows each
+  slot's current occupant. If the target is occupied, the two pilots swap
+  places and both clients persist their new slot to NVS via
+  `mnPreferredSlot`
+- **Calibration Wizard** runs directly from the modal. For clients, the
+  wizard records on the target client and pushes thresholds back via
+  master-side proxy endpoints (`/api/multinode/calibration/{start,data,stop}`);
+  for the host it runs locally. Only one wizard active at a time, blocked
+  during an active race
+- **Live RSSI** view in the modal with toggle on the right of the title.
+  Defaults OFF; surfaces a `confirm()` dialog when enabled during an
+  active race. Auto-zooming y-axis adapts to slider drags
+- Modal scrolls when content overflows; Save / Close stay pinned at the
+  bottom. Save commits and **keeps the modal open** (was auto-closing);
+  brief "Saved ✓" feedback confirms the write
+- Master self-edit short-circuit in `/api/multinode/editPilot` — when
+  `nodeId === 0` the patch is applied to the master's local Config
+  directly instead of trying to HTTP-proxy to itself
+- Master entry in director-state JSON now carries `bandIndex`,
+  `channelIndex`, `frequency`, `skipEnabled`, `enterRssi`, `exitRssi` —
+  fixes the bug where the modal showed defaults and clicking Save
+  silently overwrote real settings with junk
+
+### Added — Live RSSI Proxy
+
+- `GET /timer/rssi` returns `{"rssi": N}` from
+  `LapTimer::getRssiPeakSinceLast()` — peak-since-last-call sampled at
+  full firmware rate (~hundreds of Hz). 5 Hz polling now catches the true
+  peak of a brief gate pass instead of a random instantaneous value
+- `GET /api/multinode/rssi?nodeId=N` (master-only) proxies to the client.
+  On HTTP 200 the master also calls `MultiNodeManager::touchNode()` on
+  the target — every successful round-trip is proof of life, so the
+  heartbeat watchdog can't false-fire while the link is in heavy use
+
+### Added — Recruit Nearby Units
+
+- `POST /api/multinode/recruit?force=0|1` queues a recruit job processed on
+  Core 0: drop the master's AP → STA-scan for `FPVRaceOne_*` APs →
+  configure each (unless already in Master / Client mode and `force=0`)
+  as a Client pointed at the master → reboot it → restart the master's AP.
+  Director's browser shows a full-screen overlay during the ~60 s pass
+
+### Added — Slot Letters (A–G)
+
+- UI uses slot letters everywhere a slot id appears: pilot card header,
+  edit modal subtitle, kick/remove confirms, multi-node tab card label,
+  solo-racer dialog, callsign fallback (`Node A`), race export fallback
+- Firmware serial logs use letters too — `[MULTINODE] connected: A=Sam
+  B=Bob C=Lenny ...`, `Node X (Pilot) timed out`, `Re-registered node X`,
+  etc.
+- Backend IDs stay numeric; the letter is a display-layer convention
+
+### Added — Calibration UX
+
+- **Save RSSI Thresholds** button highlights orange and pulses when slider
+  values differ from what's saved (same pattern as Save Configuration)
+- "You have not saved the new values. Are you sure you want to exit?"
+  confirm dialog when leaving overview mode via Exit Wizard with unsaved
+  changes
+- `EXIT_GAP` reduced from 7 to 4 — tighter hysteresis tuned for
+  close-pattern tracks; final clamp adjusted to match
+
+### Added — Audio
+
+- Voice Enable / Disable buttons replaced with a single on/off toggle
+- Lap times ≥ 60 s announced as "X minute(s) Y point ZZ" — long-track
+  friendly. Below 60 s the pre-recorded digit clip path is unchanged
+- Piper-TTS exclusive branches pre-process raw cleanText to substitute
+  long-time floats with the spoken phrase before TTS, so the minutes
+  word appears even when format-pattern matchers are skipped
+- Pre-arm countdown 5 → 4 gap tightened from ~2 s to ~1 s (extra
+  `await setTimeout(1000)` removed; pad-to-1-second loop handles the
+  rest)
+
+### Added — Multi-Node Robustness & Diagnostics
+
+- AP slot cap raised from 5 (single) / 4 (client AP) / 9 (master) to **9 across all modes** — a unit demoted from master with 7 ex-clients still trying to reattach can't lock the director's phone out
+- WiFi AP **inactivity timeout** set to 60 s via `esp_wifi_set_inactive_time()` (IDF default 5 min) — silent stations drop within a minute so ghost slots free up promptly
+- Client STA reconnect **backoff** — 5 s for attempts 1–5, 15 s for 6–13, 30 s for 14+ with **full-channel scan** (`WiFi.begin()` instead of `WiFi.reconnect()`) so a master reboot that lands on a different channel is found within ~3 min
+- `handleRegister` gains a `bool& stateChanged` out parameter — steady-state 5 s keep-alive registrations no longer fire `pushMultiNodeState()`, eliminating the constant 600-800 ms `multinode` sub-call stall observed at ~1.4 broadcasts/sec with 7 clients
+- `_checkNodeTimeouts()` ignores the `currentTimeMs` parameter (stale by tens of ms by the time it runs) and reads `millis()` fresh inside the function — eliminates the cross-task race that caused "Node X reconnected via heartbeat / Node X timed out 2 ms later" pairs in serial traces
+- `MULTINODE_NODE_TIMEOUT_MS` raised 4 → 6 s — accommodates two missed heartbeats plus scheduler jitter
+- `MultiNodeManager::handleHeartbeat()` now logs `[MULTINODE] Node X (Pilot) reconnected via heartbeat` on offline→online transitions (was silent)
+- `_broadcastDirectorState()` **rate-limited to 1 broadcast / 2 s** via `_lastDirectorBroadcastMs`. Race-critical broadcasts (`_broadcastRacePreArm` / `_broadcastRaceStart` / `_broadcastRaceStop`) are **not** throttled
+- `_buildDirectorStatePayload` rewritten as a single-`String` build with capacity reserved up front; eliminates the dozen-realloc-per-broadcast pattern that fragmented the heap. `MultiNodeManager::getNodesToJson()` (which allocated a 8 KB DynamicJsonDocument) no longer called from this path
+- SSE zombie cleanup — on `AP_STADISCONNECTED` for a non-multinode MAC, the master calls `events.close()`. Without this, dead browser SSE clients linger indefinitely in `AsyncEventSource`'s client list, every `events.send()` queues a message destined for nobody, and heap drips ~1 KB/sec until fragmentation wedges the master
+
+### Added — Heap & Core-0 Observability
+
+- `[HEAP]` log every 10 s: `free`, `min`-ever, `maxBlk` (largest contiguous), `sta` (AP station count), `sse` (SSE client count)
+- Low-heap **auto-reboot watchdog** — sustained `free < 20 KB` or `maxBlk < 8 KB` for 10 s triggers `ESP.restart()`. Safety net against fragmentation wedges; not a substitute for fixing the leak source
+- `[AP]` log on every station connect / disconnect with MAC and resulting count
+- `[CORE0]` window summary every 10 s — names the worst sub-call in `parallelTask` and the worst preemption gap. Per-call line fires immediately when any single sub-call takes ≥ 100 ms
+- `[MULTINODE] connected:` summary every 10 s listing slot=name for every online node
+
+### Added — Pilot Card UI
+
+- **Auto black text on light pilot colors** (Gold, Green, Cyan, White, Spring Green) via WCAG relative luminance threshold (`> 0.6`). Card badges (Host, Me, TAP, Racing) keep white text via `.mn-card-badge { color: #fff }` so they stay readable on the dark semi-transparent overlays
+- Edit pencil icon now appears on the host pilot card in master mode (was suppressed)
+
+### Changed
+
+- Themes reduced from 23 to 2 (Material Oceanic default, Material Lighter). Orphaned `[data-theme="..."]` CSS blocks remain inert in `style.css` if a deployment wants to re-expose any of the old palettes
+- `/api/multinode/editPilot` handler captures touched-field set **before** `conf->fromJson()` — calls `pushMultiNodeState()` only when an Edit-Pilot-relevant field changed (was firing on every Settings or Calibration-tab save)
+- `MULTINODE_REGISTER_INTERVAL_MS` semantics — still 5 s, but registration is now a true keep-alive (silent unless something changes). First-time joins, recoveries, and identity-field updates still log loudly
+
+### Fixed
+
+- **Black pilot color silently reset to Blue** — `parseInt('000000', 16) === 0` and `0 || 0x0080FF` masked the user's selection. Replaced with `Number.isFinite()` check
+- **Master "Edit Host" overwrote band/channel/skip with defaults** — modal was reading missing JSON fields, falling back to defaults, and `mnSavePilotModal` sent every field on every Save. Fixed by mirroring those fields on the master JSON entry in `_buildDirectorStatePayload`
+- **Wizard Apply Thresholds for master-self didn't sync the Calibration tab** — `applyCalculatedThresholds` now routes through `editPilot` when `mnNodeMode === 1` (any nodeId, including 0). Master-self path also explicitly syncs `enterRssiInput.value`, the global `enterRssi`, `baselineConfig`, and clears `stagedConfig` keys so the dirty indicator clears
+- **Save RSSI on Calibration tab didn't refresh `mnCurrentNodes`** — `/config` handler now calls `pushMultiNodeState()` after writing config (gated to actual Edit-Pilot-relevant fields)
+- **Multinode timeout false positives within 2 ms of a heartbeat arriving** — see `_checkNodeTimeouts` fresh-millis change above
+- **Edit Pilot modal showed previous pilot's stale RSSI trace** — `_mnModalRssiClearCanvas()` resets the series, the axis-init flag, and paints the canvas background on every modal open
+- **Modal Live RSSI canvas was 0×0 in some cases** — `streamTo()` was being called before layout completed. Added explicit `width="300" height="130"` canvas attributes plus an `await _waitForCanvasLayout()` rAF loop that polls `offsetWidth/Height` until non-zero
+- **First-call axis race** — the live-zoom code unconditionally recomputes y-axis range from current slider + trace data on every sync (was locked after first call, so slider drags pushed the line off-screen when the range was tight)
+
+### Technical — Release Artifacts
+
+- CI now produces **four** release assets: `FPVRaceOne-firmware.bin` (OTA), `FPVRaceOne-littlefs.bin` (filesystem), `FPVRaceOne-merged.bin` (full-flash recovery image), and `flash-manifest.json` (schema-1 machine-readable manifest naming the offsets)
+- The dedicated **[FPVRaceOne Flasher Windows app](https://github.com/ramiss/FPVRaceOne-Flasher/releases/latest/download/FPVRaceOne-Flasher.exe)** reads the manifest, so partition-table changes never drift the documented offsets. Recovery mode flashes `merged + filesystem`; Update mode flashes `firmware + filesystem`
+
 ## [1.4.1] - 2024-12-14
 
 ### Added - SD Card Configuration Backup/Restore

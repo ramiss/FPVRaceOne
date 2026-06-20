@@ -36,7 +36,8 @@ FPVRaceOne creates its own WiFi network — no router required.
 | Default password | `fpvraceone` |
 | IP address | `192.168.4.1` (Single / Client), `192.168.5.1` (Master) |
 | Band | 2.4 GHz |
-| Max clients | 8 simultaneous |
+| Max clients | 9 simultaneous |
+| AP inactivity timeout | 60 s — a silent station drops within a minute so its slot frees up |
 
 No captive DNS — connected devices retain their cellular internet connection on most platforms (Samsung devices block this and force a choice).
 
@@ -138,9 +139,9 @@ The wizard auto-detects the three highest peaks and overlays markers; any marker
 | Threshold | Formula | Reason |
 |-----------|---------|--------|
 | Enter RSSI | `round(0.95 × min(peakA, peakB, peakC))` | 5 % headroom keyed to the *weakest* peak so even the weakest pass triggers |
-| Exit RSSI | `Enter − 7`, raised above noise floor | Tight gap for tiny-whoop tracks; never below 35th-percentile noise + 3 |
+| Exit RSSI | `Enter − 4`, raised above noise floor | Tight hysteresis tuned for close-pattern tracks; never below 35th-percentile noise + 3 |
 
-Both values are clamped to `[30, 255]` and Exit is forced ≥ 5 below Enter as a fallback hysteresis.
+Both values are clamped to `[30, 255]` and Exit is forced ≥ 4 below Enter as a fallback hysteresis.
 
 ### Peak-Spread Warning
 
@@ -285,10 +286,11 @@ Each connected client appears as a card showing pilot name, running indicator, l
 
 ### Start / Stop Broadcast
 
-- **Start All** sends `POST /timer/masterStart` to every online client in parallel — sequential calls in firmware land within ~350 ms of each other (acceptable for current head-to-head precision; can be moved to true-parallel HTTP if tighter sync is needed later)
-- **Stop All** sends `POST /timer/masterStop`
+- **Start All** posts to every online client sequentially — calls land within ~350 ms of each other
+- **Stop All** posts to every online client. The master's UI updates immediately on each acknowledged stop rather than waiting for the next heartbeat
 - Each client decides what to do with the broadcast based on its own *Ignore Race Director Start/Stop if already racing* toggle (default off → honour broadcast)
-- The client pushes `masterRaceState` SSE to its browser so the UI flips into race-running state — Start button looks pressed, Stop becomes the active button — same as if the pilot had pressed Start locally
+- The client's local UI flips into race-running state — Start button looks pressed, Stop becomes the active button — same as if the pilot had pressed Start locally
+- Race-mode broadcasts are not subject to the 2 s director-state throttle described in [Observability](#observability-serial-log)
 
 ### Early Quit Notification
 
@@ -303,6 +305,61 @@ Each client has an **Ignore Race Director Start/Stop if already racing** toggle 
 - A master Start All broadcast is silently ignored if the client's timer is already running locally
 - The pilot can keep practising while a director runs heats on the rest of the field
 - Toggle off to rejoin the directed race format
+
+### Edit Pilot Modal from the Race Tab
+
+Every slot card on the master's Race tab (including the master's own host
+card) has a pencil icon that opens a per-pilot editor. The same modal
+serves client pilots and the master; controls that don't apply to the host
+(Move / Swap, Kick) are hidden on the host card.
+
+The modal can:
+
+- Edit pilot name, color, band/channel, RSSI thresholds, and the skip flag
+- Run the **Calibration Wizard** against the selected node — for a client
+  the wizard records on that client and pushes thresholds back through
+  the master; for the host it runs locally
+- Show a **Live RSSI** chart from the selected node at 5 Hz. The firmware
+  returns the peak signal from the preceding 200 ms so a brief gate pass
+  is caught even at that polling rate. The toggle on the right of the
+  title defaults OFF and confirms before enabling during a race
+- **Move (Swap) Pilot to Slot** — letter dropdown (A–G) reassigns the
+  node to a different slot. If the target slot is occupied, the two
+  pilots swap places and both clients persist their new slot through
+  reboots
+- **Kick from Slot** pauses the client's reconnection attempts for one
+  minute so another unit can take its place
+
+Save commits changes and keeps the modal open with a brief "Saved ✓"
+feedback. The middle section scrolls; Save/Close stay pinned at the bottom.
+
+### Live RSSI Proxy
+
+Two endpoints feed the Edit Pilot modal's chart:
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /timer/rssi` | `{"rssi": N}` — the peak signal observed since the previous request, sampled at the firmware's full rate. A 5 Hz poll catches the true peak from the preceding 200 ms rather than a random instantaneous value |
+| `GET /api/multinode/rssi?nodeId=N` (master only) | Proxies to the named client's `/timer/rssi` over the AP. A successful round-trip also keeps the master's heartbeat watchdog quiet, so the live view can't false-time-out the client it's watching |
+
+Polling defaults to OFF when the modal opens. Enabling the live feed
+during an active race prompts a confirmation dialog explaining the WiFi
+bandwidth cost.
+
+### Master Recruit Nearby Units
+
+`POST /api/multinode/recruit?force=0|1` queues a recruit job on the master:
+
+1. Drop the master's AP
+2. Scan for every `FPVRaceOne_*` AP in range
+3. For each match (skipping units already in Client / Master mode unless
+   `force=1` is set), join the target, configure it as a client pointed
+   at this master, and reboot it
+4. Restart the master's own AP
+
+Total downtime is roughly 60 seconds — a full-screen overlay on the
+director's browser holds focus during the pass and confirms completion
+when the AP returns.
 
 ---
 
@@ -343,9 +400,9 @@ Key config fields stored per device:
 - WiFi (AP + home) SSID, password, external antenna, TX power
 - RSSI sensitivity
 - Pipeline Smoothing level (`v1Smoothing`), Gate-1 Bootstrap toggle
-- Multi-node: node mode, master SSID, skip-master-start toggle
+- Multi-node: node mode, master SSID, skip-master-start toggle, preferred slot (client re-requests its last-assigned slot on registration so slots survive reboots), client race-audio opt-in
 - OTA: home WiFi credentials, include-prereleases toggle
-- Theme, selected voice (voice field is currently unused at runtime)
+- Theme, selected voice
 
 ---
 
@@ -385,6 +442,33 @@ Access via **Settings → Diagnostics → Run All Tests**.
 The self-test exercises hardware, storage, and software paths and reports pass/fail with detail text. Results can be downloaded as a diagnostic log to attach to a GitHub issue.
 
 Categories covered include the RX5808 SPI driver, EEPROM, LittleFS, WiFi AP / station, lap timer, race history, web server file presence, and OTA partition health.
+
+---
+
+## Observability (Serial Log)
+
+The firmware emits five structured log streams to the USB-CDC serial port,
+all tagged so a postmortem grep is easy:
+
+| Tag | Cadence | Format |
+|---|---|---|
+| `[HEAP]` | Every 10 s | `free=N min=N maxBlk=N sta=N sse=N` — current free heap, minimum-ever free, largest contiguous block, AP station count, attached SSE clients. Low-heap watchdog auto-reboots when `free < 20 KB` or `maxBlk < 8 KB` for 10 seconds straight |
+| `[AP]` | On event | `STA connected/disconnected: <mac>  (now N stations)` — every AP-level association/disassociation. Non-client station disconnects also trigger an SSE eviction line to reclaim heap from orphaned `EventSource` clients |
+| `[CORE0]` | Every 10 s + on-event | `window 10s: longest sub-call <name>=<ms>, longest tick gap=<ms>` — names the slowest sub-call seen in the last 10 seconds and the worst gap between iterations. A per-call line fires immediately if any single sub-call takes ≥ 100 ms |
+| `[MULTINODE] connected:` | Every 10 s | `A=Sam B=Bob C=Lenny ...` — slot letter + pilot name for every currently-online client. `(none)` if nobody is connected |
+| `[MULTINODE]` events | Immediate | `New node X (...)`, `Re-registered node X (...)`, `Updated node X (...)`, `Node X (Pilot) timed out`, `Node X (Pilot) reconnected via heartbeat`, `Node X (Pilot) quit early`, `Node X (Pilot) manually removed`. Slot is shown as a letter (A–G), matching the UI |
+
+Steady-state keep-alive registrations are **silent** — only first-time
+joins, recoveries from offline, and changes to user-visible identity
+fields produce a line. This keeps the trace usable as a problem
+detector instead of a firehose.
+
+### Director-state broadcast throttle
+
+Director-state mirror pushes to clients are rate-limited to **once per
+2 seconds** so a burst of state changes coalesces into a single push
+instead of stacking up. Race-critical broadcasts (pre-arm, start, stop)
+are **not** throttled — their timing matters more than mirror updates.
 
 ---
 

@@ -111,8 +111,9 @@ Lap announcements are spoken by your **browser's** built-in voice (Web Speech AP
 | **Lap Announcement Format** | Pilot + Lap + Time / Pilot + Time / Lap + Time / Time Only |
 | **Announcer Rate** | 0.1–2.0× playback speed |
 
-**Enable Voice** / **Disable Voice** buttons toggle announcements.  
-**Test Voice** plays a sample announcement with your current pilot name.
+**Voice** is controlled by a single on/off toggle. **Test Voice** plays a
+sample announcement with your current pilot name. Lap times of 60 seconds
+or longer are announced as "X minute(s) Y point ZZ".
 
 Because the audio comes from the browser, **the device that's logged in to the web UI is the one that speaks** — handy if you want the race director's laptop to call out laps while pilot phones stay silent (just don't enable voice on the pilot pages).
 
@@ -174,11 +175,12 @@ Network up to **8 FPVRaceOne devices** together — no router, no hub, no extra 
 | **Node Mode** | Always | Single / Master / Client. Changing this requires reboot — the **Apply Multi-Node & Reboot** button only enables when the mode changes |
 | **Master SSID** | Client | The master device's AP name (e.g. `FPVRaceOne_AB12CD`). Type it manually or use **Scan** to discover masters in range |
 | **Scan for Masters** | Client | Lists every `FPVRaceOne_*` AP within range — tap one to autofill |
+| **Recruit Nearby Units** | Master | Master scans for every `FPVRaceOne_*` AP in range, joins each, sets it to Client mode, points it at the master's SSID, and reboots it. Tick "Force recruit nodes already configured as clients" to re-target units that are already in Master or Client mode. The master's AP drops for ~60 s during the pass; a full-screen overlay shows progress |
 | **Ignore Race Director Start/Stop if already racing** | Client | When on, a master Start/Stop broadcast is ignored if the client is already mid-race locally. Lets a pilot keep practising while a heat is being run on the others |
 
 #### Race-Directing Flow
 
-1. **Master** Race tab shows a card per connected client: pilot name, running indicator, lap count, last lap time
+1. **Master** Race tab shows a card per connected client labelled by slot letter (A through G), with pilot name, running indicator, lap count, and last lap time
 2. Tap **Start All** — every client starts simultaneously
 3. As pilots fly, each client streams its laps back. The master cards update live (Server-Sent Events, sub-second latency)
 4. Tap **Stop All** — every client stops cleanly
@@ -191,6 +193,30 @@ Network up to **8 FPVRaceOne devices** together — no router, no hub, no extra 
 | ● **Running** | Client's lap timer is running |
 | ○ **Stopped** | Client is idle |
 | ⚠ **DNF** | Client pressed Stop locally during an active master-broadcast race |
+
+#### Edit Pilot Modal (Master)
+
+Tap the pencil icon on any pilot card — **including the host's own card** — to
+open the per-pilot editor. The same modal is used for client pilots and the
+master; fields that don't apply to the host (Move / Swap, Kick) are hidden
+automatically.
+
+Fields:
+
+| Field | Notes |
+|---|---|
+| **Pilot Name / Color** | Color dropdown auto-uses black text on light backgrounds (Gold, Green, Cyan, White, Spring Green) for legibility on the slot card |
+| **Band / Channel** | Frequency in MHz updates live |
+| **Live RSSI** | Toggle on the right of the title (default OFF). When ON, the master polls the selected node at 5 Hz; the firmware's peak-since-last sampler catches a brief gate pass even at that rate. Red Enter / orange Exit threshold lines track the sliders as you drag. Confirms before turning on during an active race |
+| **Enter RSSI / Exit RSSI** | Sliders with +/− step buttons. Threshold lines on the Live RSSI chart move in real time |
+| **Run Calibration Wizard** | For a client: the wizard records on that client and pushes thresholds back via the master proxy. For the host: runs locally. Only one wizard can be active at a time, blocked during an active race |
+| **Move (Swap) Pilot to Slot** | Dropdown showing every slot letter A–G with its current occupant. If the target is occupied, the two pilots swap places and both persist their new slot to NVS. Hidden on the host card |
+| **Ignore Race Director Start/Stop** | Same toggle as Settings → Multi-Node |
+| **Kick From Slot** | Pauses the client's reconnect attempts for one minute so another unit can take its place. Hidden on the host card |
+
+**Save** commits changes and **keeps the modal open** so you can continue
+tweaking (briefly shows "Saved ✓"). **Close** dismisses. The modal body
+scrolls if it overflows the viewport; Save / Close stay pinned at the bottom.
 
 ### Firmware Update
 
@@ -220,7 +246,7 @@ The Home WiFi fields used by the firmware updater (Settings → Firmware Update)
 
 | Section | Options |
 |---------|---------|
-| **Appearance** | Theme — pick from 23 colour schemes |
+| **Appearance** | Theme — Material Oceanic (default) and Material Lighter |
 | **Device** | Reboot button (required for antenna and TX power changes to take effect) |
 | **Race Tab** | "Always hide download reminder banner" — permanently dismiss the *races are lost on flash* banner once you've started downloading races regularly |
 | **Developer** | **Dev Mode (Simulate Laps)** — when on, tap a pilot's name on the Race tab to inject a random simulated lap. Useful for testing multi-node UI without real quads |
@@ -257,13 +283,15 @@ Enter must always be higher than Exit. The lap timestamp is recorded at the peak
 **How the thresholds are picked:**
 
 - **Enter** ≈ 95 % of the *weakest* of the three peaks — leaves about 5 % headroom for lap-to-lap variation. Tight enough that adjacent gates in close-pattern layouts typically don't trigger
-- **Exit** = Enter − 7 — tight enough for tiny-whoop tracks where gates are close together, but raised above the recording's 35th-percentile noise floor if needed for hysteresis
+- **Exit** = Enter − 4 — tight hysteresis tuned for close-pattern tracks where gates are close together, raised above the recording's 35th-percentile noise floor if needed
 
 ### Manual Threshold Adjustment
 
-Use the **Enter** and **Exit** sliders in the Calibration tab for fine-tuning. The live RSSI chart shows the signal and threshold lines in real time. Click **"Save RSSI Thresholds"** when satisfied.
+Use the **Enter** and **Exit** sliders in the Calibration tab for fine-tuning. The live RSSI chart shows the signal and threshold lines in real time.
 
-You can also **pause** the live chart to examine a specific moment, then **resume** the live feed.
+- **Save RSSI Thresholds** highlights **orange** the moment a slider value differs from what's saved — it's the same dirty-state pattern as the Save Configuration button. Click it to commit
+- You can also **pause** the live chart to examine a specific moment, then **resume** the live feed
+- After a calibration wizard run the chart enters **overview mode** showing the recorded pass; the **Pause Scanner** button changes label to **Exit Wizard**. Clicking it with unsaved threshold changes prompts you to confirm: *"You have not saved the new values. Are you sure you want to exit?"*
 
 ### Calibration Tips
 
@@ -382,7 +410,9 @@ Export your config before any firmware update.
 
 ### Theme Selection
 
-Multiple colour themes are available in **Settings → Device → Theme**. The logo automatically switches between black and white versions for light and dark themes.
+Two colour themes are available in **Settings → Device → Theme**: Material
+Oceanic (default, dark) and Material Lighter. The logo automatically
+switches between black and white versions to match.
 
 ---
 

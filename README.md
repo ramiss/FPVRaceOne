@@ -68,19 +68,24 @@ A single 5-stage RSSI processing pipeline:
 ### Multi-Node Racing — Built-In Race Directing
 Network **up to 8 devices** together with no router and no extra hardware. One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically.
 
-- **Master Recruit** — the master can force recruit (auto-connect) all nearby devices for a quick and painless networking setup.
+- **Master Recruit** — the master scans for every `FPVRaceOne_*` AP in range and configures each one as a client in one tap. Ad-hoc events with pilots who haven't pre-configured their timers go from "everyone open Settings" to "tap one button"
 - **One-tap Start All / Stop All** — broadcast a synchronised race start to every pilot on the network
-- **Live per-pilot dashboard on the master** — each client renders as a card with pilot name, running indicator (●/○), live lap count, and last lap time, updated via Server-Sent Events with sub-second latency
+- **Live per-pilot dashboard on the master** — each client renders as a card with pilot name, running indicator (●/○), live lap count, and last lap time, updated via Server-Sent Events with sub-second latency. Slot cards labelled A through G match what the director sees in serial logs
+- **Edit pilot from the Race tab** — pencil icon on every slot card opens a per-pilot editor for name, color, band, channel, RSSI thresholds, and skip flag — works on the master's own host card too
+- **Calibration Wizard from the modal** — run the full guided wizard against any connected client; the wizard records on the target client and pushes thresholds back when you click Apply
+- **Live RSSI feed in the modal** — toggle on the right of the title polls the selected client at 5 Hz; the firmware-side peak-since-last sampler catches a brief gate pass even at that rate. Red Enter / orange Exit threshold lines track the sliders as you drag
+- **Move (Swap) Pilot to Slot** — letter dropdown (A–G) reassigns a node to a different slot; if it's occupied, the two pilots swap places and both persist their new slot to NVS
 - **DNF tracking** — a pilot who taps Stop locally during a master race shows up as **DNF** on the director's screen; the rest of the heat continues uninterrupted
 - **Solo-practice override** — each client has an *Ignore Race Director Start/Stop if already racing* toggle so a director's broadcast doesn't kill an in-progress practice run
 - **Master discovery** — clients can scan for available masters in range and pick one from a list (no manual SSID typing required)
 - **Same UI on every device** — every client also runs as a fully featured standalone timer when no master is broadcasting
-- Master has the ability to modify each node's frequency / channel, pilot name and color.
 
 ### Voice Announcements
 - Spoken laps using your **browser's** built-in voice (Web Speech API) — no audio files on the device, so the announcer follows whichever device has the web UI open
 - Configurable announcement format (pilot + lap + time, pilot + time, lap + time, time only)
 - Per-pass beep or full speech, 2-lap and 3-lap consecutive variants
+- Lap times of 60 seconds or longer are announced as "X minute(s) Y point ZZ" — long-track friendly
+- Single on/off **Voice toggle** in Settings
 
 ### Race Analysis
 - Real-time lap tracking with gap-to-best analysis
@@ -175,20 +180,7 @@ If a download fails the device keeps the previous firmware, so a flaky network c
 
 ### Changelog
 
-**v1.1.0 (Current)**
-- Renamed product to **FPVRaceOne**
-- Added **V1 / V2 switchable signal processing** — runtime toggle between FPVGate multi-stage pipeline and RotorHazard Bessel IIR filter
-- Added **Bessel filter cutoff selector** — 100 Hz / 50 Hz / 20 Hz for V2 mode
-- Added **configurable detection parameters** — Enter Hold Samples and Exit Confirm Samples (V1), now persisted to config
-- Added **V2 midpoint timestamping** — lap time recorded at the centre of the signal peak plateau
-- Improved **ADC scaling** — corrected denominator for 6 dB attenuation range (avoids RSSI inflation)
-- Fixed **Kalman filter Q/R inversion** — process noise and measurement noise were swapped; corrected for 29× improvement in filter responsiveness
-- Fixed **RSSI display off-by-one** — `getRssi()` was returning 100-sample-old data
-- Removed `vTaskDelay(50)` from debug logger — was stalling the RSSI loop by 50 ms on every threshold crossing event
-- Increased **SSE update rate** from 5 Hz to 20 Hz for more responsive live RSSI display
-- Moved webhook HTTP calls to Core 0 — prevents synchronous POST (up to 300 ms) from blocking the RSSI loop on Core 1
-- Added **Save Configuration indicator** — button highlights orange with pulse animation when there are unsaved changes;
-- Added `enterHoldSamples` and `exitConfirmSamples` to firmware config and settings UI (previously UI-only, not persisted)
+See [CHANGELOG.md](CHANGELOG.md) for the version history.
 
 ---
 

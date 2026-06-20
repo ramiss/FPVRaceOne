@@ -34,10 +34,15 @@ The wizard does the math for you. Manual threshold tweaking is rarely necessary.
 3. Fly **3 passes** through the gate at race speed
 4. Tap **Stop Recording**
 5. The wizard auto-detects the three peaks and calculates Enter / Exit thresholds
+   (Exit lands ≈ 4 RSSI units below Enter — tight hysteresis for close-pattern
+   tracks; raised above the noise floor if needed)
 6. If a peak-spread warning appears, re-fly — equal-height peaks calibrate better
 7. Tap **Apply Thresholds** — saved instantly
 
-Manual override: drag any peak marker, or use the Enter / Exit sliders on the Calibration tab and **Save RSSI Thresholds**.
+Manual override: drag any peak marker, or use the Enter / Exit sliders on the
+Calibration tab and **Save RSSI Thresholds** (the button turns orange while
+you have unsaved changes; trying to exit overview mode with unsaved values
+prompts you to confirm).
 
 ## Race! (Race Tab)
 
@@ -66,14 +71,36 @@ Network multiple FPVRaceOne timers together for head-to-head racing — no route
 **Master**
 1. **On the master device** — Settings → Multi-Node Timing → Node Mode = `Master` → **Apply & Reboot**. Note the AP name shown on screen (e.g. `FPVRaceOne_AB12CD`)
 2. Login to the master device at `http://192.168.5.1`
-3. Monitor the connection of other nodes on the Race screen.
+3. Monitor the connection of other nodes on the Race screen — each pilot shows as a slot card labelled **A** through **G**.
 4. Start Race to syncronize all nodes and receive race data.
 
-**Client**
+**Client (manual)**
 1. **On each client device** — Settings → Multi-Node Timing → Node Mode = `Client` → tap **Scan** to discover masters in range (or paste the master SSID manually) → **Apply & Reboot**
 2. Make sure your frequency and channel are selected and that you have calibrated your RSSI signal detection.
-3. The master will start and stop the race.  
+3. The master will start and stop the race.
 4. View master race data by logging into the master node or stay on your own node to watch your stats.
+
+**Client (one-tap with Recruit Nearby Units)**
+1. **On the master** — Settings → Multi-Node Timing → **Recruit Nearby Units**.
+2. The master scans for every `FPVRaceOne_*` AP in range, joins each one, switches it to Client mode, points it at the master's SSID, and reboots it.
+3. The master's own AP drops for ~60 s during the scan / configure pass — a full-screen overlay shows progress; reconnect when it returns.
+4. Useful when running an ad-hoc session with pilots who haven't pre-configured their timers.
+
+### Editing pilots from the master
+
+The Race tab has a pencil icon on every slot card — including the **Host** (master) card.
+Tap it to:
+- Change pilot name, color, band, channel, or RSSI thresholds
+- Run the Calibration Wizard for that client remotely (or locally for the host)
+- View Live RSSI from that client — peak-detected so a brief gate pass shows
+  even at 5 Hz sample rate; the toggle on the right of the title turns the
+  feed on / off
+- **Move (Swap) Pilot to Slot** — pick a different slot letter (A–G); if it's
+  occupied, the two pilots swap places
+- Toggle Ignore Race Director Start/Stop, or Kick a client (with a 1-minute
+  reconnect cool-off)
+
+Save commits and keeps the modal open (briefly flashes "Saved ✓"). Close dismisses.
 
 ### Race
 
