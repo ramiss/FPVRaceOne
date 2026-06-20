@@ -8,21 +8,32 @@ A single node lap timer that can be networked for multi-pilot (multi-node) racin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions or small indoor tracks up to large scale race events. No transponders, no complex infrastructure — just plug in, calibrate, and fly.
+A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions or small indoor tracks, up to large scale race events in multi-node mode. No transponders, no complex infrastructure — just plug in, wirelessly connect, calibrate, and fly.
 
-**Up to 8 devices can mesh network and sync together for head-to-head racing** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required. Even while meshed, each lap timer is still accessible by its own pilot.
+**Up to 8 devices can wirelessly mesh network and sync together for head-to-head racing (no additional hardware needed)** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required. Even while meshed, each lap timer is still accessible by its own pilot.
 
 ---
 
-## Screenshots
+## Screenshots - Single Mode
 
 | Race Screen | Configuration |
 |:-----------:|:-------------:|
-| ![Race Screen](screenshots/12-12-2025/Race%20-%2012-12-2025.png) | ![Config Menu](screenshots/12-12-2025/Config%20Screen%20-%20Pilot%20Info%2012-12-2025.png) |
+| ![Race Screen](screenshots/FPVRaceOne/Screenshot%202026-06-20%20073924.png) | ![Config Menu](screenshots/FPVRaceOne/Screenshot%202026-06-09%20213816.png) |
 
 | Calibration Wizard — Recording | Calibration Wizard — Complete |
 |:------------------------------:|:-----------------------------:|
 | ![Calibration Recording](screenshots/12-12-2025/Calibration%20Wizard%20Recording%20-%2012-12-2025.png) | ![Calibration Complete](screenshots/12-12-2025/Calibration%20Wizard%20Completed%20-%2012-12-2025.png) |
+
+## Screenshots - Multi Mode
+
+| Master Race Screen | Master Pilot Edit |
+|:-----------:|:-------------:|
+| ![Master Race Screen](screenshots/FPVRaceOne/Screenshot%202026-06-09%20213619.png) | ![Master Pilot Edit](screenshots/FPVRaceOne/Screenshot%202026-06-09%20213730.png) |
+
+| Calibration Wizard — Recording | Calibration Wizard — Complete |
+|:------------------------------:|:-----------------------------:|
+| ![Calibration Recording](screenshots/12-12-2025/Calibration%20Wizard%20Recording%20-%2012-12-2025.png) | ![Calibration Complete](screenshots/12-12-2025/Calibration%20Wizard%20Completed%20-%2012-12-2025.png) |
+
 
 ---
 
