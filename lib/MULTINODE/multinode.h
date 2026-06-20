@@ -160,6 +160,31 @@ public:
 
     const std::vector<NodeInfo>& getNodes() const { return _nodes; }
 
+    // ── OTA pause/resume ──────────────────────────────────────────────
+    // OTA needs the STA radio (to reach home WiFi for GitHub) and a clean
+    // TCP slot pool (the ESP32-C6 LwIP cap is 16).  In client mode the STA
+    // is busy talking to the master; in master mode active clients churn
+    // through TCP slots and the AP-retune during STA association can stall
+    // the outbound TLS handshake.  pauseForOta() temporarily halts all
+    // multinode networking — process() becomes a no-op, master-side handlers
+    // reject, and (in client mode) the STA is disconnected from the master.
+    // The persisted Config mode is unchanged, so a reboot or resumeFromOta()
+    // returns the device to its previous master/client role with all state
+    // intact.  Includes a 5-minute safety auto-resume in case the caller
+    // forgets (page closed, OTA aborted).
+    void   pauseForOta();
+    void   resumeFromOta();
+    bool   isPausedForOta() const { return _pausedForOta; }
+
+    // True when the *current* multinode state would interfere with OTA:
+    // - client mode, OR
+    // - master mode with at least one online client.
+    // Used by the UI to gate the Check for Updates dialog.
+    bool   wouldOtaDisruptMultinode() const;
+
+    // UI-ready disruption explanation, or empty string if no disruption.
+    String getOtaDisruptionMessage() const;
+
 private:
     Config*    _conf      = nullptr;
     Led*       _led       = nullptr;
@@ -218,6 +243,15 @@ private:
     volatile bool     _recruitPending        = false;
     volatile bool     _recruitForce          = false;
     RecruitSummary    _recruitSummary;
+
+    // OTA pause state.  _savedNodeModeForOta is the Config mode at pause time —
+    // unused for restoration (Config is the source of truth) but kept in DEBUG
+    // output to help diagnose stuck-paused situations.  _pauseExpiresAtMs is a
+    // safety deadline so we resume even if the caller forgets.
+    bool              _pausedForOta          = false;
+    uint8_t           _savedNodeModeForOta   = 0;
+    uint32_t          _pauseExpiresAtMs      = 0;
+    static constexpr uint32_t OTA_PAUSE_TIMEOUT_MS = 300000;  // 5 minutes
 
     void _sendRegistration();
     void _sendHeartbeat();

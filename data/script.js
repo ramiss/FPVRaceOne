@@ -2544,6 +2544,29 @@ async function checkForUpdates() {
     return;
   }
 
+  // Multi-node disruption check.  If we're in master mode with connected pilots
+  // or in client mode connected to a master, the home-WiFi excursion will
+  // temporarily disconnect the mesh.  Surface the consequence and let the user
+  // bail out before anything is committed.  Backend pauses the mesh itself
+  // once /api/update/check is called; we just confirm the intent here.
+  try {
+    const dr = await fetch('/api/update/disruption-check');
+    if (dr.ok) {
+      const dj = await dr.json();
+      if (dj && dj.wouldDisrupt) {
+        const msg = (dj.message || 'Multi-node mesh will be temporarily disconnected.') +
+                    '\n\nProceed with the update check?';
+        if (!confirm(msg)) {
+          // No backend pause happened yet — nothing to resume.  Just bail.
+          return;
+        }
+      }
+    }
+    // If the disruption-check endpoint fails (older firmware, transient error),
+    // fall through to the original check flow — the backend's own gating will
+    // catch anything critical.
+  } catch (_) { /* ignore — endpoint may not exist on older firmware */ }
+
   setUpdateBusy(true, 'Checking…');
   showUpdateStatus('Connecting to home WiFi and contacting GitHub…', 10);
 
@@ -2689,6 +2712,12 @@ async function checkForUpdates() {
   if (!confirm(message)) {
     showUpdateStatus(`Update available: ${info.latestVersion} (declined)`, 100);
     setUpdateBusy(false);
+    // Multi-node was left paused by the check phase so apply could reuse the
+    // STA radio / TCP slots without a gap.  The user declined, so wake the
+    // mesh back up immediately rather than waiting for the 5-minute safety
+    // auto-resume.  Fire-and-forget — there's nothing useful to do if the
+    // endpoint isn't there or the request fails.
+    fetch('/api/update/resume-multinode', { method: 'POST' }).catch(() => {});
     return;
   }
 
@@ -8162,7 +8191,7 @@ function mnStartCalibrationWizardForModal() {
     const ok = confirm(
       `Run the calibration wizard for ${pilotLabel}?\n\n` +
       `${pilotLabel} will need to fly past the gate while you mark each pass. ` +
-      `This will overwrite the current Enter/Exit RSSI on that node.\n\n`
+      `This will overwrite the current Enter/Exit RSSI on that node.\n\n` +
       `It is highly recommended that VTX power be set to the same fixed number for calibration and racing.`
     );
     if (!ok) return;
