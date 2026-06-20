@@ -8,13 +8,37 @@ Complete guide to setting up and configuring your FPVRaceOne lap timer.
 
 ## Table of Contents
 
-1. [Connect to FPVRaceOne](#connect-to-fpvraceone)
-2. [Configure Your VTx Frequency](#configure-your-vtx-frequency)
-3. [Set Pilot Information](#set-pilot-information)
-4. [Run the Calibration Wizard](#run-the-calibration-wizard)
-5. [First Race](#first-race)
-6. [Multi-Node Racing (Optional)](#multi-node-racing-optional)
-7. [Troubleshooting](#troubleshooting)
+1. [What You Need](#what-you-need)
+2. [Connect to FPVRaceOne](#connect-to-fpvraceone)
+3. [Configure Your VTx Frequency](#configure-your-vtx-frequency)
+4. [Set Pilot Information](#set-pilot-information)
+5. [Run the Calibration Wizard](#run-the-calibration-wizard)
+6. [First Race](#first-race)
+7. [Multi-Node Racing (Optional)](#multi-node-racing-optional)
+8. [Firmware Updates (OTA)](#firmware-updates-ota)
+9. [Tips](#tips)
+10. [Troubleshooting](#troubleshooting)
+11. [Default Settings Reference](#default-settings-reference)
+
+---
+
+## What You Need
+
+1. A pre-flashed FPVRaceOne lap timer and a phone, tablet, or laptop with WiFi
+2. Any USB-C compatible battery bank or power supply (not included). If you'd
+   rather run off your LiPo / Li-ion packs, search "USB-C Power Supply Cable
+   for GoPro" — there are adapters in the ~$10 range
+
+**Battery life estimates:**
+
+| USB power bank | Approximate runtime |
+|---|---|
+| 1000 mAh | 1.5 – 2.5 hours |
+| 2000 mAh | 3 – 5 hours |
+| 5000 mAh | 8 – 12 hours |
+
+The USB-C connector is used for **power and manual flashing** only. All
+racing, calibration, and configuration happens through the WiFi web UI.
 
 ---
 
@@ -81,9 +105,11 @@ Proper calibration is the most important step for accurate timing.
 ### Step 2: Record a Fly-Over
 
 1. Power on your drone and let the VTx warm up for 30 seconds
-2. Click **Record** in the wizard
-3. Fly your drone through the gate at race speed — **exactly 3 passes** is ideal
-4. Click **Stop Recording**
+2. Important: set your VTX to a fixed power level (not auto)
+3. Click **Record** in the wizard
+4. Fly your drone through the gate at race speed — **exactly 3 passes** is ideal.
+   Fly through the start gate to the next gate and back through the start gate (x3).
+5. Click **Stop Recording**
 
 The wizard auto-detects the three highest peaks and overlays them on the chart. If detection misses one, drag a marker manually.
 
@@ -188,6 +214,41 @@ If you want to keep practising while a director is running heats on the other pi
 
 ---
 
+## Firmware Updates (OTA)
+
+The device updates itself from GitHub Releases — no PlatformIO or cables required.
+
+1. **Settings → Firmware Update** → enter your home WiFi credentials (one-time)
+2. Tap **Check for Updates** — the device briefly joins your home network,
+   queries GitHub, then returns to AP mode
+3. If a newer release is available, tap **Update Now**. The device flashes
+   filesystem + firmware and reboots once
+
+Updates are blocked while a race is running. A failed download keeps the
+previous firmware on the device — a flaky network can't brick it.
+
+For manual flashing (new hardware, recovery, or development), see
+[Flashing Guide](FLASHING_OPTIONAL.md).
+
+---
+
+## Tips
+
+- **Race History** — Races are not persisted across power cycles on the
+  current hardware. Use **Download** in the Race History tab to save the
+  session JSON before unplugging
+- **Config Backup** — The Settings footer has **Download** / **Import**
+  buttons. Export your config before a major firmware update so you can
+  restore band/channel/calibration in seconds afterwards
+- **Voice on the director's laptop** — Enable the Voice toggle on the race
+  director's device (and leave it off on pilot phones) so laps are called
+  out without the gate sounding like a chorus
+- **Recalibrate when you change frequency** — Calibration is per-frequency.
+  If you fly on a different VTx band/channel for a session, run the wizard
+  again so the Enter/Exit thresholds suit the new signal
+
+---
+
 ## Troubleshooting
 
 ### No WiFi Network Appearing
@@ -226,9 +287,24 @@ If you want to keep practising while a director is running heats on the other pi
 
 ### Voice Announcements Not Working
 
-- In Settings → TTS, click **Enable Voice** and then **Test Voice** to hear a sample announcement
+- In Settings → TTS, turn the **Voice** toggle on and tap **Test Voice** to hear a sample announcement
 - Check that your browser has not blocked autoplay audio (Chrome and Safari often require an initial user interaction on the page before audio plays)
 - The announcement is spoken by the **browser's** built-in voice (Web Speech API), so the voice depends on the device the web UI is open on. On phones, system text-to-speech needs to be enabled in the OS settings; on desktops Chrome/Edge/Safari all ship a usable English voice out of the box
+
+---
+
+## Default Settings Reference
+
+| Setting | Value |
+|---|---|
+| WiFi SSID / Password | `FPVRaceOne_XXXX` / `fpvraceone` |
+| Web address (Single / Client) | `http://192.168.4.1` |
+| Web address (Master) | `http://192.168.5.1` |
+| Min lap time | 5 seconds |
+| Max laps | Infinite (0) |
+| Pipeline Smoothing | Level 5 |
+| Gate-1 Bootstrap | Off |
+| Voice | Off |
 
 ---
 

@@ -1,160 +1,48 @@
-# FPVRaceOne Quick Start Guide
+# FPVRaceOne Quick Start
 
-Get your FPVRaceOne lap timer up and running in minutes!
+The 5-minute path from unboxing to first lap. For detail on any step —
+hardware, multi-node racing, firmware updates, troubleshooting — see
+**[Getting Started](docs/GETTING_STARTED.md)**.
 
-## What You Need
+## 1. Power and connect
 
-1. A pre-flashed FPVRaceOne lap timer (ETSY link coming soon) and a phone, tablet, or laptop with WiFi.
-2. Any USB-C compatible power battery bank or supply (not included with FPVRaceOne). Or, if you want to power off your LiPo/Liion batteries then you can google search for "USB-C Power Supply Cable for GoPro" for a cheap (~$10) adapter option.
+- Plug a USB-C power source into the FPVRaceOne; wait ~10 seconds for the AP to come up
+- Connect your phone / laptop to WiFi **`FPVRaceOne_XXXX`** (password **`fpvraceone`**)
+- Open **`http://192.168.4.1`** in any browser
 
-Runtime estimates:
-1000 mAh USB power bank: roughly 1.5–2.5 hours
-2000 mAh: roughly 3–5 hours
-5000 mAh: roughly 8–12 hours
+## 2. Set your VTx band and channel
 
-## First Connection
+**Settings → Pilot Info → Band** and **Channel** to match your drone's VTx.
+Auto-saves on selection.
 
-1. **Power on** the device — wait ~10 seconds for the AP to come up
-2. **Connect to WiFi**:
-   - Network: `FPVRaceOne_XXXX` (XXXX = last 4 digits of MAC address)
-   - Password: `fpvraceone`
-3. **Open** `http://192.168.4.1` in any browser 
-4. **Configure** (Settings → Pilot Info):
-   - Set **Band & Channel** to match your VTx
-   - Set **Pilot Name**, **Callsign**, **Phonetic Name**
-   - Pick a **Pilot Color** and **Theme**
-   - Tap **Save Configuration** — the orange button confirms there are unsaved changes
+## 3. Calibrate
 
-## Calibrate (Calibration Tab)
+1. Power on your drone with **VTx on a fixed power level** (not auto); let it warm up ~30 s
+2. **Calibration** tab → **Start Calibration Wizard → Record**
+3. Fly **3 passes** through the start gate (through, around, back — repeat)
+4. **Stop Recording** → review the three peaks → **Apply Thresholds**
 
-The wizard does the math for you. Manual threshold tweaking is rarely necessary.
+## 4. Race
 
-1. Power on your drone and let the VTx warm up for 30 seconds
-2. Tap **Start Calibration Wizard → Record**
-3. Fly **3 passes** through the gate at race speed
-4. Tap **Stop Recording**
-5. The wizard auto-detects the three peaks and calculates Enter / Exit thresholds
-   (Exit lands ≈ 4 RSSI units below Enter — tight hysteresis for close-pattern
-   tracks; raised above the noise floor if needed)
-6. If a peak-spread warning appears, re-fly — equal-height peaks calibrate better
-7. Tap **Apply Thresholds** — saved instantly
-
-Manual override: drag any peak marker, or use the Enter / Exit sliders on the
-Calibration tab and **Save RSSI Thresholds** (the button turns orange while
-you have unsaved changes; trying to exit overview mode with unsaved values
-prompts you to confirm).
-
-## Race! (Race Tab)
-
-1. Tap **Start Race** — listen for the countdown and start beep
-2. Fly through the gate — first pass is **Gate 1** (hole shot), subsequent passes are **Lap 1**, **Lap 2**, …
-3. Live stats update on every pass (fastest lap, median, best 3, fastest 3 consecutive)
-4. Tap **Stop Race** — the race is saved automatically
-
-## Default Settings
-
-| Setting | Value |
-|---------|-------|
-| WiFi SSID / Password | `FPVRaceOne_XXXX` / `fpvraceone` |
-| Web address | `http://192.168.4.1` |
-| Min lap time | 5 seconds |
-| Max laps | Infinite (0) |
-| Pipeline Smoothing | Level 5 (upstream FPVGate default) |
-| Gate-1 Bootstrap | Off |
-
-## Multi-Node Racing (Up to 8 Devices)
-
-Network multiple FPVRaceOne timers together for head-to-head racing — no router, no extra hardware. One device runs in **Master** mode (race director) and up to **7 Clients** join its WiFi.
-
-### Setup
-
-**Master**
-1. **On the master device** — Settings → Multi-Node Timing → Node Mode = `Master` → **Apply & Reboot**. Note the AP name shown on screen (e.g. `FPVRaceOne_AB12CD`)
-2. Login to the master device at `http://192.168.5.1`
-3. Monitor the connection of other nodes on the Race screen — each pilot shows as a slot card labelled **A** through **G**.
-4. Start Race to syncronize all nodes and receive race data.
-
-**Client (manual)**
-1. **On each client device** — Settings → Multi-Node Timing → Node Mode = `Client` → tap **Scan** to discover masters in range (or paste the master SSID manually) → **Apply & Reboot**
-2. Make sure your frequency and channel are selected and that you have calibrated your RSSI signal detection.
-3. The master will start and stop the race.
-4. View master race data by logging into the master node or stay on your own node to watch your stats.
-
-**Client (one-tap with Recruit Nearby Units)**
-1. **On the master** — Settings → Multi-Node Timing → **Recruit Nearby Units**.
-2. The master scans for every `FPVRaceOne_*` AP in range, joins each one, switches it to Client mode, points it at the master's SSID, and reboots it.
-3. The master's own AP drops for ~60 s during the scan / configure pass — a full-screen overlay shows progress; reconnect when it returns.
-4. Useful when running an ad-hoc session with pilots who haven't pre-configured their timers.
-
-### Editing pilots from the master
-
-The Race tab has a pencil icon on every slot card — including the **Host** (master) card.
-Tap it to:
-- Change pilot name, color, band, channel, or RSSI thresholds
-- Run the Calibration Wizard for that client remotely (or locally for the host)
-- View Live RSSI from that client — peak-detected so a brief gate pass shows
-  even at 5 Hz sample rate; the toggle on the right of the title turns the
-  feed on / off
-- **Move (Swap) Pilot to Slot** — pick a different slot letter (A–G); if it's
-  occupied, the two pilots swap places
-- Toggle Ignore Race Director Start/Stop, or Kick a client (with a 1-minute
-  reconnect cool-off)
-
-Save commits and keeps the modal open (briefly flashes "Saved ✓"). Close dismisses.
-
-### Race
-
-- The **master's** Race tab shows a card per pilot with live state (● Running, ○ Stopped, ⚠ DNF), lap count, and last lap
-- Tap **Start All** — every client starts simultaneously
-- Tap **Stop All** — every client stops cleanly
-- A pilot who taps **Stop** locally during a master race shows up as **DNF** on the director's screen; the rest of the heat continues
-
-### Solo Practice Override
-
-Each client has an **Ignore Race Director Start/Stop if already racing** toggle. Turn it on to keep practising while a director runs heats on the rest of the field — Start All from the master won't reset your local race. Note the master can kick nodes to allow others to connect.
-
-## Firmware Updates (OTA)
-
-The device updates itself from GitHub Releases — no PlatformIO needed.
-
-1. **Settings → Firmware Update** → enter your home WiFi credentials (one-time)
-2. Tap **Check for Updates** — the device joins your home network briefly, queries GitHub, returns to AP mode
-3. If a newer release is available, tap **Update Now**. The device flashes filesystem + firmware and reboots once
-
-Updates are blocked during a race; failed downloads keep the previous firmware.
-
-## Tips
-
-- **Race History** — Races are not saved on the device. Download from memory as JSON for import later.
-- **Marshalling Mode** — Add or edit laps after a race finishes (Race History → expand a race → edit)
-- **Voice announcements** — Spoken by the browser, not the device. Enable on the race director's laptop / phone for hands-free lap callouts
-- **Config Backup** — Settings footer has Download / Import buttons (good idea before major firmware updates)
-
-## Troubleshooting
-
-### Can't find WiFi network
-- Check the device is powered (USB-C) and wait 10–15 s after power-on
-- Look for `FPVRaceOne_` followed by 4 hex characters
-
-### Missing laps
-- Lower **Enter RSSI** by 5 points, or rerun the wizard with a cleaner 3-pass flight
-- Make sure the VTx has warmed up at least 30 seconds
-- Drop **Pipeline Smoothing** by one notch (Settings → Signal Processing) to reduce signal lag
-
-### Too many false laps
-- Raise **Exit RSSI** by 3–5 points
-- Increase **Min Lap Time** to 8–10 seconds
-- Raise **Pipeline Smoothing** by one notch for extra noise rejection
-- Move the timer further from the flight path
-
-### First lap missed when drone is parked in the gate at race start
-- Enable **Gate-1 Bootstrap** in Settings → Signal Processing
-
-## Need Help?
-
-- Full documentation: [User Guide](docs/USER_GUIDE.md), [Features](docs/FEATURES.md)
-- Issues: [GitHub Issues](https://github.com/ramiss/FPVRaceOne/issues)
+**Race** tab → **Start Race** → fly! → **Stop Race** when done. The session is
+saved automatically. **Download** the session JSON before unplugging if you
+want to keep it — race history isn't persisted across reboots.
 
 ---
 
-**Happy Flying!**
+## Default Settings (Quick Reference)
+
+| Setting | Value |
+|---|---|
+| WiFi | `FPVRaceOne_XXXX` / `fpvraceone` |
+| Web address | `http://192.168.4.1` |
+| Min lap time | 5 seconds |
+| Max laps | Infinite (0) |
+| Pipeline Smoothing | Level 5 |
+| Gate-1 Bootstrap | Off |
+
+---
+
+**Next:** [Getting Started](docs/GETTING_STARTED.md) covers multi-node race
+directing, OTA firmware updates, the Edit Pilot modal, the full
+troubleshooting tables, and tips for race day.

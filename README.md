@@ -98,7 +98,7 @@ Network **up to 8 devices** together with no router and no extra hardware. One d
 ### Firmware Updates
 - **One-tap OTA from GitHub Releases** — built into the device. Enter your home WiFi once; the device joins, checks the latest release, downloads the firmware + filesystem images, flashes both, and reboots.
 - Updates are blocked while a race is running. Failed downloads keep the previous firmware, so the device can't be bricked from a flaky network.
-- Manual flashing via PlatformIO / esptool is still available — see [docs/FLASHING_OPTIONAL.md](docs/FLASHING_OPTIONAL.md).
+- Manual flashing via our custom tool FPVRaceOne-Flasher (windows) — see [docs/FLASHING_OPTIONAL.md](docs/FLASHING_OPTIONAL.md).
 
 ---
 
@@ -165,9 +165,6 @@ FPVRaceOne can check for and automatically updates itself from **GitHub Releases
 6. Hard reload your browser to guarantee new changes are loaded (Ctrl+Shift+R on Windows/Linux, Cmd+Shift+R on Mac. Tap-and-hold the refresh button on mobile Chrome to get "Hard reload")
 
 Updates are automatically blocked while a race is running. 
-
-If a download fails the device keeps the previous firmware, so a flaky network can't brick it.
-
 
 ---
 
