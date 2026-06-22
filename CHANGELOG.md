@@ -10,6 +10,35 @@ All notable changes to FPVRaceOne will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — OTA: Check for Updates rebooted the device
+
+- The check ran synchronously inside the AsyncWebServer request handler, so
+  the WiFi mode changes (especially the master-mode AP teardown) ripped out
+  the TCP connection the handler was still on — ESPAsyncWebServer panicked
+  trying to flush the response and the device rebooted. `OtaManager::init`
+  reset state to `IDLE` on the next boot, leaving the frontend's overlay
+  spinning forever against `state:0`.
+- Check now uses the same async pattern the apply path already uses:
+  `requestCheck()` queues a flag and returns immediately; `OtaManager::loop()`
+  on Core 0 runs the actual `checkForUpdate()`. The handler returns 202
+  immediately, so AsyncWebServer can flush cleanly before the AP goes down.
+
+### Fixed — OTA: master-mode home-WiFi excursion was unreliable
+
+- **Master mode Check for Updates** no longer fails with *"Could not reach
+  GitHub releases API"* under client-mesh load. The C6's AP+STA mode shared
+  the radio with the AP's beacons + client retune traffic, which chewed
+  through LwIP TCP slots before the outbound HTTPS handshake could
+  complete. Master OTA now fully tears the AP down for the duration of the
+  excursion (same pattern Recruit Nearby Units already uses) and restarts it
+  via the canonical `Webserver::startAP()` helper afterwards. Director's
+  browser disconnects for ~15–20 s during the check and auto-reconnects
+  when the AP comes back; the existing `/api/update/status` polling picks
+  up the cached result.
+- Client mode disconnect now explicitly re-issues `WiFi.begin(masterSSID)`
+  on completion, so the webserver's STA reconnect logic targets the master
+  on its next tick instead of retrying the home SSID for ~2 minutes.
+
 ### Added — OTA: multi-node pause/resume
 
 - **Check for Updates now safe to run on a master with connected pilots, or

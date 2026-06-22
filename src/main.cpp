@@ -3,14 +3,18 @@
 #if RSSI_LOGGING_ENABLED
 #include "rssilog.h"
 #endif
+#include "buzzer.h"
+#include "config.h"
+#include "laptimer.h"
 #include "multinode.h"
-#include "webserver.h"
 #include "racehistory.h"
-#include "storage.h"
+#include "RX5808.h"
 #include "selftest.h"
+#include "storage.h"
 #include "transport.h"
 #include "usb.h"
 #include "webhook.h"
+#include "fpv_webserver.h"
 // DISABLED FOR NOW: #include "nodemode.h"  // Uncomment to re-enable RotorHazard support
 #include "ota.h"
 #ifdef ESP32S3
@@ -292,9 +296,11 @@ void setup() {
     ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &webhookManager, &multiNodeManager);
 
     // OTA manager — uses the webserver's SSE channel for progress events,
-    // and pauses multinode networking during home-WiFi excursions so the
-    // STA radio (client mode) and TCP slot pool (master mode) are free.
-    otaManager.init(&config, &timer, ws.getEvents(), &multiNodeManager);
+    // pauses multinode networking during home-WiFi excursions, and in master
+    // mode tears the AP fully down (and restarts it via ws.startAP()) for the
+    // duration of the excursion so the STA radio gets clean time for the
+    // outbound HTTPS handshake.
+    otaManager.init(&config, &timer, ws.getEvents(), &multiNodeManager, &ws);
 
     // Initialize USB transport
     usbTransport.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx);
