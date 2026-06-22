@@ -4,6 +4,7 @@
 #include "laptimer.h"
 #include "debug.h"
 #include "multinode.h"
+#include "fpv_webserver.h"
 
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
@@ -247,11 +248,12 @@ static int compareSemver(const String& a, const String& b) {
 }
 
 void OtaManager::init(Config* config, LapTimer* timer, AsyncEventSource* events,
-                      MultiNodeManager* multinode) {
+                      MultiNodeManager* multinode, Webserver* webserver) {
     _config    = config;
     _timer     = timer;
     _events    = events;
     _multinode = multinode;
+    _webserver = webserver;
     _state  = STATE_IDLE;
     _progressPercent = 0;
     _statusMessage   = "";
@@ -313,11 +315,15 @@ bool OtaManager::connectToHomeWifi(uint32_t timeoutMs, String& err) {
         return false;
     }
 
+    // Uniform AP+STA for every mode.  The aggressive WIFI_OFF→WIFI_STA
+    // teardown (Recruit-style) was originally added because the master-mode
+    // check crashed the AsyncWebServer request thread mid-WiFi-change; that
+    // root cause is now fixed by running the check on Core 0 via
+    // requestCheck() + loop(), so the simpler AP+STA path works in every
+    // mode.  Multinode pause (in client mode the STA's already disconnected
+    // from the master; in master mode client polls are rejected fast) keeps
+    // TCP slot pressure off the radio.
     DEBUG("[OTA] Switching to AP+STA, connecting to '%s'\n", ssid);
-
-    // AP+STA keeps the user's browser connected to our AP while we use STA to
-    // reach the internet.  ESP32 will retune the AP onto the STA's channel
-    // when STA associates — clients may briefly drop and reassociate.
     WiFi.mode(WIFI_AP_STA);
     delay(50);
     WiFi.setAutoReconnect(false);
@@ -339,9 +345,34 @@ bool OtaManager::connectToHomeWifi(uint32_t timeoutMs, String& err) {
 }
 
 void OtaManager::disconnectFromHomeWifi() {
-    DEBUG("[OTA] Disconnecting STA, returning to AP-only\n");
-    WiFi.disconnect(false);   // disconnect but don't erase stored creds
-    WiFi.mode(WIFI_AP);
+    DEBUG("[OTA] Disconnecting STA after home-WiFi excursion\n");
+    WiFi.disconnect(false);   // drop STA; keep stored creds
+
+    const bool isClient = (_multinode && _multinode->isClientMode());
+
+    if (isClient && _config) {
+        // Client mode: the STA was associated to home WiFi, not the master.
+        // The webserver's STA reconnect logic uses WiFi.reconnect(), which
+        // would retry the home SSID.  Explicitly re-issue WiFi.begin() with
+        // the master's credentials so the next reconnect tick targets the
+        // right network.
+        DEBUG("[OTA] Re-associating client STA to master after OTA\n");
+        const char* masterSsid = _config->getMasterSSID();
+        const char* masterPwd  = _config->getMasterPassword();
+        if (masterSsid && masterSsid[0]) {
+            WiFi.begin(masterSsid, (masterPwd && masterPwd[0]) ? masterPwd : "fpvraceone");
+        }
+    } else if (_multinode && _multinode->isMasterMode()) {
+        // Master mode: AP+STA was kept up the whole time; just drop the
+        // STA side and stay in AP-only so the master can resume serving its
+        // own AP at 192.168.5.1.  Don't go through startAP() — the AP never
+        // came down, so a full restart would needlessly drop the director's
+        // browser connection.
+        WiFi.mode(WIFI_AP);
+    } else {
+        // Single mode: plain AP-only.
+        WiFi.mode(WIFI_AP);
+    }
 }
 
 bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
@@ -349,14 +380,23 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         err = "Cannot check for updates while a race is running";
         return false;
     }
-    if (isInProgress()) {
-        err = "Another update operation is already in progress";
-        return false;
-    }
+    // No isInProgress() guard here — when called from loop() via the async
+    // requestCheck() path, requestCheck has already pre-set state to
+    // CONNECTING (so the frontend's polling doesn't mistake a stale
+    // UP_TO_DATE for "the new check finished"); that would otherwise self-
+    // reject the very call we just queued.  requestCheck does its own
+    // in-progress and race-running guards at the public entry.
 
     // Invalidate any previous cached result before we start.  If the check
     // succeeds we'll repopulate `_lastInfo` below.
     _lastInfoValid = false;
+
+    // Set the CONNECTING state FIRST, before any WiFi-mode change.  In master
+    // and client mode the next steps disrupt connectivity (AP teardown or
+    // master-STA disconnect), so the SSE event has to be queued on the page
+    // socket while the socket is still healthy.
+    setState(STATE_CONNECTING, "Connecting to home WiFi...");
+    setProgress(10);
 
     // Pause multinode networking for the duration of the home-WiFi excursion.
     // Idempotent — no-op if we're already in single mode.  Left paused on the
@@ -364,8 +404,6 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     // STA radio / TCP slots; resumed on every other exit.
     if (_multinode) _multinode->pauseForOta();
 
-    setState(STATE_CONNECTING, "Connecting to home WiFi...");
-    setProgress(10);
     if (!connectToHomeWifi(15000, err)) {
         setState(STATE_ERROR, err);
         disconnectFromHomeWifi();
@@ -421,7 +459,13 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         out.available      = false;
         _lastInfo      = out;
         _lastInfoValid = true;
-        setState(STATE_UP_TO_DATE, "No releases published yet for this device's firmware repo.");
+        // /releases/latest 404 means GitHub has no qualifying *stable* release.
+        // Could be a brand-new repo OR could be a repo that's only ever shipped
+        // pre-releases (the common case for beta builds).  Hint at the toggle
+        // so a -beta user knows what to flip.
+        setState(STATE_UP_TO_DATE,
+                 "No stable releases published yet for this device's firmware repo. "
+                 "If pre-releases are available, enable \"Include pre-releases\" above to see them.");
         setProgress(100);
         disconnectFromHomeWifi();
         if (_multinode) _multinode->resumeFromOta();
@@ -554,6 +598,24 @@ void OtaManager::requestApply(const String& fwUrl, const String& fsUrl) {
     _pendingApply = true;
 }
 
+void OtaManager::requestCheck() {
+    // Guard rails surface as terminal-state messages so the polling frontend
+    // sees them immediately on /api/update/status without waiting for loop().
+    if (_timer && _timer->isRunning()) {
+        setState(STATE_ERROR, "Cannot check for updates while a race is running");
+        return;
+    }
+    if (isInProgress()) {
+        setState(STATE_ERROR, "Another update operation is already in progress");
+        return;
+    }
+    // Initial state so a poll between requestCheck() and loop()'s first tick
+    // sees something more useful than IDLE.
+    setState(STATE_CONNECTING, "Update check queued — starting…");
+    setProgress(0);
+    _pendingCheck = true;
+}
+
 bool OtaManager::downloadAndFlash(const String& url, int target, const char* label, String& err) {
     WiFiClientSecure client;
     client.setInsecure();
@@ -647,6 +709,19 @@ bool OtaManager::preflightCheck(const String& fwUrl, const String& fsUrl, String
 }
 
 void OtaManager::loop() {
+    // Pending check — runs the same checkForUpdate() as before, but on Core 0
+    // where blocking WiFi/HTTPS calls and AP teardown don't crash the
+    // AsyncWebServer request thread.  Out params are discarded; the frontend
+    // reads results via /api/update/status (which serves the cached UpdateInfo).
+    if (_pendingCheck) {
+        _pendingCheck = false;
+        UpdateInfo info;
+        String err;
+        checkForUpdate(info, err);
+        // checkForUpdate sets state to UPDATE_AVAILABLE / UP_TO_DATE / ERROR
+        // on every exit; nothing more for us to do.
+    }
+
     if (!_pendingApply) return;
     _pendingApply = false;
 

@@ -7,6 +7,7 @@ class Config;
 class LapTimer;
 class AsyncEventSource;
 class MultiNodeManager;
+class Webserver;
 
 // Drives the GitHub-based OTA update flow.
 //
@@ -49,13 +50,31 @@ public:
     // (disconnect clients on master, drop master STA on client) for the
     // duration of the home-WiFi excursion to free TCP slots and the STA radio,
     // then resume automatically.  Pass nullptr to skip the pause.
+    //
+    // webserver is also optional but strongly recommended in master mode: it
+    // lets OTA fully tear down the AP during a home-WiFi excursion (master's
+    // AP+STA mode + active client traffic reliably starves the new STA
+    // association on the C6) and restart it afterwards via the canonical
+    // startAP() helper.  Without it, master OTA falls back to AP+STA and
+    // may fail under client-mesh load.
     void init(Config* config, LapTimer* timer, AsyncEventSource* events,
-              MultiNodeManager* multinode = nullptr);
+              MultiNodeManager* multinode = nullptr,
+              Webserver* webserver = nullptr);
     void loop();  // call from parallel task — drains pending apply work
 
     // Synchronous: connects, queries GitHub, fills `out`.
     // Returns false on error and sets `errorMessage`.
+    // **Must run on Core 0 (the parallel task), not on the AsyncWebServer
+    // request thread** — the WiFi mode changes inside (especially the
+    // master-mode AP teardown) tear down the TCP connection the handler is
+    // running on, and ESPAsyncWebServer panics if it can't flush its
+    // response.  Web handlers should call `requestCheck()` instead.
     bool checkForUpdate(UpdateInfo& out, String& errorMessage);
+
+    // Schedules a check.  Returns immediately; the actual work happens on
+    // Core 0 from `loop()`.  Subscribe to /events or poll /api/update/status
+    // for the result.
+    void requestCheck();
 
     // Schedules the apply phase.  Returns immediately; actual work happens in
     // loop().  Caller should have already received URLs from a check.
@@ -98,12 +117,18 @@ private:
     LapTimer*         _timer     = nullptr;
     AsyncEventSource* _events    = nullptr;
     MultiNodeManager* _multinode = nullptr;
+    Webserver*        _webserver = nullptr;
 
     State   _state           = STATE_IDLE;
     int     _progressPercent = 0;
     String  _statusMessage;
 
-    // Pending apply request — set by requestApply(), consumed by loop().
+    // Pending check / apply requests — set by requestCheck() / requestApply(),
+    // consumed by loop() on Core 0.  Keeping these out of the AsyncWebServer
+    // thread is critical: the WiFi mode changes during check/apply tear down
+    // the TCP connection the request handler is on, and ESPAsyncWebServer
+    // panics if it can't flush its response.
+    bool    _pendingCheck = false;
     bool    _pendingApply = false;
     String  _pendingFwUrl;
     String  _pendingFsUrl;

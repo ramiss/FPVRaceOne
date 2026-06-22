@@ -2544,37 +2544,164 @@ async function checkForUpdates() {
     return;
   }
 
-  // Multi-node disruption check.  If we're in master mode with connected pilots
-  // or in client mode connected to a master, the home-WiFi excursion will
-  // temporarily disconnect the mesh.  Surface the consequence and let the user
-  // bail out before anything is committed.  Backend pauses the mesh itself
-  // once /api/update/check is called; we just confirm the intent here.
+  // Probe the backend for whether this device's mode would disrupt the mesh
+  // during the check (master with connected pilots; client connected to a
+  // master).  The extra paragraph is tucked into the splash dialog so the
+  // director sees the per-mode warning before committing.
+  let disruptionMsg = '';
   try {
     const dr = await fetch('/api/update/disruption-check');
     if (dr.ok) {
       const dj = await dr.json();
-      if (dj && dj.wouldDisrupt) {
-        const msg = (dj.message || 'Multi-node mesh will be temporarily disconnected.') +
-                    '\n\nProceed with the update check?';
-        if (!confirm(msg)) {
-          // No backend pause happened yet — nothing to resume.  Just bail.
-          return;
-        }
-      }
+      if (dj && dj.wouldDisrupt && dj.message) disruptionMsg = dj.message;
     }
-    // If the disruption-check endpoint fails (older firmware, transient error),
-    // fall through to the original check flow — the backend's own gating will
-    // catch anything critical.
-  } catch (_) { /* ignore — endpoint may not exist on older firmware */ }
+  } catch (_) { /* older firmware — leave disruptionMsg empty */ }
+
+  // Splash dialog — modelled on recruitNearbyUnits() so the UI language is
+  // consistent.  Inline styles so the modal is independent of any open
+  // settings modal that might still be visible behind it.
+  const confirmed = await new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#fff);border-radius:10px;padding:28px 32px;max-width:500px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,0.3);font-family:inherit;';
+    const disruptionBlock = disruptionMsg
+      ? `<div style="background:#fde6e6;border:1px solid #c0392b;border-radius:6px;padding:10px 14px;color:#5a0000;font-size:13px;margin-bottom:14px;line-height:1.5;">
+           ${disruptionMsg}
+         </div>` : '';
+    box.innerHTML = `
+      <h3 style="margin:0 0 12px;font-size:17px;color:#222;">Check for firmware updates?</h3>
+      ${disruptionBlock}
+      <p style="margin:0 0 12px;font-size:14px;color:#444;line-height:1.5;">
+        The device will briefly join your home WiFi to query GitHub for the latest release. The check usually takes 15–30 seconds.
+      </p>
+      <p style="margin:0 0 12px;font-size:14px;color:#c0392b;line-height:1.5;font-weight:600;">
+        Your browser will disconnect from this device's WiFi during the check. Do not navigate away from or refresh this page.
+      </p>
+      <p style="margin:0 0 20px;font-size:13px;color:#666;line-height:1.5;">
+        Some devices auto-reconnect to <code>FPVRaceOne_XXXX</code> when it comes back; some don't. If yours doesn't, reconnect manually in your WiFi settings and this page will pick up the result.
+      </p>
+      <div style="display:flex;gap:12px;justify-content:flex-end;">
+        <button id="_otaCancel"   style="padding:8px 20px;border-radius:6px;border:1px solid #aaa;background:#f5f5f5;color:#333;cursor:pointer;font-size:14px;">Cancel</button>
+        <button id="_otaContinue" style="padding:8px 20px;border-radius:6px;border:none;background:var(--primary-color,#2196F3);color:#fff;cursor:pointer;font-size:14px;font-weight:600;">Continue</button>
+      </div>`;
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+    document.getElementById('_otaCancel').onclick   = () => { overlay.remove(); resolve(false); };
+    document.getElementById('_otaContinue').onclick = () => { overlay.remove(); resolve(true);  };
+  });
+  if (!confirmed) return;
 
   setUpdateBusy(true, 'Checking…');
   showUpdateStatus('Connecting to home WiFi and contacting GitHub…', 10);
 
-  // Scroll the status panel into view so the user can see progress without
-  // hunting for it.  The panel materialises below the fold for most window
-  // heights — `block: 'end'` reveals the bottom of the panel, which is what
-  // the user came here to read.  requestAnimationFrame ensures the panel's
-  // display:'' has been applied before the browser computes scroll offsets.
+  // Working overlay — opaque, modelled on the recruit overlay.  Painted now
+  // so it appears immediately even while the AP is dropping.  The Cancel
+  // button on the overlay is the user's escape hatch if the device never
+  // comes back (replaces the old 60-second hard timeout — some home WiFi
+  // setups need manual reconnection of the browser to the FPVRaceOne AP,
+  // which can take arbitrarily long).
+  const overlay = document.createElement('div');
+  overlay.id = '_otaCheckOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;background:#1a1a1a;z-index:10001;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:inherit;text-align:center;padding:24px;';
+  overlay.innerHTML = `
+    <div style="font-size:26px;font-weight:700;margin-bottom:14px;">Checking for firmware updates…</div>
+    <div style="font-size:15px;opacity:0.85;margin-bottom:6px;max-width:540px;line-height:1.55;">
+      Device is joining your home WiFi to query GitHub.<br>
+      Your browser is disconnected from <code>FPVRaceOne_XXXX</code> while this runs.<br>
+      <strong>If it doesn't auto-reconnect, please reconnect manually in your WiFi settings.</strong><br>
+      This page will pick up the result as soon as the device is reachable again.
+    </div>
+    <div id="_otaStatusLine" style="font-size:13px;opacity:0.7;margin-top:18px;">Waiting for device…</div>
+    <button id="_otaCheckCancelBtn" style="margin-top:24px;padding:8px 20px;border-radius:6px;border:1px solid #888;background:transparent;color:#fff;cursor:pointer;font-size:14px;">Cancel and resume</button>`;
+  document.body.appendChild(overlay);
+  await new Promise(r => setTimeout(r, 0));   // yield so the overlay paints
+
+  // Cancel handler — closes the overlay, resumes multinode immediately so
+  // the mesh doesn't sit paused until the 5-minute backend safety-resume.
+  let cancelled = false;
+  document.getElementById('_otaCheckCancelBtn').onclick = () => {
+    cancelled = true;
+  };
+
+  // Kick off the check on the device.  Fire-and-forget: the response is
+  // almost always lost to the AP drop, but we don't need it — polling does.
+  let httpResult = null;
+  fetch('/api/update/check', { method: 'POST' })
+    .then(async (r) => {
+      const data = await r.json().catch(() => ({}));
+      httpResult = r.ok ? { ok: true, data } : { ok: false, error: data.error || `HTTP ${r.status}` };
+    })
+    .catch(() => { httpResult = null; });
+
+  // Poll /api/update/status every 2 s with NO hard timeout — the user has a
+  // Cancel button if they want out.  Surface the device's own state message
+  // on the overlay so the user knows whether progress is happening.  Logging
+  // every poll result to the console so DevTools shows the sequence if a
+  // run ever gets stuck.
+  const STATE_NAME = {
+    0: 'IDLE',
+    1: 'CONNECTING',
+    2: 'CHECKING',
+    3: 'UPDATE_AVAILABLE',
+    4: 'UP_TO_DATE',
+    5: 'DOWNLOADING_FS',
+    6: 'DOWNLOADING_FW',
+    7: 'REBOOTING',
+    99: 'ERROR',
+  };
+  const statusLine = document.getElementById('_otaStatusLine');
+  let info = null;
+  let pollIdx = 0;
+  while (!cancelled) {
+    pollIdx++;
+    let logEntry = `[OTA poll ${pollIdx}] `;
+    try {
+      const r = await fetch('/api/update/status', { cache: 'no-store' });
+      if (r.ok) {
+        const s = await r.json();
+        logEntry += `state=${s.state}(${STATE_NAME[s.state] || '?'}) msg="${s.message || ''}" available=${s.available}`;
+        console.log(logEntry);
+        if (s) {
+          // Surface BOTH the device's own message AND the state name so the user
+          // can see whether the device is still working or actually terminal.
+          if (statusLine) {
+            const stateLabel = STATE_NAME[s.state] || ('state ' + s.state);
+            statusLine.textContent = `[${stateLabel}] ${s.message || ''}`;
+          }
+          // Accept ANY terminal state, even if s.available isn't a boolean yet
+          // (loosened from earlier — info is refetched downstream if missing).
+          const isTerminal = s.state === OTA_STATE.UP_TO_DATE ||
+                             s.state === OTA_STATE.UPDATE_AVAILABLE ||
+                             s.state === OTA_STATE.ERROR;
+          if (isTerminal) {
+            info = s;
+            console.log('[OTA poll] terminal state reached, breaking', s);
+            break;
+          }
+        }
+      } else {
+        logEntry += `HTTP ${r.status}`;
+        console.log(logEntry);
+        if (statusLine) statusLine.textContent = `Device returned HTTP ${r.status} — retrying…`;
+      }
+    } catch (e) {
+      logEntry += `fetch threw: ${e && e.message}`;
+      console.log(logEntry);
+      if (statusLine) {
+        statusLine.textContent = 'Device not reachable yet — keep waiting (or reconnect WiFi manually)…';
+      }
+    }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+
+  overlay.remove();
+
+  // Scroll the Update Status panel into view once the device is reachable
+  // again — the director's been staring at the disconnect overlay for 20+
+  // seconds, the verdict shouldn't be hiding below the fold.  Deferred to
+  // the next frame so any showUpdateStatus() that follows has applied its
+  // display:'' before the browser computes scroll offsets.
   requestAnimationFrame(() => {
     const panel = document.getElementById('updateStatusPanel');
     if (panel && typeof panel.scrollIntoView === 'function') {
@@ -2582,102 +2709,21 @@ async function checkForUpdates() {
     }
   });
 
-  // Clear any stale resolver from a previous in-flight check.
-  _otaCheckResolver = null;
+  if (cancelled) {
+    showUpdateStatus('Check cancelled by user.', 0);
+    setUpdateBusy(false);
+    // Resume the mesh immediately so it doesn't sit paused.
+    fetch('/api/update/resume-multinode', { method: 'POST' }).catch(() => {});
+    return;
+  }
 
-  // Three independent paths can deliver the verdict, whichever wins:
-  //   1. SSE event reaches a terminal state.  Fastest when it works.
-  //   2. The original POST /api/update/check returns successfully.  Often
-  //      lost to the AP-retune disconnect, but worth listening for.
-  //   3. Polling GET /api/update/status every 2 s.  Wins when *both* SSE and
-  //      the original POST get dropped — a real, reproducible scenario on
-  //      the second-and-later check: home WiFi credentials are cached after
-  //      the first check, so STA joins in <500 ms.  The whole check then
-  //      finishes before the browser's EventSource has noticed the AP-retune
-  //      disconnect, so terminal-state events fire into a dead socket.
-  // Plus a 60 s timeout backstop.
-  const ssePromise = _waitForCheckTerminal();
-  let httpResult = null;   // {ok, data} | {ok:false, error} | null
-
-  // Path 2: fire-and-forget.  Captured for use as a fallback info source.
-  fetch('/api/update/check', { method: 'POST' })
-    .then(async (r) => {
-      const data = await r.json().catch(() => ({}));
-      httpResult = r.ok ? { ok: true, data } : { ok: false, error: data.error || `HTTP ${r.status}` };
-    })
-    .catch((err) => {
-      console.log('[OTA] /api/update/check HTTP response lost (expected during AP retune):', err && err.message);
-      httpResult = null;
-    });
-
-  // Path 3: poll /api/update/status every 2 s.  The status endpoint reports
-  // current state + cached UpdateInfo for terminal states, so a hit here is
-  // fully sufficient to drive the rest of the flow.
-  let pollTimer = null;
-  let pollInflight = false;
-  const pollPromise = new Promise((resolve) => {
-    pollTimer = setInterval(async () => {
-      if (pollInflight) return;   // skip if previous tick still pending
-      pollInflight = true;
-      try {
-        const r = await fetch('/api/update/status');
-        if (r.ok) {
-          const s = await r.json();
-          if (s) {
-            const isTerminal = s.state === OTA_STATE.UP_TO_DATE ||
-                               s.state === OTA_STATE.UPDATE_AVAILABLE ||
-                               s.state === OTA_STATE.ERROR;
-            // For UP_TO_DATE / UPDATE_AVAILABLE require the cached UpdateInfo
-            // to be present too — guards against a tiny race where state has
-            // been set but `_lastInfoValid` hasn't been flipped yet.  ERROR
-            // never carries info, so it's accepted on state alone.
-            const usable = (s.state === OTA_STATE.ERROR) ||
-                           (typeof s.available === 'boolean');
-            if (isTerminal && usable) {
-              resolve({ ok: s.state !== OTA_STATE.ERROR, state: s.state, message: s.message });
-            }
-          }
-        }
-      } catch (_) { /* poll error — keep trying */ }
-      pollInflight = false;
-    }, 2000);
-  });
-
-  // Path 4: timeout backstop.
-  const timeout = new Promise((resolve) =>
-    setTimeout(() => resolve({
-      ok: false,
-      state: OTA_STATE.ERROR,
-      message: 'Timed out waiting for the device to finish checking. Try again.',
-    }), 60000)
-  );
-
-  const verdict = await Promise.race([ssePromise, pollPromise, timeout]);
-
-  // Tear down resources.
-  if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-  _otaCheckResolver = null;   // drop any pending SSE resolver
-
-  if (verdict.state === OTA_STATE.ERROR) {
-    // Surface the error text in the panel.  When SSE delivered the error its
-    // message is already there; when the timeout fired, we need to write the
-    // timeout message ourselves — otherwise "Querying GitHub..." stays on
-    // screen forever (which is exactly the bug we're fixing).
-    if (verdict.message) showUpdateStatus(verdict.message, 0);
+  if (info && info.state === OTA_STATE.ERROR) {
+    if (info.message) showUpdateStatus(info.message, 0);
     setUpdateBusy(false);
     return;
   }
 
-  // Reach the cached info via /api/update/status.  Falls back to the HTTP
-  // response data if the status fetch itself fails (paranoid defence).
-  let info = null;
-  try {
-    const sr = await fetch('/api/update/status');
-    if (sr.ok) {
-      const sd = await sr.json();
-      if (sd && typeof sd.available === 'boolean') info = sd;
-    }
-  } catch (_) { /* fall through to httpResult below */ }
+  // Fall back to httpResult if /api/update/status didn't give us the info.
   if (!info && httpResult && httpResult.ok) info = httpResult.data;
 
   if (!info) {
@@ -2689,7 +2735,22 @@ async function checkForUpdates() {
   _otaUpdateInfo = info;
 
   if (!info.available) {
-    // Panel text was set by SSE — don't overwrite.  Just unbusy.
+    // The AP drop killed our SSE channel, so the device's terminal message
+    // never reached the panel — write it explicitly so the user sees the
+    // actual verdict (e.g. "You're on the latest release" or "No releases
+    // published yet") instead of the stale "Connecting to home WiFi…".
+    //
+    // For pre-release builds specifically, if the device reports no stable
+    // release available, point the user at the Include Pre-releases toggle
+    // — the most common cause of "no update found" on a -beta build is
+    // GitHub's /releases/latest excluding pre-releases by design.
+    const onBeta = /-(?:beta|rc|alpha|dev|dirty)/i.test(info.currentVersion || '');
+    const hintIfBeta = onBeta && !info.latestVersion
+      ? '\nYou\'re on a pre-release build — enable "Include pre-releases" above to also see beta / RC builds.'
+      : '';
+    const msg = (info.message || `You're on the latest version (${info.currentVersion || '?'}).`)
+                + hintIfBeta;
+    showUpdateStatus(msg, 100);
     setUpdateBusy(false);
     return;
   }

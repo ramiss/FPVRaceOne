@@ -1,5 +1,18 @@
-#include "webserver.h"
+#include "fpv_webserver.h"
 #include "ota.h"
+// webserver.h now forward-declares most pointer-only types so transitive
+// includers (e.g. OtaManager) don't need every webserver dependency on their
+// library search path.  This .cpp dereferences those pointers, so include
+// the full definitions here.
+#include "battery.h"
+#include "buzzer.h"
+#include "laptimer.h"
+#include "multinode.h"
+#include "racehistory.h"
+#include "RX5808.h"
+#include "selftest.h"
+#include "storage.h"
+#include "webhook.h"
 #include <HTTPClient.h>
 
 #include <DNSServer.h>
@@ -1024,37 +1037,20 @@ void Webserver::startServices() {
     });
 
     // ── OTA: check for updates ──────────────────────────────────────────────
-    // Synchronous — connects to home WiFi, queries GitHub, returns version
-    // info.  Blocking up to ~20 s while WiFi associates and the API responds.
-    // The browser's UI shows progress via the `updateProgress` SSE channel.
+    // Schedules the check on Core 0 and returns 202 immediately.  The check
+    // itself can take 15-30 s and does a WiFi mode change that would tear
+    // down this request's TCP connection — running it synchronously on the
+    // AsyncWebServer thread crashes the device.  The frontend polls
+    // /api/update/status (or subscribes to /events) for progress + result.
     server.on("/api/update/check", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (timer && timer->isRunning()) {
             request->send(409, "application/json",
                 "{\"error\":\"Cannot check for updates while a race is running\"}");
             return;
         }
-        OtaManager::UpdateInfo info;
-        String err;
-        if (!otaManager.checkForUpdate(info, err)) {
-            String body = String("{\"error\":\"") + err + "\"}";
-            // 502 = "we couldn't talk to the upstream service"; 4xx is wrong here
-            request->send(502, "application/json", body);
-            return;
-        }
-        String notes = info.releaseNotes;
-        notes.replace("\\", "\\\\");
-        notes.replace("\"", "\\\"");
-        notes.replace("\n", "\\n");
-        notes.replace("\r", "");
-        String body = "{";
-        body += "\"currentVersion\":\""  + info.currentVersion  + "\",";
-        body += "\"latestVersion\":\""   + info.latestVersion   + "\",";
-        body += "\"available\":"         + String(info.available ? "true" : "false") + ",";
-        body += "\"releaseNotes\":\""    + notes                + "\",";
-        body += "\"firmwareUrl\":\""     + info.firmwareUrl     + "\",";
-        body += "\"filesystemUrl\":\""   + info.filesystemUrl   + "\"";
-        body += "}";
-        request->send(200, "application/json", body);
+        otaManager.requestCheck();
+        request->send(202, "application/json",
+            "{\"status\":\"started\",\"message\":\"Poll /api/update/status or subscribe to /events for progress\"}");
     });
 
     // ── OTA: apply update ───────────────────────────────────────────────────

@@ -1,14 +1,25 @@
 #include <ESPAsyncWebServer.h>
 #include <WiFi.h>
 
-#include "battery.h"
-#include "laptimer.h"
-#include "multinode.h"
-#include "racehistory.h"
-#include "storage.h"
-#include "selftest.h"
+// transport.h provides TransportInterface — the Webserver class's base class,
+// which requires the full definition.  Every other library type used in this
+// header is a pointer-only reference, so forward-declared below to keep
+// transitively-including translation units (e.g. OtaManager) from needing
+// every webserver dependency on their own library search path.
 #include "transport.h"
-#include "webhook.h"
+
+class Config;
+class LapTimer;
+class BatteryMonitor;
+class Buzzer;
+class Led;
+class RaceHistory;
+class Storage;
+class SelfTest;
+class RX5808;
+class WebhookManager;
+class MultiNodeManager;
+class TransportManager;
 
 #define WIFI_CONNECTION_TIMEOUT_MS 30000
 #define WIFI_RECONNECT_TIMEOUT_MS 500
