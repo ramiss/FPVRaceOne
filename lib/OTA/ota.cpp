@@ -327,21 +327,44 @@ bool OtaManager::connectToHomeWifi(uint32_t timeoutMs, String& err) {
     WiFi.mode(WIFI_AP_STA);
     delay(50);
     WiFi.setAutoReconnect(false);
-    WiFi.begin(ssid, pwd);
 
-    uint32_t start = millis();
-    while (WiFi.status() != WL_CONNECTED) {
-        if (millis() - start > timeoutMs) {
-            err = "Timed out connecting to home WiFi (check SSID/password)";
-            DEBUG("[OTA] %s\n", err.c_str());
-            return false;
+    // Retry the association up to 3 times.  WiFi.begin's first attempt
+    // intermittently fails on the C6 after a mode transition (master/client
+    // observed ~20-30%) — the radio hasn't fully settled before begin()
+    // fires, the SSID isn't found on the cached channel, or DHCP times out.
+    // Each retry restarts the WPA handshake cleanly; a brief disconnect
+    // between attempts clears any half-state from the previous try.
+    constexpr uint8_t  WIFI_ATTEMPTS         = 3;
+    const uint32_t     perAttemptTimeoutMs   = timeoutMs;   // each attempt gets the full budget
+    for (uint8_t attempt = 1; attempt <= WIFI_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+            DEBUG("[OTA] Retry attempt %u/%u — restarting WiFi.begin\n", attempt, WIFI_ATTEMPTS);
+            setState(STATE_CONNECTING,
+                     String("Connecting to home WiFi… (attempt ") + attempt + "/" + WIFI_ATTEMPTS + ")");
+            WiFi.disconnect(false);
+            delay(300);
         }
-        delay(100);
+        WiFi.begin(ssid, pwd);
+
+        uint32_t start = millis();
+        bool connected = false;
+        while (millis() - start < perAttemptTimeoutMs) {
+            if (WiFi.status() == WL_CONNECTED) { connected = true; break; }
+            delay(100);
+        }
+        if (connected) {
+            DEBUG("[OTA] STA connected — IP: %s, RSSI: %d dBm (attempt %u)\n",
+                  WiFi.localIP().toString().c_str(), WiFi.RSSI(), attempt);
+            return true;
+        }
+        DEBUG("[OTA] Attempt %u/%u: WiFi.status()=%d, not connected after %u ms\n",
+              attempt, WIFI_ATTEMPTS, (int)WiFi.status(), (unsigned)perAttemptTimeoutMs);
     }
 
-    DEBUG("[OTA] STA connected — IP: %s, RSSI: %d dBm\n",
-          WiFi.localIP().toString().c_str(), WiFi.RSSI());
-    return true;
+    err = "Timed out connecting to home WiFi after " + String(WIFI_ATTEMPTS) +
+          " attempts (check SSID/password, or signal strength)";
+    DEBUG("[OTA] %s\n", err.c_str());
+    return false;
 }
 
 void OtaManager::disconnectFromHomeWifi() {
@@ -437,15 +460,36 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     } else {
         apiUrl += "/releases/latest";
     }
-    if (!http.begin(client, apiUrl)) {
-        err = "HTTP client init failed";
-        setState(STATE_ERROR, err);
-        disconnectFromHomeWifi();
-        if (_multinode) _multinode->resumeFromOta();
-        return false;
+    // Retry the GitHub API call up to 3 times.  Negative HTTPClient codes
+    // (-1 connection refused, -7 no HTTP server, -11 read timeout, etc.) are
+    // pre-response errors — often transient TLS handshake or DNS lookup
+    // failures that succeed on the next try.  Positive codes (2xx, 4xx, 5xx)
+    // are real responses and aren't retried; the caller handles those.
+    constexpr uint8_t GITHUB_ATTEMPTS = 3;
+    int code = -1;
+    for (uint8_t attempt = 1; attempt <= GITHUB_ATTEMPTS; attempt++) {
+        if (attempt > 1) {
+            DEBUG("[OTA] GitHub retry attempt %u/%u\n", attempt, GITHUB_ATTEMPTS);
+            setState(STATE_CHECKING,
+                     String("Querying GitHub for latest release… (attempt ") +
+                     attempt + "/" + GITHUB_ATTEMPTS + ")");
+            delay(500);
+        }
+        if (!http.begin(client, apiUrl)) {
+            err = "HTTP client init failed";
+            setState(STATE_ERROR, err);
+            disconnectFromHomeWifi();
+            if (_multinode) _multinode->resumeFromOta();
+            return false;
+        }
+        code = http.GET();
+        if (code > 0) break;   // got a real response (good or bad); stop retrying
+        DEBUG("[OTA] Attempt %u/%u failed (code=%d, %s)\n",
+              attempt, GITHUB_ATTEMPTS, code,
+              HTTPClient::errorToString(code).c_str());
+        http.end();
     }
 
-    int code = http.GET();
     // Stable channel only: 404 means no qualifying full release exists.
     // Pre-release channel uses the array endpoint, which never 404s for an
     // existing repo — an empty array is handled below.
