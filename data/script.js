@@ -7671,7 +7671,7 @@ function mnRenderRaceTab(nodes, opts) {
   // ── Per-pilot lap columns — always 8 slots ─────────────────────
   html += '<div class="mn-pilot-cards">';
   allSlots.forEach(n => {
-    const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
+    const pilotColor = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
     const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + _slotLetter(n.nodeId));
 
     if (n.empty) {
@@ -7681,6 +7681,15 @@ function mnRenderRaceTab(nodes, opts) {
       </div>`;
       return;
     }
+
+    // A registered pilot whose heartbeat went silent: keep the card populated
+    // (pilot name + lap stats stay visible so the director still sees what
+    // they did before disconnecting) but desaturate to gray and flag with a
+    // "Disconnected" badge.  Slot stays held — the director kicks manually.
+    // Host (n.isMaster) is by definition always online so it never enters
+    // this branch.
+    const isDisconnected = !n.isMaster && n.online === false;
+    const color = isDisconnected ? '#5a5a5a' : pilotColor;
 
     const _isExcludedThisRace = n.excludedFromCurrentRace || _pendingExcludes.has(n.nodeId);
     // Grace window after Stop All — keep the orange "solo" badge color off while
@@ -7692,7 +7701,7 @@ function mnRenderRaceTab(nodes, opts) {
     const _mnGraceSuppressSolo = _mnRecentlyStoppedBadge && !n.skipEnabled && !_isExcludedThisRace;
     const isSoloRacing = n.running && !n.isMaster &&
       (!raceRunning || _isExcludedThisRace) && !_mnGraceSuppressSolo;
-    const canTap  = !readOnly && mnDevMode && raceRunning && !n.independent && !isSoloRacing;
+    const canTap  = !readOnly && mnDevMode && raceRunning && !n.independent && !isSoloRacing && !isDisconnected;
     // Card header text colour follows the WCAG relative luminance of the
     // pilot's background colour: light backgrounds (gold, green, cyan,
     // white, spring green) get black text; everything else stays white.
@@ -7715,7 +7724,10 @@ function mnRenderRaceTab(nodes, opts) {
     const meBadge = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
       ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Me</span>' : '';
     const slotPrefix = n.isMaster ? '' : `${_slotLetter(n.nodeId)}: `;
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${slotPrefix}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${isRacing ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    const disconnectedBadge = isDisconnected
+      ? ' <span class="mn-card-badge" style="background:rgba(208,80,80,0.85);color:#fff;">Disconnected</span>'
+      : '';
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${slotPrefix}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${disconnectedBadge}${isRacing && !isDisconnected ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {
@@ -8113,6 +8125,48 @@ function _mnPopulateMoveSlotDropdown(currentNodeId) {
   }
 }
 
+// Lock every editable control in the Edit Pilot modal except the Kick From
+// Slot button (and Close).  Used when the target pilot's heartbeat has gone
+// silent — Save + Calibration + Move + Live RSSI all need the STA link to
+// actually work, so disabling them prevents the director from queuing edits
+// that would silently fail.  A banner at the top of the modal explains why.
+function _mnSetPilotModalLocked(locked) {
+  const FIELD_IDS = [
+    'mnPilotModalName',
+    'mnPilotModalColor',
+    'mnPilotModalBand',
+    'mnPilotModalChannel',
+    'mnPilotModalMoveSlot',
+    'mnPilotModalEnter',
+    'mnPilotModalExit',
+    'mnPilotModalSkip',
+    'mnPilotModalRssiToggle',
+    'mnPilotModalCalibrateBtn',
+  ];
+  for (const id of FIELD_IDS) {
+    const el = document.getElementById(id);
+    if (el) el.disabled = locked;
+  }
+  // Save button has no id — find by its onclick handler inside the modal.
+  const saveBtn = document.querySelector('#mnPilotModal button[onclick="mnSavePilotModal()"]');
+  if (saveBtn) saveBtn.disabled = locked;
+
+  // Disconnect banner — create lazily on first lock so the markup stays
+  // self-contained here rather than threaded through index.html.
+  let banner = document.getElementById('mnPilotModalDisconnectedBanner');
+  if (locked && !banner) {
+    banner = document.createElement('div');
+    banner.id = 'mnPilotModalDisconnectedBanner';
+    banner.style.cssText = 'background:rgba(208,80,80,0.15);border:1px solid rgba(208,80,80,0.6);color:#c0392b;padding:8px 12px;border-radius:6px;font-size:13px;margin:0 0 12px;font-weight:500;';
+    banner.textContent = 'This pilot is disconnected — only "Kick From Slot" is available until they reconnect.';
+    const subtitle = document.getElementById('mnPilotModalSubtitle');
+    if (subtitle && subtitle.parentNode) {
+      subtitle.parentNode.insertBefore(banner, subtitle.nextSibling);
+    }
+  }
+  if (banner) banner.style.display = locked ? '' : 'none';
+}
+
 function mnOpenPilotModal(nodeId) {
   _mnModalNodeId = nodeId;
   const node = mnCurrentNodes.find(n => n.nodeId === nodeId);
@@ -8165,6 +8219,14 @@ function mnOpenPilotModal(nodeId) {
   // (name, color, band, RSSI sliders, calibration wizard, skip flag) does.
   const kickSection = document.getElementById('mnPilotModalKickSection');
   if (kickSection) kickSection.style.display = (nodeId === 0) ? 'none' : '';
+
+  // Disconnected pilot: lock down every field + Save + Calibration + Move +
+  // Live RSSI — the only useful action is Kick From Slot to free the slot
+  // for someone else.  Save would silently fail anyway since the master→
+  // client config push needs the STA link.  Read once at modal-open time
+  // (not live) so a brief flap mid-edit doesn't disable the form under the
+  // director's hands.
+  _mnSetPilotModalLocked(!!(node && !node.isMaster && node.online === false));
 
   document.getElementById('mnPilotModal').style.display = 'flex';
   setTimeout(() => document.getElementById('mnPilotModalName').focus(), 50);

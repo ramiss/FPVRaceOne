@@ -95,7 +95,15 @@ public:
                                                  //   false for steady-state keep-alives
                                                  //   so the caller can skip broadcasts.
     bool   handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber);
-    bool   handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged);
+    // macAddress is verified against the stored MAC for nodeId.  An empty
+    // incoming MAC (legacy clients) skips the check for backwards compat,
+    // but a non-empty mismatch returns false → master replies 404 NOT_FOUND,
+    // which triggers the client's fast-recovery re-register-with-nodeId-0
+    // path.  Without this, two devices whose nodeIds collide can both think
+    // they're connected while only one is actually known to the master.
+    bool   handleHeartbeat(uint8_t nodeId, const String& macAddress,
+                           bool running, bool independent, bool skipEnabled,
+                           bool& stateChanged);
     bool   handleQuit(uint8_t nodeId);
     // Master-side: bump a node's lastSeen without a full heartbeat.  Used by
     // request handlers that already proved the client is reachable (e.g. the

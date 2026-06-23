@@ -2504,11 +2504,12 @@ EEPROM:\n\
             }
             JsonObject obj    = json.as<JsonObject>();
             uint8_t nodeId    = obj["nodeId"]      | 0;
+            String  macAddress = obj["mac"]         | "";   // empty for legacy clients; verified if present
             bool running      = obj["running"]      | false;
             bool independent  = obj["independent"]  | false;
             bool skipEnabled  = obj["skipEnabled"]  | false;
             bool stateChanged = false;
-            bool ok = multiNode->handleHeartbeat(nodeId, running, independent, skipEnabled, stateChanged);
+            bool ok = multiNode->handleHeartbeat(nodeId, macAddress, running, independent, skipEnabled, stateChanged);
             if (ok && stateChanged) {
                 pushMultiNodeState();
             }

@@ -344,8 +344,9 @@ void MultiNodeManager::_sendRegistration() {
 }
 
 void MultiNodeManager::_sendHeartbeat() {
-    DynamicJsonDocument doc(128);
+    DynamicJsonDocument doc(192);
     doc["nodeId"]      = _myNodeId;
+    doc["mac"]         = _myMacAddress;   // master verifies this matches its stored MAC for nodeId
     doc["running"]     = _timerRunning;
     doc["independent"]  = _conf->getMnSkipMasterStart() && _timerRunning && !_masterRaceActive;
     doc["skipEnabled"]  = _conf->getMnSkipMasterStart();
@@ -415,7 +416,12 @@ bool MultiNodeManager::_postToMasterWithResponse(const String& endpoint, const S
     http.addHeader("Content-Type", "application/json");
     http.setTimeout(800);
     int code = http.POST(body);
-    if (code == 200) {
+    // Read the body for any HTTP code (positive — meaning the server actually
+    // responded).  Heartbeat callers MUST see the "NOT_FOUND" body on a 404
+    // to trigger immediate re-registration with nodeId=0; without it the
+    // recovery path is dead code and the client spends 10+ seconds in
+    // _heartbeatFailCount limbo before noticing.
+    if (code > 0) {
         response = http.getString();
     }
     http.end();
@@ -579,10 +585,28 @@ bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lap
     return false;
 }
 
-bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, bool running, bool independent, bool skipEnabled, bool& stateChanged) {
+bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, const String& macAddress,
+                                        bool running, bool independent, bool skipEnabled,
+                                        bool& stateChanged) {
     if (_pausedForOta) { stateChanged = false; return false; }   // master is OTA-busy
     for (auto& n : _nodes) {
         if (n.nodeId == nodeId) {
+            // MAC verification: if the incoming heartbeat carries a MAC AND it
+            // doesn't match the stored MAC for this slot, this is a stale
+            // client whose nodeId collides with the current slot occupant.
+            // Reject so the client falls into the NOT_FOUND fast-recovery
+            // path and re-registers with nodeId=0.  Empty incoming MAC is
+            // tolerated (legacy clients pre-this-fix) so a mixed fleet doesn't
+            // break — but the stored MAC for a "live" slot has been non-empty
+            // since the slot was registered, so legacy heartbeats from the
+            // _correct_ device still match the nodeId-only path.
+            if (macAddress.length() > 0 && n.macAddress.length() > 0 &&
+                macAddress != n.macAddress) {
+                DEBUG("[MULTINODE] Heartbeat MAC mismatch on slot %c (stored=%s, incoming=%s) — rejecting\n",
+                      slotLetter(n.nodeId), n.macAddress.c_str(), macAddress.c_str());
+                stateChanged = false;
+                return false;
+            }
             // Capture the offline-to-online edge before the write so we can
             // log the recovery.  Without this, a node that timed out and
             // then resumed via a heartbeat (the common case after a brief

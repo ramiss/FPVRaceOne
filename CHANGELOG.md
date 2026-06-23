@@ -10,6 +10,34 @@ All notable changes to FPVRaceOne will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — OTA: retry transient WiFi and GitHub failures
+
+- WiFi association now retries up to 3 times. Single-shot association on the
+  C6 intermittently fails (~20-30 %) after the AP+STA mode change — the radio
+  hasn't fully settled, SSID isn't found on the cached channel, or DHCP times
+  out. A clean disconnect + 300 ms pause + WiFi.begin restart per attempt
+  recovers cleanly. State message updates as `(attempt N/3)` so the user can
+  see retries in flight.
+- GitHub releases API call retries up to 3 times on negative HTTPClient codes
+  (TLS handshake / DNS / read-timeout / connection-refused). Positive codes
+  (200, 404, 5xx) are real responses and aren't retried.
+
+### Fixed — multinode: client could falsely report "connected" while master never knew it existed
+
+- `_postToMasterWithResponse` only read the HTTP response body when the status
+  code was 200, so the heartbeat path's "NOT_FOUND" fast-recovery branch was
+  dead code — the client never saw the master's 404 reply and instead spent
+  10+ seconds in `_heartbeatFailCount` limbo before noticing the connection
+  was bogus. Now reads the body for any positive HTTP code.
+- `handleHeartbeat` matched on `nodeId` alone with no MAC check, so when one
+  client's stale `_myNodeId` collided with another live device's slot, the
+  collision client's heartbeats kept "succeeding" against the wrong slot's
+  entry — the client thought it was connected while the master only ever
+  knew about the legitimate device. Heartbeat payload now includes the
+  client's MAC; the master rejects with 404 NOT_FOUND on mismatch, which
+  (combined with the fix above) triggers an immediate re-register-with-
+  nodeId-0 path that gets the colliding client a fresh free slot.
+
 ### Fixed — OTA: Check for Updates rebooted the device
 
 - The check ran synchronously inside the AsyncWebServer request handler, so
