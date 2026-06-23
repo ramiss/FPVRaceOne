@@ -10,6 +10,20 @@ All notable changes to FPVRaceOne will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — multinode: skip-enabled pilots' lap times stay visible
+
+- A pilot with **Ignore Race Director** on used to hide its lap times behind
+  a "Solo race in progress (ignoring race director)" placeholder on the
+  master's Race tab and on its own Multi Race tab. Now the card shows the
+  actual lap times — same as every other card — with a small orange
+  "Ignoring race director" label above so the director still knows the pilot
+  is outside the official race. The leaderboard still excludes them, so
+  their times read like a DNF entry rather than competing for rank.
+- The client's Multi Race tab (which already received the master's full
+  director-state push regardless of skipEnabled) now also shows the client's
+  own solo lap times on its own card, so the skip-enabled pilot can observe
+  the director's race in parallel with their own.
+
 ### Added — multinode: Backup / Restore Pilots
 
 - Master Race tab now has **Backup Pilots** / **Restore Pilots** buttons.

@@ -7751,21 +7751,35 @@ function mnRenderRaceTab(nodes, opts) {
       html += `<div class="mn-card-solo-label mn-card-solo-label-idle">Not racing<br>(ignoring race director)</div>`;
     }
 
-    // Solo race in progress: always show for skip-enabled pilots; only show for others when no master race is active.
+    // Solo race in progress.
+    //   • skipEnabled pilots ("Ignore Race Director" toggle on): show their
+    //     lap times like any other pilot, with a small "Ignoring race director"
+    //     note above so the director still knows they're outside the official
+    //     race.  The leaderboard already excludes them via !n.skipEnabled, so
+    //     their times are visible without polluting the ranking — exactly
+    //     like a DNF entry.  The skip-enabled client's own Multi Race tab
+    //     uses the same renderer, so they keep observing the director's race
+    //     and seeing their own solo times in parallel.
+    //   • Excluded-for-this-race or pre-start solo runners: keep the
+    //     placeholder behaviour so the director sees at-a-glance which
+    //     non-skip pilots are off the field.
     // Grace window: within 5 s of a Stop All click, suppress the label for
     // non-skip / non-excluded pilots — those are clients whose stop POST or
     // heartbeat hasn't round-tripped yet.  Any pilot whose running flag is
-    // still true *after* the grace window genuinely is solo racing and we
-    // want to show that.
+    // still true *after* the grace window genuinely is solo racing.
     const _mnRecentlyStopped = (typeof window.__mnLastRaceStopAt === 'number')
       && (Date.now() - window.__mnLastRaceStopAt) < 5000;
     const _mnSoloPending = _mnRecentlyStopped && !n.skipEnabled && !_isExcludedThisRace;
-    if (n.running && !n.isMaster && (n.skipEnabled || _isExcludedThisRace || !raceRunning) && !_mnSoloPending) {
-      const soloLabel = n.skipEnabled
-        ? 'Solo race in progress<br>(ignoring race director)'
-        : _isExcludedThisRace
-          ? 'Solo race in progress<br>(ignoring for this race)'
-          : 'Solo race in progress<br>(race director can override)';
+    const showSkipNote = n.running && !n.isMaster && n.skipEnabled && !_mnSoloPending;
+    const showSoloPlaceholder = !showSkipNote && n.running && !n.isMaster
+      && (_isExcludedThisRace || !raceRunning) && !_mnSoloPending;
+    if (showSkipNote) {
+      html += `<div class="mn-card-solo-label" style="padding:6px 8px;font-size:11px;color:#f0a040;">Ignoring race director</div>`;
+    }
+    if (showSoloPlaceholder) {
+      const soloLabel = _isExcludedThisRace
+        ? 'Solo race in progress<br>(ignoring for this race)'
+        : 'Solo race in progress<br>(race director can override)';
       html += `<div class="mn-card-solo-label">${soloLabel}</div>`;
     } else if (n.laps.length === 0) {
       html += `<div class="mn-card-lap" style="justify-content:center;color:var(--secondary-color);padding:10px;">—</div>`;
