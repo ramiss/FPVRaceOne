@@ -3196,6 +3196,23 @@ function hideRaceDownloadReminder() {
   }
 }
 
+// Dismiss + persist: same as the regular Dismiss button, plus flips the
+// "Always hide download reminder banner" toggle in Settings so the banner
+// stays hidden across page reloads and reconnects.  Mirrors the inline
+// onchange handler on #alwaysHideBannerToggle (localStorage flag +
+// sessionStorage cleanup + applyRaceHistoryModeUI) so the Settings tab
+// reflects the change immediately if the user navigates there next.
+function dismissAlwaysRaceDownloadReminder() {
+  localStorage.setItem("alwaysHideRaceBanner", "1");
+  sessionStorage.removeItem("hideRaceDownloadReminder");
+  const toggle = document.getElementById("alwaysHideBannerToggle");
+  if (toggle) toggle.checked = true;
+  const label  = document.getElementById("alwaysHideBannerLabel");
+  if (label)  label.textContent = "On";
+  hideRaceDownloadReminder();
+  applyRaceHistoryModeUI();
+}
+
 function saveVoiceSelection() {
   const voiceSelect = document.getElementById('voiceSelect');
   if (voiceSelect) {
@@ -8486,6 +8503,246 @@ async function mnRemoveNode(nodeId, callsign) {
     });
     mnRefreshNodes();
   } catch (e) { console.error('removeNode failed', e); }
+}
+
+// ── Pilot Backup / Restore ────────────────────────────────────────────────
+//
+// Saves per-MAC pilot settings to a JSON file the director can re-load on the
+// same physical hardware later.  Calibration RSSI is hardware-specific
+// (different antenna, receiver, board) so MAC — not slot id — is the
+// matching key.  A pilot saved from "slot A" on unit X will only restore to
+// unit X regardless of which slot X currently occupies.
+//
+// File format v1:
+//   { format: 'fpvraceone-pilot-backup', version: 1,
+//     savedAt: ISO timestamp, masterMac: '…', pilots: […] }
+// Each pilot entry: { mac, isMaster, slot, pilotName, pilotColor,
+//                     band, chan, freq, enterRssi, exitRssi, skipMasterStart }
+//
+// Restore preview is keyed on MAC: matched-online → selectable, matched-offline
+// or never-seen → listed but disabled / grayed out.
+
+window.__mnRestoreState = null;   // populated by mnRestoreOpenFile, read by mnRestoreApply
+
+function _mnNormalizeMac(m) {
+  return (m || '').toString().trim().toUpperCase();
+}
+
+function mnBackupPilots() {
+  const nodes = Array.isArray(mnCurrentNodes) ? mnCurrentNodes : [];
+  if (nodes.length === 0) {
+    alert('No node data to back up yet — wait for the Race tab to populate, then try again.');
+    return;
+  }
+  const pilots = [];
+  for (const n of nodes) {
+    const mac = _mnNormalizeMac(n.mac);
+    if (!mac) continue;  // entry with no MAC cannot be restored deterministically
+    pilots.push({
+      mac,
+      isMaster: !!n.isMaster,
+      slot: n.nodeId,
+      pilotName: n.pilotName || '',
+      pilotColor: (typeof n.pilotColor === 'number') ? n.pilotColor : 0x0080FF,
+      band: (typeof n.bandIndex === 'number') ? n.bandIndex : 0,
+      chan: (typeof n.channelIndex === 'number') ? n.channelIndex : 0,
+      freq: (typeof n.frequency === 'number') ? n.frequency : 0,
+      enterRssi: (typeof n.enterRssi === 'number') ? n.enterRssi : 0,
+      exitRssi:  (typeof n.exitRssi  === 'number') ? n.exitRssi  : 0,
+      skipMasterStart: n.skipEnabled ? 1 : 0,
+    });
+  }
+  if (pilots.length === 0) {
+    alert('No pilots with known MAC addresses to back up. Recruit your client units first, then try again.');
+    return;
+  }
+  const masterEntry = pilots.find(p => p.isMaster);
+  const payload = {
+    format: 'fpvraceone-pilot-backup',
+    version: 1,
+    savedAt: new Date().toISOString(),
+    masterMac: masterEntry ? masterEntry.mac : '',
+    pilots,
+  };
+  // Filename: fpvraceone-pilots-YYYY-MM-DD-HHMM.json (local time, sort-friendly).
+  const d  = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}`;
+  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `fpvraceone-pilots-${stamp}.json`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function mnRestoreOpenFile(input) {
+  const file = input && input.files && input.files[0];
+  if (!file) return;
+  // Block restore while a race is running — mid-race config changes are
+  // disruptive and the editPilot proxy doesn't guard band/channel changes
+  // against an active timer.
+  if (typeof mnRaceRunning !== 'undefined' && mnRaceRunning) {
+    alert('Stop the current race before restoring pilot settings.');
+    return;
+  }
+  const reader = new FileReader();
+  reader.onload = (e) => {
+    let parsed;
+    try { parsed = JSON.parse(e.target.result); }
+    catch (err) { alert('Could not parse the file as JSON.'); return; }
+    if (!parsed || parsed.format !== 'fpvraceone-pilot-backup' || !Array.isArray(parsed.pilots)) {
+      alert('Not a valid FPVRaceOne pilot backup file.');
+      return;
+    }
+    _mnRenderRestorePreview(parsed);
+  };
+  reader.onerror = () => alert('Failed to read the selected file.');
+  reader.readAsText(file);
+}
+
+function _mnRenderRestorePreview(payload) {
+  const list = document.getElementById('mnRestoreList');
+  const subtitle = document.getElementById('mnRestoreModalSubtitle');
+  const summary = document.getElementById('mnRestoreSummary');
+  const applyBtn = document.getElementById('mnRestoreApplyBtn');
+  if (!list || !subtitle || !summary || !applyBtn) return;
+
+  // Build a MAC → current node map.
+  const macToNode = new Map();
+  for (const n of (Array.isArray(mnCurrentNodes) ? mnCurrentNodes : [])) {
+    const mac = _mnNormalizeMac(n.mac);
+    if (mac) macToNode.set(mac, n);
+  }
+
+  const rows = payload.pilots.map((p, i) => {
+    const mac     = _mnNormalizeMac(p.mac);
+    const current = macToNode.get(mac);
+    const matched = !!current;
+    const online  = matched && current.online !== false;
+    const slotNow = matched ? _slotLetter(current.nodeId) : '';
+    const slotSaved = (typeof p.slot === 'number' && p.slot > 0) ? _slotLetter(p.slot) : (p.isMaster ? 'Master' : '');
+    let statusText;
+    let statusColor;
+    if (!matched)       { statusText = 'Node not detected';            statusColor = '#888'; }
+    else if (!online)   { statusText = 'Matched, currently offline';  statusColor = '#c0392b'; }
+    else if (current.isMaster) { statusText = 'This master';           statusColor = '#2e8b57'; }
+    else                { statusText = `Online — now in slot ${slotNow}`; statusColor = '#2e8b57'; }
+
+    const canRestore = matched && online;
+    const colorHex = '#' + (((p.pilotColor || 0) >>> 0) & 0xFFFFFF).toString(16).padStart(6, '0');
+    const macTail = mac ? mac.slice(-8) : '—';
+    const dim     = canRestore ? '1' : '0.45';
+    return `
+      <label style="display:flex; align-items:center; gap:10px; padding:8px 10px; border-bottom:1px solid var(--border-color, rgba(128,128,128,0.18)); opacity:${dim}; cursor:${canRestore ? 'pointer' : 'not-allowed'};">
+        <input type="checkbox" data-idx="${i}" ${canRestore ? 'checked' : 'disabled'} style="flex:0 0 auto;">
+        <span style="display:inline-block; width:14px; height:14px; border-radius:3px; background:${colorHex}; border:1px solid rgba(0,0,0,0.25); flex:0 0 auto;"></span>
+        <div style="flex:1 1 auto; min-width:0;">
+          <div style="font-weight:600;">${_escapeHtml(p.pilotName || '(unnamed)')}${slotSaved ? ` <span style="font-size:12px; color:var(--secondary-color); font-weight:400;">saved as ${slotSaved}</span>` : ''}</div>
+          <div style="font-size:11px; color:var(--secondary-color);">MAC …${macTail} · ${p.freq || '?'} MHz · enter ${p.enterRssi || 0} / exit ${p.exitRssi || 0}</div>
+          <div style="font-size:11px; color:${statusColor};">${statusText}</div>
+        </div>
+      </label>
+    `;
+  }).join('');
+  list.innerHTML = rows || '<p style="padding:16px; text-align:center; color:var(--secondary-color);">No pilot entries in this file.</p>';
+
+  // Header counts.
+  const total   = payload.pilots.length;
+  const matched = payload.pilots.filter(p => macToNode.has(_mnNormalizeMac(p.mac))).length;
+  const online  = payload.pilots.filter(p => {
+    const n = macToNode.get(_mnNormalizeMac(p.mac));
+    return n && n.online !== false;
+  }).length;
+  const stamp = payload.savedAt ? new Date(payload.savedAt).toLocaleString() : 'unknown date';
+  subtitle.textContent = `Saved ${stamp} — ${total} pilot${total !== 1 ? 's' : ''}, ${matched} matched, ${online} ready to restore`;
+  summary.textContent = (online < total)
+    ? 'Greyed entries can’t be restored right now (unit offline or not detected).'
+    : '';
+
+  applyBtn.disabled = (online === 0);
+  // Stash for the apply step — we re-resolve current slot per-entry at apply
+  // time in case the user recruited / kicked anyone while the modal was open.
+  window.__mnRestoreState = { payload };
+
+  document.getElementById('mnRestoreModal').style.display = 'flex';
+}
+
+function mnCloseRestoreModal() {
+  const m = document.getElementById('mnRestoreModal');
+  if (m) m.style.display = 'none';
+  window.__mnRestoreState = null;
+}
+
+async function mnRestoreApply() {
+  const state = window.__mnRestoreState;
+  if (!state || !state.payload) { mnCloseRestoreModal(); return; }
+  const checks = document.querySelectorAll('#mnRestoreList input[type="checkbox"][data-idx]');
+  const selected = [];
+  checks.forEach(c => {
+    if (c.checked && !c.disabled) {
+      const idx = parseInt(c.getAttribute('data-idx'), 10);
+      if (Number.isFinite(idx)) selected.push(state.payload.pilots[idx]);
+    }
+  });
+  if (selected.length === 0) { mnCloseRestoreModal(); return; }
+
+  // Re-resolve MAC → current nodeId at apply time so kicks/recruits while
+  // the modal was open don't push settings to the wrong slot.
+  const macToNode = new Map();
+  for (const n of (Array.isArray(mnCurrentNodes) ? mnCurrentNodes : [])) {
+    const mac = _mnNormalizeMac(n.mac);
+    if (mac) macToNode.set(mac, n);
+  }
+
+  const applyBtn = document.getElementById('mnRestoreApplyBtn');
+  const summary  = document.getElementById('mnRestoreSummary');
+  if (applyBtn) { applyBtn.disabled = true; applyBtn.textContent = 'Restoring…'; }
+
+  let ok = 0, fail = 0, skipped = 0;
+  for (const p of selected) {
+    const node = macToNode.get(_mnNormalizeMac(p.mac));
+    if (!node || node.online === false) { skipped++; continue; }
+    const body = {
+      nodeId:         node.nodeId,
+      pilotName:      p.pilotName || '',
+      pilotColor:     (typeof p.pilotColor === 'number') ? p.pilotColor : 0x0080FF,
+      band:           (typeof p.band === 'number') ? p.band : 0,
+      chan:           (typeof p.chan === 'number') ? p.chan : 0,
+      freq:           (typeof p.freq === 'number') ? p.freq : 0,
+      enterRssi:      (typeof p.enterRssi === 'number') ? p.enterRssi : 0,
+      exitRssi:       (typeof p.exitRssi  === 'number') ? p.exitRssi  : 0,
+      skipMasterStart: p.skipMasterStart ? 1 : 0,
+    };
+    try {
+      const r = await fetch('/api/multinode/editPilot', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) ok++; else fail++;
+    } catch (_) { fail++; }
+    if (summary) summary.textContent = `Restored ${ok} / ${selected.length}…`;
+  }
+
+  if (applyBtn) { applyBtn.disabled = false; applyBtn.textContent = 'Restore Selected'; }
+  mnCloseRestoreModal();
+  mnRefreshNodes();
+
+  let msg = `Restored ${ok} pilot${ok !== 1 ? 's' : ''}.`;
+  if (fail)    msg += `\n${fail} failed (the unit may have gone offline).`;
+  if (skipped) msg += `\n${skipped} skipped (no longer matched).`;
+  if (ok)      msg += `\n\nPlease wait a few seconds while each node is reconfigured — the cards will update as the settings round-trip back from the clients.`;
+  alert(msg);
+}
+
+function _escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]
+  ));
 }
 
 // Multi-Node tab: simple node status cards (race data is on the Race tab).

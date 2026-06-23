@@ -10,6 +10,27 @@ All notable changes to FPVRaceOne will be documented in this file.
 
 ## [Unreleased]
 
+### Added — multinode: Backup / Restore Pilots
+
+- Master Race tab now has **Backup Pilots** / **Restore Pilots** buttons.
+  Backup downloads a JSON file with every node's pilot name, color,
+  band / channel / freq, enter / exit RSSI, slot, and master/skip flag —
+  each entry keyed by the unit's WiFi MAC. Restore parses the file, matches
+  saved entries against the currently online nodes by MAC, and shows a
+  preview modal with one checkbox per pilot. Online-and-matched entries are
+  selectable; offline-but-matched and not-detected-at-all entries are listed
+  but greyed out, so the director can see exactly what would be skipped.
+  Calibration is hardware-specific (different receivers / antennas drift to
+  different baseline RSSI), so the MAC key guarantees a pilot's saved enter /
+  exit thresholds only land back on the same physical unit they came from.
+- Restore is blocked while a race is running. Apply re-resolves MAC → current
+  nodeId at apply time, so kicks or recruits while the modal was open can't
+  push a saved pilot's settings to the wrong slot.
+- Master entry in the director-state payload (`/api/multinode/nodes`,
+  `multiNodeState` SSE) now carries `"mac"` so the backup file can record
+  the host device's identity — without this the master's calibration could
+  never be matched on a later restore.
+
 ### Fixed — OTA: retry transient WiFi and GitHub failures
 
 - WiFi association now retries up to 3 times. Single-shot association on the

@@ -386,7 +386,14 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     out.reserve(400 + clientCount * 400 + lapEstimate * 40);
 
     // ── Header + master entry ─────────────────────────────────────────────
+    // The MAC ties this physical device to the saved-pilots backup format
+    // (Backup / Restore Pilots in the UI).  Calibration is hardware-specific,
+    // so the restore flow keys every entry by MAC and the master is no
+    // exception — without this field the master's slot couldn't be matched
+    // by a backup file later.
+    String masterMac = WiFi.macAddress();
     out += "{\"nodes\":[{\"nodeId\":0,\"isMaster\":true,\"online\":true";
+    out += ",\"mac\":\"";        out += _jsonEscape(masterMac); out += "\"";
     out += ",\"pilotName\":\"";  out += _jsonEscape(pilotName); out += "\"";
     out += ",\"pilotColor\":";   out += pilotColor;
     out += ",\"bandIndex\":";    out += masterBand;

@@ -57,6 +57,7 @@
           style="display:none; margin: 10px 0; padding: 6px 10px; border-radius: 8px;">
         <span>Races are lost when unplugged. Download after racing to save.</span>
         <button id="raceTabDownloadReminderHide" onclick="hideRaceDownloadReminder(); applyRaceHistoryModeUI();" style="margin-left:auto; padding:3px 10px; font-size:12px; background:rgba(0,0,0,0.15); border:1px solid rgba(255,200,0,0.4); border-radius:5px; cursor:pointer; color:inherit;">Dismiss</button>
+        <button id="raceTabDownloadReminderHideAlways" onclick="dismissAlwaysRaceDownloadReminder();" style="margin-left:6px; padding:3px 10px; font-size:12px; background:rgba(0,0,0,0.15); border:1px solid rgba(255,200,0,0.4); border-radius:5px; cursor:pointer; color:inherit;">Dismiss Always</button>
       </div>
       <div id="calibrationBanner" style="
         display: none;
@@ -176,6 +177,20 @@
             <button id="mnClearRaceBtnMain" onclick="mnClearRace()">Clear</button>
           </div>
           <div id="mn-race-container" style="margin: 16px 0;"></div>
+
+          <!-- Pilot backup / restore.  Stores per-MAC pilot settings (name,
+               color, band/channel/freq, enter/exit RSSI, preferred slot) to
+               a JSON file the director can re-load on the same physical
+               hardware later — calibration is hardware-specific so MAC is
+               the matching key, never slot number. -->
+          <div style="margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-color, rgba(128,128,128,0.25)); text-align:center;">
+            <button onclick="mnBackupPilots()" style="padding:8px 16px;">Backup Pilots</button>
+            <button onclick="document.getElementById('mnRestoreFile').click()" style="padding:8px 16px; margin-left:8px;">Restore Pilots</button>
+            <input type="file" id="mnRestoreFile" accept=".json,application/json" style="display:none;" onclick="this.value='';" onchange="mnRestoreOpenFile(this)">
+            <div style="font-size:12px; color:var(--secondary-color); margin-top:6px;">
+              Backup saves each pilot's name, color, channel and RSSI calibration tied to their physical unit's MAC. Restore writes those settings back to the same hardware when recruited again.
+            </div>
+          </div>
         </div>
 
       </div>
@@ -476,8 +491,27 @@
              values are already persisted, unsaved field changes are
              discarded (matching the previous Cancel semantics). -->
         <div style="display:flex;gap:8px;margin-top:10px;flex-shrink:0;">
-          <button onclick="mnSavePilotModal()">Save</button>
-          <button onclick="mnClosePilotModal()" style="margin-left:auto;background:var(--border-color)!important;color:var(--text-color)!important;">Close</button>
+          <button onclick="mnClosePilotModal()" style="background:var(--border-color)!important;color:var(--text-color)!important;">Close</button>
+          <button onclick="mnSavePilotModal()" style="margin-left:auto;">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Restore Pilots preview modal.  Populated by mnRestoreOpenFile after
+         a backup file is parsed and the saved entries are matched against
+         the currently online nodes by MAC. -->
+    <div id="mnRestoreModal" class="modal" style="display:none;" onclick="if(event.target===this) mnCloseRestoreModal();">
+      <div class="modal-content" style="max-width:520px; display:flex; flex-direction:column; max-height:90vh;">
+        <h3 style="margin-bottom:2px;">Restore Pilots</h3>
+        <div id="mnRestoreModalSubtitle" style="margin:0 0 12px; font-size:13px; font-weight:600; color:var(--secondary-color);"></div>
+        <div style="background:rgba(50,130,200,0.10); border:1px solid rgba(50,130,200,0.45); color:var(--text-color); padding:8px 12px; border-radius:6px; font-size:12px; margin-bottom:12px;">
+          Before restoring, make sure every unit you want to restore is recruited and online. Pilot settings will only be written back to the unit whose MAC matches the saved entry.
+        </div>
+        <div id="mnRestoreList" style="overflow-y:auto; flex:1 1 auto; min-height:0; padding-right:6px; border:1px solid var(--border-color, rgba(128,128,128,0.25)); border-radius:6px;"></div>
+        <div id="mnRestoreSummary" style="font-size:12px; color:var(--secondary-color); margin-top:8px; min-height:1em;"></div>
+        <div style="display:flex; gap:8px; margin-top:10px; flex-shrink:0;">
+          <button onclick="mnRestoreApply()" id="mnRestoreApplyBtn">Restore Selected</button>
+          <button onclick="mnCloseRestoreModal()" style="margin-left:auto; background:var(--border-color)!important; color:var(--text-color)!important;">Cancel</button>
         </div>
       </div>
     </div>
