@@ -4,13 +4,16 @@
 
 **Personal FPV Lap Timer**
 
-A single node lap timer that can be networked for multi-pilot (multi-node) racing.
-
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions on small indoor tracks using a single unit, up to large scale MultiGP race events with multiple units - in multi-node mode. No transponders, no complex infrastructure — just plug in a USB battery, wirelessly connect, calibrate, and fly.
+A single node personal lap timing solution for 5.8 GHz FPV drones that can be networked for multi-pilot racing. Perfect for personal practice sessions on small indoor tracks using a single unit, up to large scale MultiGP race events with multiple units. No transponders, no complex infrastructure — just plug in a USB battery, wirelessly connect, calibrate, and fly.
 
 **Up to 8 devices can wirelessly network with each other to act as a single multi-node lap timer (no additional hardware or software needed)** — one device is set to master mode and acts as race director with up to 7 additional clients. Manually connect clients or have the master automatically recruit clients in range.  Master can see all pilot times and control the race, while single pilots can remain logged into their device and see all other racer times - or initiate individual practice races. 
+
+**Documentation**  
+[Quick Start](QUICKSTART.md) - To get started as a single pilot with the bare minimum information  
+[Getting Started](GETTING_STARTED.md) - For a more comprehensive step by step guide  
+[User Guide](USER_GUIDE.md) - The full manual, but not necessarily a step by step
 
 ---
 
@@ -39,7 +42,7 @@ A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones.
 
 ## How It Works
 
-FPVRaceOne uses an RX5808 video receiver module to monitor your drone's video transmitter RSSI (signal strength). As you fly through the gate:
+FPVRaceOne uses an RX5808 video receiver module to monitor your drone's video transmitter RSSI (signal strength). As you fly through the timing gate:
 
 1. **Approach** — RSSI rises above the Enter threshold → crossing begins
 2. **Peak** — RSSI peaks when you're closest to the gate
