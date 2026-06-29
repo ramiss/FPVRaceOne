@@ -513,7 +513,12 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     HTTPClient http;
     http.setUserAgent("FPVRaceOne-OTA");
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    http.setTimeout(10000);
+    // Bumped from 10s → 20s because the prerelease endpoint streams up to
+    // ~30 KB (5 releases × ~6 KB of metadata) and the parser reads from the
+    // stream as it arrives.  At -75 dBm RSSI, the full receive can take 12+ s.
+    // The earlier 10 s ceiling produced intermittent "JSON parse error:
+    // IncompleteInput" when the read window expired mid-stream.
+    http.setTimeout(20000);
 
     // Two endpoints, two response shapes:
     //   * /releases/latest — single object, server-side filters out drafts AND
@@ -532,13 +537,41 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     } else {
         apiUrl += "/releases/latest";
     }
-    // Retry the GitHub API call up to 3 times.  Negative HTTPClient codes
-    // (-1 connection refused, -7 no HTTP server, -11 read timeout, etc.) are
-    // pre-response errors — often transient TLS handshake or DNS lookup
-    // failures that succeed on the next try.  Positive codes (2xx, 4xx, 5xx)
-    // are real responses and aren't retried; the caller handles those.
+    // Build the JSON filter ONCE before the retry loop — the same filter
+    // shape applies to every attempt.  Whitelisting only the fields we
+    // actually read drops ~80% of the payload at parse-time (release-note
+    // bodies, author objects, URL variants, reactions) so the doc stays tiny.
+    DynamicJsonDocument filter(512);
+    if (includePre) {
+        // Array endpoint — filter shape mirrors a single array entry; the
+        // parser applies it to every entry in the array.
+        filter[0]["tag_name"]   = true;
+        filter[0]["draft"]      = true;
+        filter[0]["prerelease"] = true;
+        filter[0]["assets"][0]["name"]                 = true;
+        filter[0]["assets"][0]["browser_download_url"] = true;
+    } else {
+        // Stable endpoint — single object response.
+        filter["tag_name"]   = true;
+        filter["draft"]      = true;
+        filter["prerelease"] = true;
+        filter["assets"][0]["name"]                 = true;
+        filter["assets"][0]["browser_download_url"] = true;
+    }
+    DynamicJsonDocument doc(4096);
+
+    // Retry up to 3 times.  The retry covers BOTH layers:
+    //   • HTTPClient pre-response failures (TLS handshake, DNS, timeout)
+    //     return negative codes — typically transient.
+    //   • Parse failures after a 200 response — usually IncompleteInput
+    //     when the receive window expired or the stream returned short.
+    //     Also transient (the user observed: retrying produces a real
+    //     response).
+    // Positive HTTP codes that aren't 200 (404, 403, 5xx) are NOT retried —
+    // those are real server verdicts handled by the caller below.
     constexpr uint8_t GITHUB_ATTEMPTS = 3;
     int code = -1;
+    DeserializationError jerr = DeserializationError::EmptyInput;
     for (uint8_t attempt = 1; attempt <= GITHUB_ATTEMPTS; attempt++) {
         if (attempt > 1) {
             DEBUG("[OTA] GitHub retry attempt %u/%u\n", attempt, GITHUB_ATTEMPTS);
@@ -560,7 +593,31 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         if (code > 0) {
             DEBUG("[OTA] Attempt %u/%u HTTP %d (%u ms)\n",
                   attempt, GITHUB_ATTEMPTS, code, (unsigned)getMs);
-            break;   // got a real response (good or bad); stop retrying
+            if (code != 200) {
+                // Non-200 with a real HTTP code (404, 403, rate-limit) — not
+                // a retry case.  Let the post-loop handlers deal with it.
+                break;
+            }
+            // 200 — try to parse the stream.  Reset the doc on retries so a
+            // partial-parse from the previous attempt doesn't leak in.
+            doc.clear();
+            uint32_t parseT0 = millis();
+            jerr = deserializeJson(doc, http.getStream(),
+                                   DeserializationOption::Filter(filter));
+            uint32_t parseMs = millis() - parseT0;
+            http.end();
+            if (!jerr) {
+                DEBUG("[OTA] Attempt %u/%u parsed OK (%u ms)\n",
+                      attempt, GITHUB_ATTEMPTS, (unsigned)parseMs);
+                break;
+            }
+            // Parse failed — typically IncompleteInput on a stream that
+            // closed before the JSON object terminated.  Treat as a
+            // transient error and retry the whole GET.
+            DEBUG("[OTA] Attempt %u/%u parse failed (%s, %u ms) — will retry\n",
+                  attempt, GITHUB_ATTEMPTS, jerr.c_str(), (unsigned)parseMs);
+            code = -1;   // force the post-loop guard to treat this as a failure
+            continue;
         }
         DEBUG("[OTA] Attempt %u/%u failed (code=%d, %s, %u ms)\n",
               attempt, GITHUB_ATTEMPTS, code,
@@ -622,45 +679,9 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         return false;
     }
 
-    // Stream-parse straight from the HTTPS socket with a whitelist filter.
-    // Two problems the older `http.getString()` + 16 KB doc approach hit:
-    //   1. getString() reads the whole body into one Arduino String via
-    //      incremental concat() reallocs.  On a low/fragmented heap the
-    //      mid-read realloc fails silently and the body is returned
-    //      truncated — ArduinoJson then reports "IncompleteInput" because
-    //      the JSON ends mid-object.
-    //   2. The /releases?per_page=N response is dominated by fields we
-    //      never read — release-note bodies (markdown, often kB each),
-    //      author objects, every URL variant, reactions, asset metadata.
-    //      Even with `per_page=5`, the full payload can exceed 50 KB.
-    // The filter below tells ArduinoJson exactly which fields to keep.
-    // Everything else is skipped at the byte level — never allocated.
-    // Release notes are NOT requested here; the Release Notes button in
-    // the Firmware Update UI links to the GitHub release page, so pilots
-    // who want the full text get it there rather than via the device.
-    DynamicJsonDocument filter(512);
-    if (includePre) {
-        // Array endpoint — filter shape mirrors a single array entry; the
-        // parser applies it to every entry in the array.
-        filter[0]["tag_name"]   = true;
-        filter[0]["draft"]      = true;
-        filter[0]["prerelease"] = true;
-        filter[0]["assets"][0]["name"]                 = true;
-        filter[0]["assets"][0]["browser_download_url"] = true;
-    } else {
-        // Stable endpoint — single object response.
-        filter["tag_name"]   = true;
-        filter["draft"]      = true;
-        filter["prerelease"] = true;
-        filter["assets"][0]["name"]                 = true;
-        filter["assets"][0]["browser_download_url"] = true;
-    }
-
-    DynamicJsonDocument doc(4096);
-    DeserializationError jerr = deserializeJson(
-        doc, http.getStream(),
-        DeserializationOption::Filter(filter));
-    http.end();
+    // Final parse-success check.  jerr is updated on every attempt inside
+    // the loop; if all three attempts failed to parse, surface the last
+    // error message (typically "IncompleteInput") to the UI.
     if (jerr) {
         err = String("JSON parse error: ") + jerr.c_str();
         setState(STATE_ERROR, err);
@@ -675,6 +696,20 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     JsonObject release;
     if (includePre) {
         JsonArray arr = doc.as<JsonArray>();
+        // Diagnostic: log every entry GitHub returned with its draft +
+        // prerelease + tag.  If pilots see "No releases published yet" while
+        // they have published releases on the repo, this tells us exactly
+        // why — empty array, all drafts, or all rejected for some reason.
+        DEBUG("[OTA] /releases returned %u entries\n", (unsigned)arr.size());
+        unsigned idx = 0;
+        for (JsonObject r : arr) {
+            DEBUG("[OTA]   [%u] tag=%s draft=%d prerelease=%d assets=%u\n",
+                  idx++,
+                  r["tag_name"].as<const char*>() ? r["tag_name"].as<const char*>() : "(none)",
+                  r["draft"].as<bool>() ? 1 : 0,
+                  r["prerelease"].as<bool>() ? 1 : 0,
+                  (unsigned)r["assets"].as<JsonArray>().size());
+        }
         for (JsonObject r : arr) {
             if (!r["draft"].as<bool>()) {
                 release = r;
