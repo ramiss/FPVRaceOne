@@ -5259,6 +5259,16 @@ let wizardState = {
 // before opening the wizard; cleared by closeCalibrationWizard.
 let wizardTargetNodeId = 0;
 
+// Mirrors LAPTIMER_CALIBRATION_HISTORY in lib/LAPTIMER/laptimer.h and the
+// 20 ms sample interval in laptimer.cpp's CALIBRATION_WIZARD branch.  When the
+// firmware buffer fills (5000 samples = 100 s) further samples are silently
+// dropped — auto-stop a beat before the cap so the polling loop can react and
+// surface a friendly retry prompt before that happens.
+const WIZARD_MAX_SAMPLES        = 5000;
+const WIZARD_SAMPLE_INTERVAL_MS = 20;
+const WIZARD_MAX_DURATION_SEC   = (WIZARD_MAX_SAMPLES * WIZARD_SAMPLE_INTERVAL_MS) / 1000;  // 100
+const WIZARD_AUTO_STOP_SAMPLES  = 4900;   // ~98 s, leaves ~2 s of poll headroom under the cap
+
 // Build a wizard URL.  In remote mode every wizard call routes through the
 // master's proxy with the target nodeId appended; in local mode the original
 // /calibration/<suffix> path is used.  extraQuery is concatenated with the
@@ -5372,7 +5382,15 @@ function wizardRecordingLoop() {
 
   fetchCalibrationMeta()
     .then(meta => {
-      document.getElementById('wizardSampleCount').textContent = `Samples: ${meta.total || 0}`;
+      const total = meta.total || 0;
+      document.getElementById('wizardSampleCount').textContent = `Samples: ${total}`;
+      if (total >= WIZARD_AUTO_STOP_SAMPLES) {
+        // Hit the firmware buffer cap.  Auto-stop before the firmware starts
+        // silently dropping samples and prompt the user to keep this recording
+        // or retry with a shorter session.
+        wizardHandleMaxDurationReached();
+        return;
+      }
       if (wizardState.recording) {
         wizardRecordingTimerId = setTimeout(wizardRecordingLoop, 200);
       }
@@ -5383,6 +5401,35 @@ function wizardRecordingLoop() {
         wizardRecordingTimerId = setTimeout(wizardRecordingLoop, 500);
       }
     });
+}
+
+// Invoked from wizardRecordingLoop when the sample count reaches the auto-stop
+// threshold (~98 s into a 100 s buffer).  Halts polling, asks the user whether
+// to use what was captured or restart with a shorter session, and routes to
+// the matching path.  Confirm-style prompt rather than a forced retry so a
+// pilot who happened to fit 3 clean laps inside the cap doesn't lose data.
+async function wizardHandleMaxDurationReached() {
+  wizardState.recording = false;
+  if (wizardRecordingTimerId) {
+    clearTimeout(wizardRecordingTimerId);
+    wizardRecordingTimerId = null;
+  }
+  const mins = Math.floor(WIZARD_MAX_DURATION_SEC / 60);
+  const secs = String(WIZARD_MAX_DURATION_SEC % 60).padStart(2, '0');
+  const useThisRecording = confirm(
+    `Recording reached the maximum duration of ${WIZARD_MAX_DURATION_SEC} seconds (${mins}:${secs}).\n\n` +
+    `Click OK to mark gate crossings with this recording, or Cancel to start over ` +
+    `with a shorter session (fly to the next gate and back 3 times faster).`
+  );
+  if (useThisRecording) {
+    // Use the normal stop path so the wizard transitions to Marking with the
+    // captured data — no special-case handling required downstream.
+    await stopCalibrationWizard();
+  } else {
+    // Reset back to the recording screen.  startCalibrationWizard's POST to
+    // /calibration/start resets the firmware's sample count to 0.
+    startCalibrationWizard();
+  }
 }
 
 // Show / hide the wizard's "Calculating…" spinner panel.  Used during the two
