@@ -8,9 +8,9 @@ A single node lap timer that can be networked for multi-pilot (multi-node) racin
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions or small indoor tracks, up to large scale race events in multi-node mode. No transponders, no complex infrastructure — just plug in, wirelessly connect, calibrate, and fly.
+A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones. Perfect for personal practice sessions on small indoor tracks using a single unit, up to large scale MultiGP race events with multiple units - in multi-node mode. No transponders, no complex infrastructure — just plug in a USB battery, wirelessly connect, calibrate, and fly.
 
-**Up to 8 devices can wirelessly mesh network and sync together for head-to-head racing (no additional hardware needed)** — one master device acts as race director and broadcasts Start / Stop to every connected client, with live laps streaming back from each pilot in real time. Acts like a mesh network. No router required. Even while meshed, each lap timer is still accessible by its own pilot.
+**Up to 8 devices can wirelessly network with each other to act as a single multi-node lap timer (no additional hardware or software needed)** — one device is set to master mode and acts as race director with up to 7 additional clients. Manually connect clients or have the master automatically recruit clients in range.  Master can see all pilot times and control the race, while single pilots can remain logged into their device and see all other racer times - or initiate individual practice races. 
 
 ---
 
@@ -39,11 +39,13 @@ A compact, self-contained RSSI-based lap timing solution for 5.8 GHz FPV drones.
 
 ## How It Works
 
-FPVRaceOne uses an RX5808 video receiver module to monitor your drone's RSSI (signal strength). As you fly through the gate:
+FPVRaceOne uses an RX5808 video receiver module to monitor your drone's video transmitter RSSI (signal strength). As you fly through the gate:
 
 1. **Approach** — RSSI rises above the Enter threshold → crossing begins
 2. **Peak** — RSSI peaks when you're closest to the gate
 3. **Exit** — RSSI falls below the Exit threshold → lap time recorded
+
+**Note that FPVRaceOne has an automatic calibration wizard to take the guess work out of setting the RSSI values (see below)**
 
 ```
 RSSI  │     /\
@@ -62,8 +64,8 @@ The time between consecutive peaks is your lap time. The signal processing pipel
 ## Key Features
 
 ### Connectivity
-- **WiFi Access Point** — works with any browser on any device with wifi, no app required
-- **Mesh Network** — up to 7 lap timers can connect to a designated master unit, in addition to the standard Wifi Access Points.
+- **WiFi Access Point** — works with any browser on any device (laptop, pc, phone or tablet) with wifi, no app required
+- **Built-in Multi-Node Networking** — up to 8 lap timers can connect together to to run a multi pilot race.
 
 ### Signal Processing
 A single 5-stage RSSI processing pipeline: 
@@ -75,6 +77,7 @@ A single 5-stage RSSI processing pipeline:
 - Enter / Exit threshold calculation with conservative safety margins (Enter ≈ 95 % of weakest peak, Exit ≈ 7 RSSI units below Enter, raised above the noise floor)
 - Peak-spread warning if the three peaks aren't reasonably equal — flagged for re-fly before applying
 - Live RSSI chart shows exactly what the lap detector sees (final pipeline output)
+**Note that the device can only record for 100 seconds. it is recommended to fly through the timing gate, to the next closest gate, and repeat twice more.
 
 ### Multi-Node Racing — Built-In Race Directing
 Network **up to 8 devices** together with no router and no extra hardware. One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically.
