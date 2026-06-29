@@ -7,7 +7,7 @@ hardware, multi-node racing, firmware updates, troubleshooting — see
 ## 1. Power and connect
 
 - Plug a USB-C power source into the FPVRaceOne; wait ~10 seconds for the AP to come up
-- Place the Lap Timer at the timing gate (typically the first gate), with the stripes (front of the unit) facing towards the center of the gate (facing the drone as it passes)
+- Place the timer at the timing gate (typically the first gate), with the stripes (front of the unit) facing inwards towards the center of the gate (facing the drone as it passes)
   Note: make sure the timer has a clear line of sight to your browsing device.  You may need to attach it higher on the gate if there is grass or other obstacles in the way.  
 - Connect your phone / laptop to WiFi **`FPVRaceOne_XXXX`** (password **`fpvraceone`**)
 - Open **`http://192.168.4.1`** in any browser
