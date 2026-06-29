@@ -46,11 +46,13 @@ racing, calibration, and configuration happens through the WiFi web UI.
 
 ### WiFi (Default)
 
-1. Power on your FPVRaceOne device and wait 10–15 seconds
-2. On your phone or laptop, connect to the WiFi network: **`FPVRaceOne_XXXX`**  
+1. Power on your FPVRaceOne lap timer device and wait 10–15 seconds
+2. Place the timer at the timing gate (typically the first gate), with the stripes (front of the unit) facing inwards towards the center of the gate (facing the drone as it passes)
+   Note: make sure the timer has a clear line of sight to your browsing device.  You may need to attach it higher on the gate if there is grass or other obstacles in the way.  
+3. On your phone or laptop, connect to the WiFi network: **`FPVRaceOne_XXXX`**  
    *(XXXX = last 4 digits of the device MAC address)*
-3. Password: **`fpvraceone`**
-4. Open a browser and go to: **`http://192.168.4.1`**
+4. Password: **`fpvraceone`**
+5. Open a browser and go to: **`http://192.168.4.1`**
 
 > Your device can connect to FPVRaceOne WiFi and maintain cellular internet simultaneously on most platforms — no captive portal is used. (Samsung phones force a choice between local WiFi and cellular data; everything else lets both coexist.)
 
