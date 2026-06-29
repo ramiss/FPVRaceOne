@@ -2743,9 +2743,13 @@ async function checkForUpdates() {
     // For pre-release builds specifically, if the device reports no stable
     // release available, point the user at the Include Pre-releases toggle
     // — the most common cause of "no update found" on a -beta build is
-    // GitHub's /releases/latest excluding pre-releases by design.
+    // GitHub's /releases/latest excluding pre-releases by design.  Only
+    // append the hint if the toggle is OFF; if it's already ON, the user
+    // already did the thing the hint asks for and the message is misleading
+    // (the real cause then is "no pre-releases tagged yet, or all drafts").
     const onBeta = /-(?:beta|rc|alpha|dev|dirty)/i.test(info.currentVersion || '');
-    const hintIfBeta = onBeta && !info.latestVersion
+    const prereleaseToggleOn = !!document.getElementById('otaIncludePrereleasesToggle')?.checked;
+    const hintIfBeta = onBeta && !info.latestVersion && !prereleaseToggleOn
       ? '\nYou\'re on a pre-release build — enable "Include pre-releases" above to also see beta / RC builds.'
       : '';
     const msg = (info.message || `You're on the latest version (${info.currentVersion || '?'}).`)
