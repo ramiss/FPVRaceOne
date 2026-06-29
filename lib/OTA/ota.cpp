@@ -453,14 +453,15 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     //   4. Free-heap snapshot — mbedTLS needs ~30-40 KB for handshake
     //      buffers.  In master mode AsyncWebServer ties up RAM and
     //      handshake allocations can fail mid-way.
-    DEBUG("[OTA] STA cfg: IP=%s gw=%s mask=%s dns1=%s dns2=%s ch=%d RSSI=%d dBm freeHeap=%u\n",
+    DEBUG("[OTA] STA cfg: IP=%s gw=%s mask=%s dns1=%s dns2=%s ch=%d RSSI=%d dBm freeHeap=%u maxBlk=%u\n",
           WiFi.localIP().toString().c_str(),
           WiFi.gatewayIP().toString().c_str(),
           WiFi.subnetMask().toString().c_str(),
           WiFi.dnsIP(0).toString().c_str(),
           WiFi.dnsIP(1).toString().c_str(),
           WiFi.channel(), WiFi.RSSI(),
-          (unsigned)ESP.getFreeHeap());
+          (unsigned)ESP.getFreeHeap(),
+          (unsigned)ESP.getMaxAllocHeap());
     {
         IPAddress ghIp;
         uint32_t dnsT0 = millis();
@@ -489,6 +490,22 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
 
     setState(STATE_CHECKING, "Querying GitHub for latest release...");
     setProgress(40);
+
+    // Release the DebugLogger ring buffer's backing allocation (~26 KB when
+    // full) right before TLS opens.  mbedTLS handshake needs ~16 KB of
+    // CONTIGUOUS heap for its IN buffer, and on master mode the heap is
+    // fragmented enough that ESP.getFreeHeap() reporting 70+ KB still can't
+    // satisfy that — visible as MBEDTLS_ERR_SSL_ALLOC_FAILED on the lastError
+    // line.  The log buffer is one large vector allocation, so dropping it
+    // returns a contiguous hole that mbedTLS can use.  We lose the in-RAM log
+    // history during the OTA window; UART output continues normally so nothing
+    // is lost for serial-attached debugging.  The buffer regrows as future
+    // DEBUG() calls push entries.
+    DEBUG("[OTA] freeing DebugLogger ring (freeHeap=%u maxBlk=%u before)\n",
+          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+    DebugLogger::getInstance().releaseBuffer();
+    DEBUG("[OTA] DebugLogger released (freeHeap=%u maxBlk=%u after)\n",
+          (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
 
     WiFiClientSecure client;
     client.setInsecure();   // GitHub release downloads redirect through CDNs;
@@ -559,10 +576,11 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         {
             char tlsBuf[128] = {0};
             int tlsErr = client.lastError(tlsBuf, sizeof(tlsBuf));
-            DEBUG("[OTA] Attempt %u/%u TLS: lastError=%d (%s), freeHeap=%u\n",
+            DEBUG("[OTA] Attempt %u/%u TLS: lastError=%d (%s), freeHeap=%u maxBlk=%u\n",
                   attempt, GITHUB_ATTEMPTS, tlsErr,
                   tlsBuf[0] ? tlsBuf : "(no message)",
-                  (unsigned)ESP.getFreeHeap());
+                  (unsigned)ESP.getFreeHeap(),
+                  (unsigned)ESP.getMaxAllocHeap());
         }
         http.end();
     }
@@ -773,6 +791,11 @@ void OtaManager::requestCheck() {
 }
 
 bool OtaManager::downloadAndFlash(const String& url, int target, const char* label, String& err) {
+    // Same rationale as checkForUpdate — free the log ring buffer to give
+    // mbedTLS contiguous heap for its handshake IN buffer.
+    DebugLogger::getInstance().releaseBuffer();
+    DEBUG("[OTA] %s: starting download (freeHeap=%u maxBlk=%u)\n",
+          label, (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
     WiFiClientSecure client;
     client.setInsecure();
     client.setTimeout(15);   // seconds — TLS handshake + read
@@ -830,6 +853,9 @@ bool OtaManager::preflightCheck(const String& fwUrl, const String& fsUrl, String
             err = String("Pre-flight: missing ") + t.label + " URL";
             return false;
         }
+        // Same rationale as checkForUpdate — drop the log ring buffer so the
+        // mbedTLS handshake has a contiguous IN buffer to allocate.
+        DebugLogger::getInstance().releaseBuffer();
         WiFiClientSecure client;
         client.setInsecure();
         client.setTimeout(15);   // seconds
