@@ -434,6 +434,59 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         return false;
     }
 
+    // ── Pre-flight network diagnostics ───────────────────────────────────
+    // Read-only probes that run once per check, dumped to the serial log so
+    // any future HTTPC_ERROR_CONNECTION_REFUSED (-1) can be triaged at a
+    // glance: was it DNS, TCP-blocking, TLS, or memory?
+    //
+    //   1. STA cfg dump — confirms DHCP gave us a usable router + DNS.
+    //      If gateway or dns1 read 0.0.0.0, the network never finished
+    //      handing us configuration and the rest will fail.
+    //   2. DNS probe — resolves api.github.com via WiFi.hostByName.  A
+    //      timeout / failure here is the most common cause of -1 on
+    //      home networks (ISP DNS unreachable, captive portal, IPv6-only
+    //      DNS responses).
+    //   3. Raw TCP-443 probe — opens a plain socket (no TLS) to the
+    //      resolved IP.  If this fails, outbound 443 is blocked at the
+    //      router or ISP and HTTPS can't possibly work.  If it succeeds,
+    //      any later failure is TLS-side.
+    //   4. Free-heap snapshot — mbedTLS needs ~30-40 KB for handshake
+    //      buffers.  In master mode AsyncWebServer ties up RAM and
+    //      handshake allocations can fail mid-way.
+    DEBUG("[OTA] STA cfg: IP=%s gw=%s mask=%s dns1=%s dns2=%s ch=%d RSSI=%d dBm freeHeap=%u\n",
+          WiFi.localIP().toString().c_str(),
+          WiFi.gatewayIP().toString().c_str(),
+          WiFi.subnetMask().toString().c_str(),
+          WiFi.dnsIP(0).toString().c_str(),
+          WiFi.dnsIP(1).toString().c_str(),
+          WiFi.channel(), WiFi.RSSI(),
+          (unsigned)ESP.getFreeHeap());
+    {
+        IPAddress ghIp;
+        uint32_t dnsT0 = millis();
+        int dnsOk = WiFi.hostByName("api.github.com", ghIp);
+        uint32_t dnsMs = millis() - dnsT0;
+        if (dnsOk > 0) {
+            DEBUG("[OTA] DNS api.github.com → %s (%u ms)\n",
+                  ghIp.toString().c_str(), (unsigned)dnsMs);
+            WiFiClient tcp;
+            uint32_t tcpT0 = millis();
+            bool tcpOk = tcp.connect(ghIp, 443, 5000);
+            uint32_t tcpMs = millis() - tcpT0;
+            if (tcpOk) {
+                DEBUG("[OTA] TCP probe %s:443 OK (%u ms) — outbound HTTPS reachable\n",
+                      ghIp.toString().c_str(), (unsigned)tcpMs);
+                tcp.stop();
+            } else {
+                DEBUG("[OTA] TCP probe %s:443 FAILED (%u ms) — router or ISP is blocking outbound 443\n",
+                      ghIp.toString().c_str(), (unsigned)tcpMs);
+            }
+        } else {
+            DEBUG("[OTA] DNS api.github.com FAILED (rc=%d, %u ms) — DHCP DNS server unreachable, filtered, or returning IPv6-only\n",
+                  dnsOk, (unsigned)dnsMs);
+        }
+    }
+
     setState(STATE_CHECKING, "Querying GitHub for latest release...");
     setProgress(40);
 
@@ -448,15 +501,17 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     // Two endpoints, two response shapes:
     //   * /releases/latest — single object, server-side filters out drafts AND
     //     prereleases.  Returns HTTP 404 if no qualifying release exists.
-    //   * /releases?per_page=10 — array of recent releases, includes drafts
+    //   * /releases?per_page=N — array of recent releases, includes drafts
     //     and prereleases.  Always 200 (with possibly empty array).
     const bool includePre = _config && _config->getOtaIncludePrereleases();
     String apiUrl = String("https://api.github.com/repos/") + UPDATE_REPO;
     if (includePre) {
-        // 10 entries is plenty — the first non-draft is what we want.  Drafts
+        // 5 entries is plenty — the first non-draft is what we want.  Drafts
         // are extremely rare in practice (only created via the web UI), so
-        // even one entry would usually suffice; 10 buys headroom.
-        apiUrl += "/releases?per_page=10";
+        // even one entry would usually suffice; 5 buys headroom while keeping
+        // the response small enough to stream-parse on a memory-constrained
+        // C6 even if release-note bodies grow large.
+        apiUrl += "/releases?per_page=5";
     } else {
         apiUrl += "/releases/latest";
     }
@@ -482,11 +537,33 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
             if (_multinode) _multinode->resumeFromOta();
             return false;
         }
+        uint32_t getT0 = millis();
         code = http.GET();
-        if (code > 0) break;   // got a real response (good or bad); stop retrying
-        DEBUG("[OTA] Attempt %u/%u failed (code=%d, %s)\n",
+        uint32_t getMs = millis() - getT0;
+        if (code > 0) {
+            DEBUG("[OTA] Attempt %u/%u HTTP %d (%u ms)\n",
+                  attempt, GITHUB_ATTEMPTS, code, (unsigned)getMs);
+            break;   // got a real response (good or bad); stop retrying
+        }
+        DEBUG("[OTA] Attempt %u/%u failed (code=%d, %s, %u ms)\n",
               attempt, GITHUB_ATTEMPTS, code,
-              HTTPClient::errorToString(code).c_str());
+              HTTPClient::errorToString(code).c_str(), (unsigned)getMs);
+        // Extra TLS-layer detail: HTTPClient's -1/-3/-11 codes are catch-all
+        // "pre-response failure" buckets.  WiFiClientSecure::lastError() reports
+        // the underlying mbedTLS code + message so we can distinguish:
+        //   • handshake out-of-memory (free heap small)
+        //   • cert chain rejection
+        //   • peer closed before reply (firewall/captive portal)
+        //   • DNS or routing issue (no socket ever opened)
+        // Heap snapshot at failure shows whether mbedTLS handshake exhausted RAM.
+        {
+            char tlsBuf[128] = {0};
+            int tlsErr = client.lastError(tlsBuf, sizeof(tlsBuf));
+            DEBUG("[OTA] Attempt %u/%u TLS: lastError=%d (%s), freeHeap=%u\n",
+                  attempt, GITHUB_ATTEMPTS, tlsErr,
+                  tlsBuf[0] ? tlsBuf : "(no message)",
+                  (unsigned)ESP.getFreeHeap());
+        }
         http.end();
     }
 
@@ -527,13 +604,45 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         return false;
     }
 
-    String body = http.getString();
-    http.end();
+    // Stream-parse straight from the HTTPS socket with a whitelist filter.
+    // Two problems the older `http.getString()` + 16 KB doc approach hit:
+    //   1. getString() reads the whole body into one Arduino String via
+    //      incremental concat() reallocs.  On a low/fragmented heap the
+    //      mid-read realloc fails silently and the body is returned
+    //      truncated — ArduinoJson then reports "IncompleteInput" because
+    //      the JSON ends mid-object.
+    //   2. The /releases?per_page=N response is dominated by fields we
+    //      never read — release-note bodies (markdown, often kB each),
+    //      author objects, every URL variant, reactions, asset metadata.
+    //      Even with `per_page=5`, the full payload can exceed 50 KB.
+    // The filter below tells ArduinoJson exactly which fields to keep.
+    // Everything else is skipped at the byte level — never allocated.
+    // Release notes are NOT requested here; the Release Notes button in
+    // the Firmware Update UI links to the GitHub release page, so pilots
+    // who want the full text get it there rather than via the device.
+    DynamicJsonDocument filter(512);
+    if (includePre) {
+        // Array endpoint — filter shape mirrors a single array entry; the
+        // parser applies it to every entry in the array.
+        filter[0]["tag_name"]   = true;
+        filter[0]["draft"]      = true;
+        filter[0]["prerelease"] = true;
+        filter[0]["assets"][0]["name"]                 = true;
+        filter[0]["assets"][0]["browser_download_url"] = true;
+    } else {
+        // Stable endpoint — single object response.
+        filter["tag_name"]   = true;
+        filter["draft"]      = true;
+        filter["prerelease"] = true;
+        filter["assets"][0]["name"]                 = true;
+        filter["assets"][0]["browser_download_url"] = true;
+    }
 
-    // Larger doc to fit a 10-entry releases array.  Stable channel uses far
-    // less; sizing for the worst case keeps the code paths uniform.
-    DynamicJsonDocument doc(16384);
-    DeserializationError jerr = deserializeJson(doc, body);
+    DynamicJsonDocument doc(4096);
+    DeserializationError jerr = deserializeJson(
+        doc, http.getStream(),
+        DeserializationOption::Filter(filter));
+    http.end();
     if (jerr) {
         err = String("JSON parse error: ") + jerr.c_str();
         setState(STATE_ERROR, err);
@@ -577,7 +686,10 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
 
     out.currentVersion = FIRMWARE_VERSION;
     out.latestVersion  = release["tag_name"].as<String>();
-    out.releaseNotes   = release["body"].as<String>();
+    // releaseNotes intentionally left empty — the JSON filter above drops the
+    // `body` field before parse to keep the response small.  The UI's "Release
+    // Notes ↗" link surfaces the full notes via the GitHub web page instead.
+    out.releaseNotes   = "";
     out.firmwareUrl    = "";
     out.filesystemUrl  = "";
 
