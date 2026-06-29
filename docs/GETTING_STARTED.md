@@ -54,7 +54,7 @@ racing, calibration, and configuration happens through the WiFi web UI.
 4. Password: **`fpvraceone`**
 5. Open a browser and go to: **`http://192.168.4.1`**
 
-> Your device can connect to FPVRaceOne WiFi and maintain cellular internet simultaneously on most platforms — no captive portal is used. (Samsung phones force a choice between local WiFi and cellular data; everything else lets both coexist.)
+> Most mobile devices can connect to FPVRaceOne WiFi and maintain cellular internet simultaneously. Unfortunately, Samsung phones force a choice between local WiFi and cellular data; everything else lets both coexist.
 
 The USB-C connector on the device is used for **power** and for **manual flashing** if needed. There is no user-facing USB control protocol in the current firmware — all racing, calibration, and configuration happens through the WiFi web UI.
 
@@ -107,7 +107,7 @@ Proper calibration is the most important step for accurate timing.
 ### Step 2: Record a Fly-Over
 
 1. Power on your drone and let the VTx warm up for 30 seconds
-2. Important: set your VTX to a fixed power level (not auto)
+2. Important: set your VTX to a fixed power level (not auto / dynamic)
 3. Click **Record** in the wizard
 4. Fly your drone through the gate at race speed — **exactly 3 passes** is ideal.
    Fly through the start gate to the next gate and back through the start gate (x3).
