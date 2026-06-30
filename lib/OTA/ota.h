@@ -2,6 +2,7 @@
 #define OTA_H
 
 #include <Arduino.h>
+#include <vector>
 
 class Config;
 class LapTimer;
@@ -37,13 +38,27 @@ public:
         STATE_ERROR             = 99
     };
 
+    // One installable version returned by checkForUpdate.  The check now
+    // surfaces up to the most-recent 5 entries from GitHub so the UI can
+    // present an inline picker — letting the user upgrade, downgrade, or
+    // re-install the current version.  `kind` is computed by semver-comparing
+    // each entry's tag against the running FIRMWARE_VERSION.
+    struct ReleaseOption {
+        enum Kind { UPGRADE = 0, CURRENT = 1, DOWNGRADE = 2 };
+        String tag;             // e.g. "v0.1.2-beta.14"
+        String firmwareUrl;     // browser_download_url for firmware asset
+        String filesystemUrl;   // browser_download_url for littlefs asset
+        Kind   kind;
+    };
+
     struct UpdateInfo {
         String currentVersion;   // FIRMWARE_VERSION
-        String latestVersion;    // tag_name from GitHub
-        bool   available;        // currentVersion < latestVersion
+        String latestVersion;    // tag_name of the first option (newest non-draft)
+        bool   available;        // first option is an UPGRADE
         String releaseNotes;     // release body (markdown, may be empty)
-        String firmwareUrl;      // browser_download_url for firmware asset
-        String filesystemUrl;    // browser_download_url for littlefs asset
+        String firmwareUrl;      // browser_download_url for firmware asset (first option)
+        String filesystemUrl;    // browser_download_url for littlefs asset (first option)
+        std::vector<ReleaseOption> options;   // up to 5, newest-first; populated on pre-release channel
     };
 
     // multinode is optional — if provided, the check/apply flows pause it

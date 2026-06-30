@@ -2734,6 +2734,12 @@ async function checkForUpdates() {
 
   _otaUpdateInfo = info;
 
+  // Render the inline version picker.  Even when the newest release is the
+  // currently-installed version (no upgrade available), the picker lets the
+  // user downgrade or re-install — so we render it whenever the device
+  // returned at least one option, regardless of `available`.
+  renderUpdateOptions(info);
+
   if (!info.available) {
     // The AP drop killed our SSE channel, so the device's terminal message
     // never reached the panel — write it explicitly so the user sees the
@@ -2759,50 +2765,108 @@ async function checkForUpdates() {
     return;
   }
 
-  // Update available — show the upgrade prompt.
-  const notes = (info.releaseNotes || '').trim();
-  const notesShort = notes.length > 600 ? notes.substring(0, 600) + '…' : notes;
-  const message =
-    `A new version is available:\n\n` +
-    `  Current: ${info.currentVersion}\n` +
-    `  Latest:  ${info.latestVersion}\n\n` +
-    (notesShort ? `Release notes:\n${notesShort}\n\n` : '') +
-    `The device will:\n` +
-    `  1. Join your home WiFi\n` +
-    `  2. Download the filesystem and firmware images (~1–3 minutes)\n` +
-    `  3. Reboot once the update is complete\n\n` +
-    `Your device may briefly disconnect — reconnect to FPVRaceOne_XXXX if so.\n\n` +
-    `Update now?`;
-
-  if (!confirm(message)) {
-    showUpdateStatus(`Update available: ${info.latestVersion} (declined)`, 100);
-    setUpdateBusy(false);
-    // Multi-node was left paused by the check phase so apply could reuse the
-    // STA radio / TCP slots without a gap.  The user declined, so wake the
-    // mesh back up immediately rather than waiting for the 5-minute safety
-    // auto-resume.  Fire-and-forget — there's nothing useful to do if the
-    // endpoint isn't there or the request fails.
-    fetch('/api/update/resume-multinode', { method: 'POST' }).catch(() => {});
-    return;
-  }
-
-  await applyUpdate();
+  // Update available — show the status banner and let the inline picker
+  // drive the actual Install.  No popup confirm; the user chooses which
+  // version to install (newest, older, or re-install current) from the
+  // Available Versions list right below the status panel.
+  showUpdateStatus(`Update available: ${info.latestVersion}. Pick a version below to install.`, 100);
+  setUpdateBusy(false);
 }
 
-async function applyUpdate() {
-  if (!_otaUpdateInfo || !_otaUpdateInfo.firmwareUrl || !_otaUpdateInfo.filesystemUrl) {
+// Renders the inline version picker into #updateOptionsList.  Each row is
+// one ReleaseOption from /api/update/status, with a colored badge keyed to
+// kind (0=upgrade green, 1=current gray "Installed", 2=downgrade amber)
+// and an Install button.  Downgrade clicks confirm() before applying so a
+// stray click doesn't silently move the device backward.
+function renderUpdateOptions(info) {
+  const panel = document.getElementById('updateOptionsPanel');
+  const list  = document.getElementById('updateOptionsList');
+  if (!panel || !list) return;
+  const options = Array.isArray(info && info.options) ? info.options : [];
+  if (options.length === 0) {
+    panel.style.display = 'none';
+    list.innerHTML = '';
+    return;
+  }
+  // Build rows.  innerHTML rather than DOM API because the row count is
+  // tiny (≤5) and we control every interpolated value (tag from GitHub
+  // releases is alphanumeric + dots/dashes, URLs are pre-validated by
+  // the firmware before they hit this payload).
+  const BADGES = {
+    0: { label: 'Upgrade',   bg: '#2e7d32', fg: '#fff' },   // green
+    1: { label: 'Installed', bg: '#5a5a5a', fg: '#fff' },   // gray
+    2: { label: 'Downgrade', bg: '#b97400', fg: '#fff' },   // amber
+  };
+  const BUTTON_LABELS = { 0: 'Install', 1: 'Re-install', 2: 'Install' };
+  list.innerHTML = options.map((o, idx) => {
+    const b = BADGES[o.kind] || BADGES[0];
+    const btn = BUTTON_LABELS[o.kind] || 'Install';
+    const tag = String(o.tag || '').replace(/[<>&"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;'}[c]));
+    return (
+      `<div style="display:flex; align-items:center; gap:10px; padding:8px 4px; border-top:${idx === 0 ? 'none' : '1px solid var(--bg-primary)'};">` +
+        `<span style="font-family:monospace; font-size:13px; flex:1;">${tag}</span>` +
+        `<span style="background:${b.bg}; color:${b.fg}; padding:2px 8px; border-radius:10px; font-size:11px; font-weight:600;">${b.label}</span>` +
+        `<button type="button" onclick="applyUpdateOption(${idx})" class="update-btn update-btn-primary" style="padding:4px 12px; font-size:13px;">${btn}</button>` +
+      `</div>`
+    );
+  }).join('');
+  panel.style.display = '';
+}
+
+// Apply a specific option by its index in _otaUpdateInfo.options.  Wired up
+// from each row's Install button by renderUpdateOptions().  Downgrades get
+// an extra confirm() so a misclick can't silently move the device backward.
+async function applyUpdateOption(idx) {
+  const info = _otaUpdateInfo;
+  const opt  = info && Array.isArray(info.options) ? info.options[idx] : null;
+  if (!opt || !opt.firmwareUrl || !opt.filesystemUrl) {
+    alert('That version is no longer available. Click Check for Updates again.');
+    return;
+  }
+  if (opt.kind === 2) {
+    if (!confirm(
+      `Downgrade to ${opt.tag}?\n\n` +
+      `This is OLDER than the version currently installed (${info.currentVersion}). ` +
+      `Older builds may be missing features or bug fixes from the current build, and ` +
+      `the saved config / pilot data formats may not be backward-compatible.\n\n` +
+      `Proceed with downgrade?`
+    )) return;
+  } else if (opt.kind === 1) {
+    if (!confirm(
+      `Re-install the current version (${opt.tag})?\n\n` +
+      `Useful for recovering from a corrupted filesystem partition. ` +
+      `Your saved config / pilot data is preserved.\n\nProceed?`
+    )) return;
+  }
+  await applyUpdate(opt);
+}
+
+async function applyUpdate(opt) {
+  // opt may be a ReleaseOption from the picker, or omitted for the legacy
+  // "apply the newest" path used by status-recovery flows that don't have
+  // a picker selection yet.  Either way, both URLs must be present.
+  const info  = _otaUpdateInfo;
+  const fwUrl = (opt && opt.firmwareUrl)   || (info && info.firmwareUrl);
+  const fsUrl = (opt && opt.filesystemUrl) || (info && info.filesystemUrl);
+  const tag   = (opt && opt.tag)           || (info && info.latestVersion) || '';
+  if (!fwUrl || !fsUrl) {
     alert('No update available to apply. Check for updates first.');
     return;
   }
+  // Hide the picker as soon as an install starts so a stray second click on
+  // a different row can't post a second /api/update/apply mid-flight.  It
+  // re-shows after the next successful Check for Updates.
+  const optsPanel = document.getElementById('updateOptionsPanel');
+  if (optsPanel) optsPanel.style.display = 'none';
   setUpdateBusy(true, 'Updating…');
-  showUpdateStatus('Submitting update request…', 0);
+  showUpdateStatus(`Submitting update request for ${tag}…`, 0);
   try {
     const r = await fetch('/api/update/apply', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        firmwareUrl:   _otaUpdateInfo.firmwareUrl,
-        filesystemUrl: _otaUpdateInfo.filesystemUrl,
+        firmwareUrl:   fwUrl,
+        filesystemUrl: fsUrl,
       }),
     });
     const data = await r.json().catch(() => ({}));
