@@ -520,44 +520,37 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     // IncompleteInput" when the read window expired mid-stream.
     http.setTimeout(20000);
 
-    // Two endpoints, two response shapes:
-    //   * /releases/latest — single object, server-side filters out drafts AND
-    //     prereleases.  Returns HTTP 404 if no qualifying release exists.
-    //   * /releases?per_page=N — array of recent releases, includes drafts
-    //     and prereleases.  Always 200 (with possibly empty array).
-    const bool includePre = _config && _config->getOtaIncludePrereleases();
-    String apiUrl = String("https://api.github.com/repos/") + UPDATE_REPO;
-    if (includePre) {
-        // 5 entries is plenty — the first non-draft is what we want.  Drafts
-        // are extremely rare in practice (only created via the web UI), so
-        // even one entry would usually suffice; 5 buys headroom while keeping
-        // the response small enough to stream-parse on a memory-constrained
-        // C6 even if release-note bodies grow large.
-        apiUrl += "/releases?per_page=5";
-    } else {
-        apiUrl += "/releases/latest";
-    }
+    // Always hit the array endpoint; we apply the channel filter (Published
+    // vs Pre-release) ourselves below.  GitHub's /releases/latest endpoint
+    // would server-side filter out prereleases and drafts, but its single-
+    // object shape can't surface a 5-entry picker, and switching to the
+    // array endpoint costs us essentially nothing now that the response is
+    // chunk-decoded into a String and filter-parsed into a small doc.
+    //
+    // per_page=5 matches the picker size.  If your repo alternates stable
+    // and pre-release tags heavily, this may not yield 5 of the selected
+    // channel.  That's accurate (you really don't have 5 stable releases
+    // yet); bump per_page later if it becomes an issue.
+    //
+    // _config->getOtaIncludePrereleases() is now interpreted as a channel
+    // selector: 0=Published (stable releases only), 1=Pre-releases (only).
+    // Either/or rather than the old "also include" toggle semantics.
+    const bool prereleaseChannel = _config && _config->getOtaIncludePrereleases();
+    String apiUrl = String("https://api.github.com/repos/") + UPDATE_REPO +
+                    "/releases?per_page=5";
     // Build the JSON filter ONCE before the retry loop — the same filter
     // shape applies to every attempt.  Whitelisting only the fields we
     // actually read drops ~80% of the payload at parse-time (release-note
     // bodies, author objects, URL variants, reactions) so the doc stays tiny.
+    // Both Published and Pre-release channels use the array endpoint now,
+    // so the filter is always the array shape: filter[0]["..."] applies to
+    // every entry in the array.
     DynamicJsonDocument filter(512);
-    if (includePre) {
-        // Array endpoint — filter shape mirrors a single array entry; the
-        // parser applies it to every entry in the array.
-        filter[0]["tag_name"]   = true;
-        filter[0]["draft"]      = true;
-        filter[0]["prerelease"] = true;
-        filter[0]["assets"][0]["name"]                 = true;
-        filter[0]["assets"][0]["browser_download_url"] = true;
-    } else {
-        // Stable endpoint — single object response.
-        filter["tag_name"]   = true;
-        filter["draft"]      = true;
-        filter["prerelease"] = true;
-        filter["assets"][0]["name"]                 = true;
-        filter["assets"][0]["browser_download_url"] = true;
-    }
+    filter[0]["tag_name"]   = true;
+    filter[0]["draft"]      = true;
+    filter[0]["prerelease"] = true;
+    filter[0]["assets"][0]["name"]                 = true;
+    filter[0]["assets"][0]["browser_download_url"] = true;
     DynamicJsonDocument doc(4096);
 
     // Retry up to 3 times.  The retry covers BOTH layers:
@@ -656,31 +649,8 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         http.end();
     }
 
-    // Stable channel only: 404 means no qualifying full release exists.
-    // Pre-release channel uses the array endpoint, which never 404s for an
-    // existing repo — an empty array is handled below.
-    if (code == 404 && !includePre) {
-        http.end();
-        out.currentVersion = FIRMWARE_VERSION;
-        out.latestVersion  = "";
-        out.releaseNotes   = "";
-        out.firmwareUrl    = "";
-        out.filesystemUrl  = "";
-        out.available      = false;
-        _lastInfo      = out;
-        _lastInfoValid = true;
-        // /releases/latest 404 means GitHub has no qualifying *stable* release.
-        // Could be a brand-new repo OR could be a repo that's only ever shipped
-        // pre-releases (the common case for beta builds).  Hint at the toggle
-        // so a -beta user knows what to flip.
-        setState(STATE_UP_TO_DATE,
-                 "No stable releases published yet for this device's firmware repo. "
-                 "If pre-releases are available, enable \"Include pre-releases\" above to see them.");
-        setProgress(100);
-        disconnectFromHomeWifi();
-        if (_multinode) _multinode->resumeFromOta();
-        return true;
-    }
+    // 404 on the array endpoint only happens for a non-existent repo —
+    // empty-array (no releases) returns HTTP 200 with [], handled after parse.
     if (code != 200) {
         // Any other non-200 (rate limit, auth, server error) is a real failure.
         // Negative codes are HTTPClient pre-response errors (TLS, DNS, timeout);
@@ -704,51 +674,54 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         return false;
     }
 
-    // Pick the release object to inspect.  In stable mode the response is a
-    // single object.  In prerelease mode it's an array; pick the first
-    // non-draft entry (drafts are private placeholders, never installable).
+    // Pick the first release object that matches the selected channel.  The
+    // response is always an array of recent releases (newest-first); we walk
+    // it and pick the first non-draft whose `prerelease` flag matches the
+    // channel selector.  Drafts are private placeholders and never
+    // installable, so they're always skipped.
+    JsonArray arr = doc.as<JsonArray>();
+    // Diagnostic: log every entry GitHub returned with its draft +
+    // prerelease + tag.  If pilots see "No releases" while they have
+    // releases on the repo, this tells us exactly why — empty array,
+    // all drafts, or all on the wrong channel.
+    DEBUG("[OTA] /releases returned %u entries (channel=%s)\n",
+          (unsigned)arr.size(), prereleaseChannel ? "Pre-releases" : "Published");
+    unsigned idx = 0;
+    for (JsonObject r : arr) {
+        DEBUG("[OTA]   [%u] tag=%s draft=%d prerelease=%d assets=%u\n",
+              idx++,
+              r["tag_name"].as<const char*>() ? r["tag_name"].as<const char*>() : "(none)",
+              r["draft"].as<bool>() ? 1 : 0,
+              r["prerelease"].as<bool>() ? 1 : 0,
+              (unsigned)r["assets"].as<JsonArray>().size());
+    }
     JsonObject release;
-    if (includePre) {
-        JsonArray arr = doc.as<JsonArray>();
-        // Diagnostic: log every entry GitHub returned with its draft +
-        // prerelease + tag.  If pilots see "No releases published yet" while
-        // they have published releases on the repo, this tells us exactly
-        // why — empty array, all drafts, or all rejected for some reason.
-        DEBUG("[OTA] /releases returned %u entries\n", (unsigned)arr.size());
-        unsigned idx = 0;
-        for (JsonObject r : arr) {
-            DEBUG("[OTA]   [%u] tag=%s draft=%d prerelease=%d assets=%u\n",
-                  idx++,
-                  r["tag_name"].as<const char*>() ? r["tag_name"].as<const char*>() : "(none)",
-                  r["draft"].as<bool>() ? 1 : 0,
-                  r["prerelease"].as<bool>() ? 1 : 0,
-                  (unsigned)r["assets"].as<JsonArray>().size());
-        }
-        for (JsonObject r : arr) {
-            if (!r["draft"].as<bool>()) {
-                release = r;
-                break;
-            }
-        }
-        if (release.isNull()) {
-            // Empty array, or every entry was a draft.  Treat as "no releases
-            // yet" — same UX as the stable channel's 404 path.
-            out.currentVersion = FIRMWARE_VERSION;
-            out.latestVersion  = "";
-            out.releaseNotes   = "";
-            out.firmwareUrl    = "";
-            out.filesystemUrl  = "";
-            out.available      = false;
-            _lastInfo      = out;
-            _lastInfoValid = true;
-            setState(STATE_UP_TO_DATE, "No releases published yet for this device's firmware repo.");
-            setProgress(100);
-            disconnectFromHomeWifi();
-            if (_multinode) _multinode->resumeFromOta();
-            return true;
-        }
-    } else {
-        release = doc.as<JsonObject>();
+    for (JsonObject r : arr) {
+        if (r["draft"].as<bool>()) continue;
+        if (r["prerelease"].as<bool>() != prereleaseChannel) continue;
+        release = r;
+        break;
+    }
+    if (release.isNull()) {
+        // No entry matched (empty array, all drafts, or every entry was on
+        // the OTHER channel).  Treat as "no releases yet on this channel".
+        out.currentVersion = FIRMWARE_VERSION;
+        out.latestVersion  = "";
+        out.releaseNotes   = "";
+        out.firmwareUrl    = "";
+        out.filesystemUrl  = "";
+        out.available      = false;
+        _lastInfo      = out;
+        _lastInfoValid = true;
+        setState(STATE_UP_TO_DATE,
+                 prereleaseChannel
+                     ? "No pre-releases published yet for this device's firmware repo."
+                     : "No published releases yet for this device's firmware repo. "
+                       "If pre-releases are available, switch Release Channel to \"Pre-releases\" above to see them.");
+        setProgress(100);
+        disconnectFromHomeWifi();
+        if (_multinode) _multinode->resumeFromOta();
+        return true;
     }
 
     out.currentVersion = FIRMWARE_VERSION;
@@ -804,14 +777,13 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         opt.kind = kindFor(opt.tag);
         out.options.push_back(opt);
     };
-    if (includePre) {
-        JsonArray arr = doc.as<JsonArray>();
-        for (JsonObject r : arr) {
-            if (r["draft"].as<bool>()) continue;
-            pushOption(r);
-        }
-    } else {
-        pushOption(release);
+    // Walk the array, push every non-draft entry on the matching channel.
+    // Drafts and entries on the other channel are silently skipped.  `arr`
+    // is the same JsonArray we already iterated for diagnostic logging above.
+    for (JsonObject r : arr) {
+        if (r["draft"].as<bool>()) continue;
+        if (r["prerelease"].as<bool>() != prereleaseChannel) continue;
+        pushOption(r);
     }
 
     // Single semver comparison drives both the `available` flag and the

@@ -2191,8 +2191,11 @@ function buildConfigSnapshotFromUI() {
     mnClientRaceAudio: document.getElementById('mnClientRaceAudioToggle')?.checked ? 1 : 0,
     devMode: document.getElementById('devModeToggle')?.checked ? 1 : 0,
 
-    // OTA
-    otaIncludePrereleases: document.getElementById('otaIncludePrereleasesToggle')?.checked ? 1 : 0,
+    // OTA — channel selector: 0=Published (stable), 1=Pre-releases.  Field
+    // name is kept as otaIncludePrereleases for on-disk config compatibility
+    // with older firmwares, but the semantics are now "channel select"
+    // (either/or) rather than the previous "include in addition" toggle.
+    otaIncludePrereleases: parseInt(document.getElementById('otaChannelSelect')?.value || '0', 10) || 0,
 
   };
 
@@ -2754,9 +2757,13 @@ async function checkForUpdates() {
     // already did the thing the hint asks for and the message is misleading
     // (the real cause then is "no pre-releases tagged yet, or all drafts").
     const onBeta = /-(?:beta|rc|alpha|dev|dirty)/i.test(info.currentVersion || '');
-    const prereleaseToggleOn = !!document.getElementById('otaIncludePrereleasesToggle')?.checked;
-    const hintIfBeta = onBeta && !info.latestVersion && !prereleaseToggleOn
-      ? '\nYou\'re on a pre-release build — enable "Include pre-releases" above to also see beta / RC builds.'
+    const channelIsPrerelease = (document.getElementById('otaChannelSelect')?.value === '1');
+    // Only suggest switching channel when the user is on a -beta build AND
+    // they're looking at the Published channel (and got nothing).  If they're
+    // already on Pre-releases and got nothing, the issue is "no pre-releases
+    // tagged yet" and the channel suggestion would be wrong.
+    const hintIfBeta = onBeta && !info.latestVersion && !channelIsPrerelease
+      ? '\nYou\'re on a pre-release build — switch Release Channel to "Pre-releases" above to see beta / RC builds.'
       : '';
     const msg = (info.message || `You're on the latest version (${info.currentVersion || '?'}).`)
                 + hintIfBeta;
@@ -7020,11 +7027,9 @@ function openSettingsModal() {
           if (_pnd) _pnd.style.cursor = config.devMode ? 'pointer' : 'default';
         }
 
-        const otaPreToggle = document.getElementById('otaIncludePrereleasesToggle');
-        const otaPreLabel  = document.getElementById('otaIncludePrereleasesLabel');
-        if (otaPreToggle && config.otaIncludePrereleases !== undefined) {
-          otaPreToggle.checked = !!config.otaIncludePrereleases;
-          if (otaPreLabel) otaPreLabel.textContent = config.otaIncludePrereleases ? 'On' : 'Off';
+        const otaChannelSel = document.getElementById('otaChannelSelect');
+        if (otaChannelSel && config.otaIncludePrereleases !== undefined) {
+          otaChannelSel.value = config.otaIncludePrereleases ? '1' : '0';
         }
 
         // All UI fields populated — now unlock staging so user changes can be tracked
