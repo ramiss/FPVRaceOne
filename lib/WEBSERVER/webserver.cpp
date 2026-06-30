@@ -1123,6 +1123,21 @@ void Webserver::startServices() {
             body += ",\"releaseNotes\":\""    + notes                + "\"";
             body += ",\"firmwareUrl\":\""     + info.firmwareUrl     + "\"";
             body += ",\"filesystemUrl\":\""   + info.filesystemUrl   + "\"";
+            // Inline version picker payload — the panel renders one row per
+            // entry with a colored badge (upgrade/current/downgrade) and an
+            // Install button.  kind: 0=upgrade, 1=current, 2=downgrade.
+            // URLs are not JSON-escaped: GitHub asset URLs are pure ASCII,
+            // no quote or backslash characters.
+            body += ",\"options\":[";
+            for (size_t i = 0; i < info.options.size(); ++i) {
+                const OtaManager::ReleaseOption& o = info.options[i];
+                if (i > 0) body += ",";
+                body += "{\"tag\":\"" + o.tag + "\"";
+                body += ",\"kind\":" + String((int)o.kind);
+                body += ",\"firmwareUrl\":\"" + o.firmwareUrl + "\"";
+                body += ",\"filesystemUrl\":\"" + o.filesystemUrl + "\"}";
+            }
+            body += "]";
         }
         body += "}";
         request->send(200, "application/json", body);

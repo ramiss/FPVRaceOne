@@ -598,24 +598,38 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
                 // a retry case.  Let the post-loop handlers deal with it.
                 break;
             }
-            // 200 — try to parse the stream.  Reset the doc on retries so a
+            // 200 — read the body via getString() so HTTPClient handles
+            // any Transfer-Encoding: chunked framing for us, then parse from
+            // the String.  Earlier we stream-parsed via http.getStream() to
+            // save memory, but that returns the RAW TCP/TLS stream with the
+            // chunk-size hex headers (e.g. "1FE0\r\n[{...") still in-band —
+            // ArduinoJson sees those as garbage and reports IncompleteInput
+            // within 20 ms.  getString() decodes chunks transparently.
+            //
+            // Memory: 5 releases of /releases output is ~25-30 KB wire size.
+            // The DebugLogger release above frees ~26 KB of contiguous heap,
+            // bringing maxBlk to 65-75 KB — comfortably enough for the
+            // String + the filtered 4 KB doc.  Reset the doc on retries so a
             // partial-parse from the previous attempt doesn't leak in.
-            doc.clear();
             uint32_t parseT0 = millis();
-            jerr = deserializeJson(doc, http.getStream(),
+            String body = http.getString();
+            http.end();
+            doc.clear();
+            jerr = deserializeJson(doc, body,
                                    DeserializationOption::Filter(filter));
             uint32_t parseMs = millis() - parseT0;
-            http.end();
             if (!jerr) {
-                DEBUG("[OTA] Attempt %u/%u parsed OK (%u ms)\n",
-                      attempt, GITHUB_ATTEMPTS, (unsigned)parseMs);
+                DEBUG("[OTA] Attempt %u/%u parsed OK (%u bytes, %u ms)\n",
+                      attempt, GITHUB_ATTEMPTS, (unsigned)body.length(),
+                      (unsigned)parseMs);
                 break;
             }
-            // Parse failed — typically IncompleteInput on a stream that
-            // closed before the JSON object terminated.  Treat as a
-            // transient error and retry the whole GET.
-            DEBUG("[OTA] Attempt %u/%u parse failed (%s, %u ms) — will retry\n",
-                  attempt, GITHUB_ATTEMPTS, jerr.c_str(), (unsigned)parseMs);
+            // Parse failed — could be truncation on a heap-pressure
+            // getString() (rare now), or a malformed response from GitHub.
+            // Treat as transient and retry the whole GET.
+            DEBUG("[OTA] Attempt %u/%u parse failed (%s, body=%u bytes, %u ms) — will retry\n",
+                  attempt, GITHUB_ATTEMPTS, jerr.c_str(),
+                  (unsigned)body.length(), (unsigned)parseMs);
             code = -1;   // force the post-loop guard to treat this as a failure
             continue;
         }
@@ -745,6 +759,7 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     out.releaseNotes   = "";
     out.firmwareUrl    = "";
     out.filesystemUrl  = "";
+    out.options.clear();
 
     JsonArray assets = release["assets"].as<JsonArray>();
     for (JsonObject asset : assets) {
@@ -761,6 +776,42 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
         disconnectFromHomeWifi();
         if (_multinode) _multinode->resumeFromOta();
         return false;
+    }
+
+    // Build the full options list — every non-draft entry with both required
+    // assets becomes an installable choice the UI can offer.  In stable mode
+    // we only have one release so options[] is a single CURRENT/UPGRADE row.
+    // In prerelease mode the array can hold up to 5 (per_page=5 set above).
+    auto kindFor = [&](const String& tag) {
+        int c = compareSemver(out.currentVersion, tag);
+        if (c < 0) return ReleaseOption::UPGRADE;
+        if (c > 0) return ReleaseOption::DOWNGRADE;
+        return ReleaseOption::CURRENT;
+    };
+    auto pushOption = [&](JsonObject r) {
+        ReleaseOption opt;
+        opt.tag = r["tag_name"].as<String>();
+        JsonArray a = r["assets"].as<JsonArray>();
+        for (JsonObject asset : a) {
+            String name = asset["name"].as<String>();
+            String aurl = asset["browser_download_url"].as<String>();
+            if (name == UPDATE_FW_ASSET) opt.firmwareUrl   = aurl;
+            else if (name == UPDATE_FS_ASSET) opt.filesystemUrl = aurl;
+        }
+        // Skip rows that aren't installable — missing either asset means
+        // the release isn't a complete pair and Install would fail later.
+        if (opt.firmwareUrl.length() == 0 || opt.filesystemUrl.length() == 0) return;
+        opt.kind = kindFor(opt.tag);
+        out.options.push_back(opt);
+    };
+    if (includePre) {
+        JsonArray arr = doc.as<JsonArray>();
+        for (JsonObject r : arr) {
+            if (r["draft"].as<bool>()) continue;
+            pushOption(r);
+        }
+    } else {
+        pushOption(release);
     }
 
     // Single semver comparison drives both the `available` flag and the
