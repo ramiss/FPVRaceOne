@@ -792,42 +792,6 @@ bool MultiNodeManager::updateNodeChannel(uint8_t nodeId, uint8_t bandIndex, uint
     return false;
 }
 
-String MultiNodeManager::getNodesToJson() const {
-    DynamicJsonDocument doc(8192);  // enlarged for full lap history
-    JsonArray arr = doc.createNestedArray("nodes");
-    for (const auto& n : _nodes) {
-        JsonObject o        = arr.createNestedObject();
-        o["nodeId"]         = n.nodeId;
-        o["pilotName"]      = n.pilotName;
-        o["pilotColor"]     = n.pilotColor;
-        o["bandIndex"]      = n.bandIndex;
-        o["channelIndex"]   = n.channelIndex;
-        o["frequency"]      = n.frequency;
-        o["online"]         = n.online;
-        o["running"]                 = n.running;
-        o["quitEarly"]               = n.quitEarly;
-        o["independent"]             = n.independent;
-        o["skipEnabled"]             = n.skipEnabled;
-        o["excludedFromCurrentRace"] = n.excludedFromCurrentRace;
-        o["lapCount"]       = n.lapCount;
-        o["clientIP"]       = n.clientIP;
-        o["mac"]            = n.macAddress;
-        o["apSuffix"]       = n.apSuffix;
-        o["enterRssi"]      = n.enterRssi;
-        o["exitRssi"]       = n.exitRssi;
-        JsonArray laps      = o.createNestedArray("laps");
-        // Send all stored laps so the race view can compute full stats
-        for (size_t i = 0; i < n.laps.size(); i++) {
-            JsonObject l    = laps.createNestedObject();
-            l["lapNumber"]  = n.laps[i].lapNumber;
-            l["lapTimeMs"]  = n.laps[i].lapTimeMs;
-        }
-    }
-    String out;
-    serializeJson(doc, out);
-    return out;
-}
-
 void MultiNodeManager::_broadcastRacePreArm() {
     for (const auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
@@ -1120,16 +1084,6 @@ void MultiNodeManager::_broadcastRaceStop() {
     // Republish so the master UI + connected client Race Views reflect the
     // post-stop state without waiting for the 2 s poll / next heartbeat.
     if (_webserver) _webserver->pushMultiNodeState();
-}
-
-String MultiNodeManager::getMasterStatusJson() const {
-    DynamicJsonDocument doc(128);
-    doc["connected"] = _masterConnected;
-    doc["nodeId"]    = _myNodeId;
-    doc["masterIP"]  = MULTINODE_MASTER_IP;
-    String out;
-    serializeJson(doc, out);
-    return out;
 }
 
 // ── Master-discovery promiscuous sniffer ─────────────────────────────────────

@@ -155,7 +155,6 @@ public:
     void   setQuitPending();       // queue quit notification to master
     void   pauseReconnect(uint32_t durationMs);  // pause registration for durationMs (client, called on kick)
     bool   isMasterRaceActive() const { return _masterRaceActive; }
-    String getNodesToJson() const;
     String scanForNodesJson();   // WiFi scan — call from Core 0 only
 
     // ── Status getters ──
@@ -164,7 +163,6 @@ public:
     bool    isMasterConnected()        const { return _masterConnected; }
     bool    consumeClientStateChanged()      { bool v = _clientStateChangedFlag; _clientStateChangedFlag = false; return v; }
     uint8_t getMyNodeId()       const { return _myNodeId; }
-    String  getMasterStatusJson() const;
 
     const std::vector<NodeInfo>& getNodes() const { return _nodes; }
 
