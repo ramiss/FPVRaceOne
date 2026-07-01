@@ -75,6 +75,40 @@ static const String _buildTimestamp = BUILD_TIMESTAMP_STR;
 static uint8_t* _htmlBuf = nullptr;
 static size_t   _htmlLen = 0;
 
+// Read /index.html from LittleFS into the module-static _htmlBuf.  Called from
+// init() with a clean heap AND from startServices() as a fallback if init()
+// couldn't run (e.g. LittleFS not yet mounted).  Idempotent — no-op if the
+// cache is already built.  Chunked reads via a stack buffer avoid the silent
+// truncation that f.readString() suffers on large files.
+static void _buildHtmlCache(const char* callerTag) {
+    if (_htmlBuf) return;
+    File f = LittleFS.open("/index.html", "r");
+    if (!f) {
+        DEBUG("HTML cache (%s): /index.html not found\n", callerTag);
+        return;
+    }
+    size_t fileSize = f.size();
+    _htmlBuf = (uint8_t*)malloc(fileSize + 1);
+    if (!_htmlBuf) {
+        DEBUG("HTML cache (%s): malloc(%u) failed (heap free: %u, max block: %u)\n",
+              callerTag, fileSize + 1, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
+        f.close();
+        return;
+    }
+    size_t totalRead = 0;
+    uint8_t chunk[512];
+    size_t n;
+    while ((n = f.read(chunk, sizeof(chunk))) > 0 && totalRead + n <= fileSize) {
+        memcpy(_htmlBuf + totalRead, chunk, n);
+        totalRead += n;
+    }
+    _htmlBuf[totalRead] = 0;
+    _htmlLen = totalRead;
+    DEBUG("HTML cache (%s): %u bytes (heap free: %u)\n",
+          callerTag, _htmlLen, ESP.getFreeHeap());
+    f.close();
+}
+
 static const char *wifi_hostname = "FPVRaceOne";
 static const char *wifi_ap_ssid_prefix = "FPVRaceOne";
 static const char *wifi_ap_password = "fpvraceone";
@@ -265,33 +299,7 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     // storage.init() in main.cpp.  By the time startServices() runs, WiFi+LwIP have
     // consumed ~100 kB of heap and a single 71 kB malloc fails (silently truncating
     // the string).  Building it now gives us a clean heap.
-    {
-        File f = LittleFS.open("/index.html", "r");
-        if (f) {
-            size_t fileSize = f.size();
-            // Explicit malloc — failure is a hard NULL, not silent truncation.
-            _htmlBuf = (uint8_t*)malloc(fileSize + 1);
-            if (_htmlBuf) {
-                size_t totalRead = 0;
-                uint8_t chunk[512];
-                size_t n;
-                while ((n = f.read(chunk, sizeof(chunk))) > 0 && totalRead + n <= fileSize) {
-                    memcpy(_htmlBuf + totalRead, chunk, n);
-                    totalRead += n;
-                }
-                _htmlBuf[totalRead] = 0;
-                _htmlLen = totalRead;
-                DEBUG("HTML cache built in init(): %u bytes (heap free: %u)\n",
-                      _htmlLen, ESP.getFreeHeap());
-            } else {
-                DEBUG("HTML cache: malloc(%u) failed (heap free: %u, max block: %u)\n",
-                      fileSize + 1, ESP.getFreeHeap(), ESP.getMaxAllocHeap());
-            }
-            f.close();
-        } else {
-            DEBUG("HTML cache: /index.html not found in init()\n");
-        }
-    }
+    _buildHtmlCache("init");
 }
 
 void Webserver::setTransportManager(TransportManager *tm) {
@@ -996,29 +1004,8 @@ void Webserver::startServices() {
 
     // HTML cache is normally built in init() before WiFi starts (clean heap).
     // Fall back to building it here only if init() didn't run or LittleFS wasn't
-    // ready at that time.
-    if (!_htmlBuf) {
-        File f = LittleFS.open("/index.html", "r");
-        if (f) {
-            size_t fileSize = f.size();
-            _htmlBuf = (uint8_t*)malloc(fileSize + 1);
-            if (_htmlBuf) {
-                size_t totalRead = 0;
-                uint8_t chunk[512];
-                size_t n;
-                while ((n = f.read(chunk, sizeof(chunk))) > 0 && totalRead + n <= fileSize) {
-                    memcpy(_htmlBuf + totalRead, chunk, n);
-                    totalRead += n;
-                }
-                _htmlBuf[totalRead] = 0;
-                _htmlLen = totalRead;
-                DEBUG("HTML cache fallback: %u bytes\n", _htmlLen);
-            } else {
-                DEBUG("HTML cache fallback: malloc(%u) failed\n", fileSize + 1);
-            }
-            f.close();
-        }
-    }
+    // ready at that time — _buildHtmlCache is a no-op if the cache already exists.
+    _buildHtmlCache("fallback");
 
     // Initialize storage (SD card or LittleFS fallback)
     storage->init();
@@ -1519,10 +1506,11 @@ EEPROM:\n\
         request->send(200, "text/plain", "printed to serial");
     });
 
-    // Serve audio files from SD card voice directories (sounds_default, sounds_rachel, etc.)
-    server.on("^\\/sounds_.+\\/.+\\.mp3$", HTTP_GET, [this](AsyncWebServerRequest *request) {
+    // Serve mp3 audio from either /sounds/<file>.mp3 (legacy) or
+    // /sounds_<voice>/<file>.mp3 (per-voice packs).  Single regex matches both.
+    server.on("^\\/sounds(_[^\\/]+)?\\/.+\\.mp3$", HTTP_GET, [this](AsyncWebServerRequest *request) {
         String path = request->url();
-        
+
 #ifdef ESP32S3
         // Try SD card first if available
         if (storage->isSDAvailable() && SD.exists(path)) {
@@ -1531,39 +1519,14 @@ EEPROM:\n\
             return;
         }
 #endif
-        
+
         // Fall back to LittleFS
         if (LittleFS.exists(path)) {
             DEBUG("Serving audio from LittleFS: %s\n", path.c_str());
             request->send(LittleFS, path, "audio/mpeg");
             return;
         }
-        
-        // File not found
-        DEBUG("Audio file not found: %s\n", path.c_str());
-        request->send(404, "text/plain", "Audio file not found");
-    });
-    
-    // Serve audio files from SD /sounds/ directory (legacy/fallback)
-    server.on("^\\/sounds\\/.+\\.mp3$", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        String path = request->url();
-        
-#ifdef ESP32S3
-        // Try SD card first if available
-        if (storage->isSDAvailable() && SD.exists(path)) {
-            DEBUG("Serving audio from SD: %s\n", path.c_str());
-            request->send(SD, path, "audio/mpeg");
-            return;
-        }
-#endif
-        
-        // Fall back to LittleFS
-        if (LittleFS.exists(path)) {
-            DEBUG("Serving audio from LittleFS: %s\n", path.c_str());
-            request->send(LittleFS, path, "audio/mpeg");
-            return;
-        }
-        
+
         // File not found
         DEBUG("Audio file not found: %s\n", path.c_str());
         request->send(404, "text/plain", "Audio file not found");
