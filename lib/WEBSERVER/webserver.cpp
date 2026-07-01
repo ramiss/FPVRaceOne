@@ -333,20 +333,40 @@ void Webserver::sendRaceStateEvent(const char* state) {
 }
 
 // Escape a string for JSON — only handles the common cases (quotes, backslash, control).
-static String _jsonEscape(const String& s) {
-    String out;
-    out.reserve(s.length() + 4);
+//
+// Appends directly to `dst` instead of returning a fresh String.  Every call
+// from _buildDirectorStatePayload used to allocate a transient heap-backed
+// String for the escape output, even when the input (pilot names, MACs, IPs,
+// AP suffixes — all ASCII in practice) needed no escaping at all.  With 7
+// clients that fired ~30 wasted allocs per director broadcast, every 10 s.
+// The fast-path scan skips the whole rewrite when nothing needs to change,
+// and the slow path is bit-identical to the previous behavior.
+//
+// Fast-path guard: any byte < 0x20 forces the slow path even if it isn't one
+// of the explicitly-escaped chars (\n \r \t), because the slow path silently
+// drops other control chars — the fast path can't, so we can't take it when
+// any control byte is present.  UTF-8 continuation bytes (>= 0x80) always
+// pass through the fast path, matching current behavior.
+static void _jsonEscapeAppend(String& dst, const String& s) {
+    bool needsWork = false;
     for (size_t i = 0; i < s.length(); i++) {
         char c = s[i];
-        if      (c == '"')  out += "\\\"";
-        else if (c == '\\') out += "\\\\";
-        else if (c == '\n') out += "\\n";
-        else if (c == '\r') out += "\\r";
-        else if (c == '\t') out += "\\t";
-        else if ((uint8_t)c < 0x20) { /* drop other control chars */ }
-        else                out += c;
+        if (c == '"' || c == '\\' || (uint8_t)c < 0x20) { needsWork = true; break; }
     }
-    return out;
+    if (!needsWork) {
+        dst += s;
+        return;
+    }
+    for (size_t i = 0; i < s.length(); i++) {
+        char c = s[i];
+        if      (c == '"')  dst += "\\\"";
+        else if (c == '\\') dst += "\\\\";
+        else if (c == '\n') dst += "\\n";
+        else if (c == '\r') dst += "\\r";
+        else if (c == '\t') dst += "\\t";
+        else if ((uint8_t)c < 0x20) { /* drop other control chars */ }
+        else                dst += c;
+    }
 }
 
 // Build the {"nodes":[master,...clients],"race":{...}} payload used by both the
@@ -401,8 +421,8 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     // by a backup file later.
     String masterMac = WiFi.macAddress();
     out += "{\"nodes\":[{\"nodeId\":0,\"isMaster\":true,\"online\":true";
-    out += ",\"mac\":\"";        out += _jsonEscape(masterMac); out += "\"";
-    out += ",\"pilotName\":\"";  out += _jsonEscape(pilotName); out += "\"";
+    out += ",\"mac\":\"";        _jsonEscapeAppend(out, masterMac); out += "\"";
+    out += ",\"pilotName\":\"";  _jsonEscapeAppend(out, pilotName); out += "\"";
     out += ",\"pilotColor\":";   out += pilotColor;
     out += ",\"bandIndex\":";    out += masterBand;
     out += ",\"channelIndex\":"; out += masterChan;
@@ -427,7 +447,7 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     if (multiNode) {
         for (const auto& n : multiNode->getNodes()) {
             out += ",{\"nodeId\":";        out += (int)n.nodeId;
-            out += ",\"pilotName\":\"";    out += _jsonEscape(n.pilotName); out += "\"";
+            out += ",\"pilotName\":\"";    _jsonEscapeAppend(out, n.pilotName); out += "\"";
             out += ",\"pilotColor\":";     out += n.pilotColor;
             out += ",\"bandIndex\":";      out += (int)n.bandIndex;
             out += ",\"channelIndex\":";   out += (int)n.channelIndex;
@@ -439,9 +459,9 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
             out += ",\"skipEnabled\":";    out += n.skipEnabled ? "true" : "false";
             out += ",\"excludedFromCurrentRace\":"; out += n.excludedFromCurrentRace ? "true" : "false";
             out += ",\"lapCount\":";       out += (int)n.lapCount;
-            out += ",\"clientIP\":\"";     out += _jsonEscape(n.clientIP); out += "\"";
-            out += ",\"mac\":\"";          out += _jsonEscape(n.macAddress); out += "\"";
-            out += ",\"apSuffix\":\"";     out += _jsonEscape(n.apSuffix); out += "\"";
+            out += ",\"clientIP\":\"";     _jsonEscapeAppend(out, n.clientIP); out += "\"";
+            out += ",\"mac\":\"";          _jsonEscapeAppend(out, n.macAddress); out += "\"";
+            out += ",\"apSuffix\":\"";     _jsonEscapeAppend(out, n.apSuffix); out += "\"";
             out += ",\"enterRssi\":";      out += (int)n.enterRssi;
             out += ",\"exitRssi\":";       out += (int)n.exitRssi;
             out += ",\"laps\":[";
