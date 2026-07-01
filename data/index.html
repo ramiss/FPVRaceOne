@@ -188,7 +188,7 @@
             <button onclick="document.getElementById('mnRestoreFile').click()" style="padding:8px 16px; margin-left:8px;">Restore Pilots</button>
             <input type="file" id="mnRestoreFile" accept=".json,application/json" style="display:none;" onclick="this.value='';" onchange="mnRestoreOpenFile(this)">
             <div style="font-size:12px; color:var(--secondary-color); margin-top:6px;">
-              Backup saves each pilot's name, color, channel and RSSI calibration tied to their physical unit's MAC. Restore writes those settings back to the same hardware when recruited again.
+              Backup saves each pilot's name, color, channel and RSSI calibration tied to their physical unit's MAC. Restore writes those settings back to the same hardware when connected as client(s).
             </div>
           </div>
         </div>
@@ -283,6 +283,13 @@
       </div>
 
       <div id="calib" class="tabcontent" style="display: none;">
+        <!-- Master-only note.  Shown from script.js when mnNodeMode === 1
+             (see applyCalibMasterNote).  Reminds the user that this tab
+             calibrates the master's own RX5808 only — client node
+             calibration is done from the Race tab's per-pilot pencil. -->
+        <div id="calibMasterNote" style="display: none; margin-bottom: 12px; padding: 10px 12px; background-color: rgba(255, 200, 0, 0.12); border: 1px solid rgba(255, 200, 0, 0.6); border-radius: 6px; font-size: 13px;">
+          <strong>Note:</strong> This page calibrates the <strong>master node</strong> only. To calibrate a connected client, open its pilot card on the Race tab and click the pencil → <em>Run Calibration Wizard</em>.
+        </div>
         <div style="margin-bottom: 16px;">
           <button id="startWizardButton" onclick="startCalibrationWizard()" style="width: 100%; padding: 12px; font-size: 16px; background-color: var(--primary-color);">Start Calibration Wizard</button>
         </div>
@@ -1006,8 +1013,18 @@
               </div>
               -->
 
-              <h3>WiFi Antenna</h3>
-              <div class="config-item">
+              <!-- Antenna toggle hidden — this hardware build has a fixed external
+                   antenna, so exposing the switch just invites broken configs.
+                   The <input> is kept in the DOM so page hydration code that
+                   sets .checked still finds the element without a null check.
+                   The Save snapshot no longer READS this value — it is force-
+                   pinned to 1 in data/script.js buildConfigSnapshotFromUI.
+
+                   TO REVERT (re-expose the toggle): remove style="display:none"
+                   below AND restore the .checked read in script.js
+                   buildConfigSnapshotFromUI (they're linked with matching
+                   TO REVERT markers). -->
+              <div class="config-item" style="display:none;">
                 <label for="externalAntennaToggle">Antenna:</label>
                 <div style="flex: 1;">
                   <label class="switch">
@@ -1017,6 +1034,7 @@
                   <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="antennaLabel">External</span>
                 </div>
               </div>
+              <h3>WiFi TX Power</h3>
               <div class="config-item">
                 <label for="wifiTxPowerInput">TX Power (dBm):</label>
                 <div style="flex: 1; display: flex; align-items: center; gap: 8px;">
@@ -1027,7 +1045,7 @@
                 </div>
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-bottom: 12px;">
-                Both antenna settings take effect on next boot.
+                TX power change takes effect on next boot.
               </div>
             </div>
 
@@ -1073,11 +1091,11 @@
               </div>
               <div class="config-item" id="mnSkipMasterStartRow" style="display:none;">
                   <label for="mnSkipMasterStartToggle">Ignore Race Director Start/Stop if already racing: </label>
-                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="mnClientSkipEnabled = this.checked; autoSaveConfig();" />
+                  <input type="checkbox" id="mnSkipMasterStartToggle" onchange="onMnSkipMasterStartChange(this.checked)" />
                 </div>
               <div class="config-item" id="mnClientRaceAudioRow" style="display:none;">
                   <label for="mnClientRaceAudioToggle">Play race start audio on this client (countdown + beep): </label>
-                  <input type="checkbox" id="mnClientRaceAudioToggle" onchange="mnClientRaceAudio = this.checked; autoSaveConfig();" />
+                  <input type="checkbox" id="mnClientRaceAudioToggle" onchange="onMnClientRaceAudioChange(this.checked)" />
                 </div>
               <div style="margin-top: 20px;">
                 <button id="applyMultiNodeBtn" onclick="applyMultiNodeSettings()" disabled style="background-color: var(--primary-color); color: white; padding: 10px 20px; border: none; border-radius: 6px; cursor: not-allowed; font-size: 14px; opacity: 0.5;">Apply Multi-Node &amp; Reboot</button>
@@ -1245,7 +1263,7 @@
                        oninput="autoSaveConfig()" />
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 16px;">
-                Enter info above and click Save Configuration below. Then click on Check for Update. Home Wifi is only used for firmware updates.
+                Enter info above and click Apply &amp; Save below. Then click on Check for Update. Home Wifi is only used for firmware updates.
               </div>
 
               <h3>Channel</h3>
@@ -1368,7 +1386,7 @@
                 <button id="rebootBtn" onclick="rebootDevice()" style="background-color: #c0392b; color: #fff; border: none; padding: 8px 20px; border-radius: 6px; cursor: pointer; font-size: 14px;">Reboot Device</button>
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                Restarts the device immediately. Required for antenna and TX power changes to take effect.
+                Restarts the device immediately. Required for TX power changes to take effect.
               </div>
 
               <h3>Race Tab</h3>
@@ -1443,7 +1461,7 @@
             <button onclick="downloadConfig()" style="background-color: var(--secondary-color);">Download Config</button>
             <button onclick="document.getElementById('importConfigFile').click()" style="background-color: var(--secondary-color);">Import Config</button>
             <input type="file" id="importConfigFile" accept=".json" style="display: none;" onchange="importConfig(this)" />
-            <button id="saveConfigBtn" onclick="saveConfig()" disabled>Save Configuration</button>
+            <button id="saveConfigBtn" onclick="saveConfig()" disabled>Apply &amp; Save</button>
           </div>
         </div>
       </div>
