@@ -151,6 +151,20 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             DEBUG("%s\n", buf);
         }
 
+        // Periodic director-state resync — every 10 s, force a rebroadcast
+        // even if no state change has fired.  Fixes: a client's Multi Race
+        // browser opens after the last state-driven push and would otherwise
+        // never see the current node list until something happened.  Uses
+        // the existing pushMultiNodeState -> queueDirectorStateBroadcast
+        // path so the fanout still goes through the same throttle
+        // (MIN_DIRECTOR_BROADCAST_INTERVAL_MS) and the same sequential
+        // one-client-at-a-time HTTPClient loop as event-driven pushes.
+        static uint32_t lastDirectorHeartbeatMs = 0;
+        if (currentTimeMs - lastDirectorHeartbeatMs > 10000 && _webserver) {
+            lastDirectorHeartbeatMs = currentTimeMs;
+            _webserver->pushMultiNodeState();
+        }
+
         // Deferred broadcasts — queued by the async handler, executed here on Core 0
         if (_racePreArmPending) {
             _racePreArmPending = false;
@@ -675,6 +689,7 @@ void MultiNodeManager::_checkNodeTimeouts(uint32_t /*currentTimeMs*/) {
     // somehow lands ahead of `now` (impossible after this refresh, but
     // belt-and-braces — single read, no division, basically free).
     uint32_t now = millis();
+    bool anyWentOffline = false;
     for (auto& n : _nodes) {
         if (!n.online) continue;
         uint32_t lastSeen = n.lastSeen;
@@ -682,7 +697,14 @@ void MultiNodeManager::_checkNodeTimeouts(uint32_t /*currentTimeMs*/) {
         if ((now - lastSeen) <= MULTINODE_NODE_TIMEOUT_MS) continue;
         n.online  = false;
         n.running = false;
+        anyWentOffline = true;
         DEBUG("[MULTINODE] Node %c (%s) timed out\n", slotLetter(n.nodeId), n.pilotName.c_str());
+    }
+    // Notify Race View browsers that a peer just went offline — otherwise
+    // the other clients keep rendering a disconnected pilot as still
+    // online until the next state-change or 10 s heartbeat push.
+    if (anyWentOffline && _webserver) {
+        _webserver->pushMultiNodeState();
     }
     // Nodes are never auto-removed — use removeNode() to manually free a slot.
 }
