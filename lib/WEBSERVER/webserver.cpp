@@ -1290,6 +1290,10 @@ EEPROM:\n\
             buf.concat((const char*)data, len);
             if (index + len == total && servicesStarted) {
                 events.send(buf.c_str(), "directorState");
+                // Cache so a late-joining browser (page reload) can be
+                // brought up to date immediately in events.onConnect
+                // rather than waiting for the next 10 s heartbeat push.
+                cachedDirectorState = buf;
                 buf = String();
             }
         });
@@ -1615,6 +1619,17 @@ EEPROM:\n\
             DEBUG("Client reconnected! Last message ID that it got is: %u\n", client->lastId());
         }
         client->send("start", NULL, millis(), 1000);
+        // If we're a client node and have a cached directorState from the
+        // master, replay it to this browser immediately.  Otherwise the
+        // Multi Race tab renders the "Race Director" fallback until the
+        // next 10 s heartbeat push arrives.  Safe on master mode too —
+        // cachedDirectorState is only populated by the client-mode POST
+        // handler at /api/multinode/directorState, so this branch never
+        // fires on a master (its own multiNodeState is delivered by
+        // pushMultiNodeState -> events.send on state changes).
+        if (cachedDirectorState.length() > 0) {
+            client->send(cachedDirectorState.c_str(), "directorState", millis(), 1000);
+        }
         led->on(200);
     });
 

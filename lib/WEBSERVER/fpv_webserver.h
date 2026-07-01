@@ -88,4 +88,11 @@ class Webserver : public TransportInterface {
     // intervals forever.  Resets the instant the STA reassociates.
     uint32_t staFailedReconnects = 0;
     uint32_t staBackoffMs        = 5000;
+
+    // Last director-state payload the client received from master via the
+    // /api/multinode/directorState POST endpoint.  Replayed to any newly-
+    // connected browser SSE client so a late-loading Multi Race tab sees
+    // current mesh state instead of the "Race Director" fallback.  Empty
+    // string means no push has been received yet on this boot.
+    String cachedDirectorState;
 };
