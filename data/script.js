@@ -1206,14 +1206,122 @@ onload = async function (e) {
 };
 
 function confirmDiscardUnsavedChanges() {
-  // If nothing staged, do not prompt
-  if (!stagedDirty || !stagedConfig || Object.keys(stagedConfig).length === 0) {
-    return true;
-  }
+  // If nothing staged AND no deferred-apply work is pending, do not prompt.
+  // A queued apply (e.g. LED preset awaiting Apply & Save) counts as
+  // "unsaved" for the user-visible prompt even if no /config key is staged.
+  const haveStaged = stagedDirty && stagedConfig && Object.keys(stagedConfig).length > 0;
+  const havePending = (typeof _pendingApply !== 'undefined') && _pendingApply.length > 0;
+  if (!haveStaged && !havePending) return true;
 
   return window.confirm(
     'You have unsaved changes.\n\nClose settings without saving?'
   );
+}
+
+// POST a single-key /config patch and advance baseline.  Used by handlers
+// that are intentionally "auto-apply, auto-persist" (live preview style —
+// LED color/brightness/speed/fade/strobe).  Bypasses the staged-config
+// snapshot so it does NOT dirty the Save button.
+async function saveConfigPatchImmediate(patch) {
+  if (!patch || typeof patch !== 'object') return;
+  try {
+    if (usbConnected && transportManager) {
+      await transportManager.sendCommand('config', 'POST', patch);
+    } else {
+      await fetch('/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+    }
+    // Advance baseline so the Save button doesn't light up retroactively
+    // for these keys.  Also drop any matching staged entry — same key, now
+    // equal to baseline, would otherwise leave Save dirty.
+    if (typeof baselineConfig === 'object' && baselineConfig) {
+      Object.assign(baselineConfig, patch);
+    }
+    if (stagedConfig && typeof stagedConfig === 'object') {
+      let changed = false;
+      for (const k of Object.keys(patch)) {
+        if (k in stagedConfig) { delete stagedConfig[k]; changed = true; }
+      }
+      if (changed) {
+        stagedDirty = Object.keys(stagedConfig).length > 0;
+        if (typeof updateSaveButton === 'function') updateSaveButton();
+      }
+    }
+  } catch (err) {
+    console.error('[Config] Immediate patch save failed:', patch, err);
+  }
+}
+
+// Deferred-apply registry.  Bucket A handlers (Settings controls that
+// have a runtime side effect but are NOT designed to auto-save) push a
+// thunk here instead of running their POST /led/* (etc.) call inline.
+// saveConfig() drains the registry after a successful /config commit so
+// the apply + persist happen as one atomic-feeling Apply & Save click.
+// A close-without-save discards both staged config AND pending applies.
+//
+// The optional `key` argument dedupes: if a handler queues an apply with
+// the same key more than once (successive slider drags, repeated theme
+// picks), only the latest thunk runs on Save.  Handlers that read the
+// live form value inside the thunk automatically pick up the final value
+// regardless.
+const _pendingApply = [];
+
+function deferApply(fnOrKey, maybeFn) {
+  const key = typeof fnOrKey === 'string' ? fnOrKey : null;
+  const fn  = typeof fnOrKey === 'function' ? fnOrKey : maybeFn;
+  if (typeof fn !== 'function') return;
+  if (key) {
+    // Drop any earlier entry with the same key; keep only the latest thunk.
+    for (let i = _pendingApply.length - 1; i >= 0; i--) {
+      if (_pendingApply[i].__key === key) _pendingApply.splice(i, 1);
+    }
+    fn.__key = key;
+  }
+  _pendingApply.push(fn);
+}
+
+async function _drainPendingApply() {
+  while (_pendingApply.length) {
+    const fn = _pendingApply.shift();
+    try { await Promise.resolve(fn()); }
+    catch (err) { console.error('[Apply] deferred handler failed:', err); }
+  }
+}
+
+function _clearPendingApply() {
+  _pendingApply.length = 0;
+}
+
+// Bucket A handlers for the two multi-node client toggles.  The former
+// inline onchange handlers wrote to mnClientSkipEnabled / mnClientRaceAudio
+// directly, so flipping the toggle immediately affected client behaviour
+// even if the user then cancelled Settings.  Now the global is set only
+// when Apply & Save runs.
+function onMnSkipMasterStartChange(checked) {
+  if (settingsLoading) {
+    mnClientSkipEnabled = !!checked;
+    return;
+  }
+  deferApply('mnSkipMasterStart', async () => {
+    const el = document.getElementById('mnSkipMasterStartToggle');
+    mnClientSkipEnabled = !!(el && el.checked);
+  });
+  autoSaveConfig();
+}
+
+function onMnClientRaceAudioChange(checked) {
+  if (settingsLoading) {
+    mnClientRaceAudio = !!checked;
+    return;
+  }
+  deferApply('mnClientRaceAudio', async () => {
+    const el = document.getElementById('mnClientRaceAudioToggle');
+    mnClientRaceAudio = !!(el && el.checked);
+  });
+  autoSaveConfig();
 }
 
 async function saveVoiceEnabledImmediate(enabled) {
@@ -2163,7 +2271,15 @@ function buildConfigSnapshotFromUI() {
 
     // Optional platform features
     batteryMonitor: (batteryToggle && batteryToggle.checked) ? 1 : 0,
-    wifiExtAntenna: (externalAntennaToggle && externalAntennaToggle.checked) ? 1 : 0,
+    // wifiExtAntenna is FORCE-PINNED to 1 (External) — this hardware build
+    // ships with a fixed external antenna, so Internal is never the right
+    // answer.  Pinning here (not reading from the DOM) also corrects any
+    // device that was left on Internal before the toggle was hidden.
+    //
+    // TO REVERT: change back to reading externalAntennaToggle.checked AND
+    // unhide the row in data/index.html near id="externalAntennaToggle"
+    // (they're linked with matching TO REVERT markers).
+    wifiExtAntenna: 1,
     wifiTxPower: (() => {
       const el = document.getElementById('wifiTxPowerInput');
       const v = el ? parseInt(el.value, 10) : 21;
@@ -2228,8 +2344,11 @@ function saveRSSIThresholds() {
 }
 
 async function saveConfig() {
-  // Commit staged config to device (single write)
-  if (!stagedDirty) {
+  // Commit staged config to device (single write).  If there's nothing to
+  // persist AND nothing in the deferred-apply queue, exit early.  Either
+  // alone is reason to run — e.g. ledPreset change stages a key AND queues
+  // a /led/preset call.
+  if (!stagedDirty && _pendingApply.length === 0) {
     console.log('[Config] No staged changes to save.');
     return;
   }
@@ -2239,31 +2358,39 @@ async function saveConfig() {
   const payload = stagedConfig && Object.keys(stagedConfig).length ? stagedConfig : buildConfigSnapshotFromUI();
 
   try {
-    if (usbConnected && transportManager) {
-      const response = await transportManager.sendCommand('config', 'POST', payload);
-      console.log('/config (USB):', response);
-    } else {
-      const resp = await fetch('/config', {
-        method: 'POST',
-        headers: {
-          Accept: 'application/json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(payload),
-      });
-      const json = await resp.json().catch(() => ({}));
-      console.log('/config (WiFi):', json);
+    if (stagedDirty) {
+      if (usbConnected && transportManager) {
+        const response = await transportManager.sendCommand('config', 'POST', payload);
+        console.log('/config (USB):', response);
+      } else {
+        const resp = await fetch('/config', {
+          method: 'POST',
+          headers: {
+            Accept: 'application/json',
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(payload),
+        });
+        const json = await resp.json().catch(() => ({}));
+        console.log('/config (WiFi):', json);
+      }
+
+      // Clear staged/dirty state ONLY after successful commit
+      stagedConfig = {};
+      stagedDirty = false;
+      updateSaveButton();
+      // Advance baseline so future stageConfig() calls compare against what was just saved
+      if (typeof baselineConfig === 'object' && baselineConfig) Object.assign(baselineConfig, payload);
     }
 
-    // Clear staged/dirty state ONLY after successful commit
-    stagedConfig = {};
-    stagedDirty = false;
-    updateSaveButton();
-    // Advance baseline so future stageConfig() calls compare against what was just saved
-    if (typeof baselineConfig === 'object' && baselineConfig) Object.assign(baselineConfig, payload);
+    // Drain deferred Bucket A applies (e.g. /led/preset, /led/override).
+    // Runs even when staged was empty — handlers that defer can register
+    // an apply without staging if their persistence is handled elsewhere.
+    await _drainPendingApply();
   } catch (err) {
     console.error('[Config] Save failed:', err);
-    // Keep stagedDirty=true so user can try saving again
+    // Keep stagedDirty=true so user can try saving again.  Pending applies
+    // are left in place so the next Save click retries them too.
   }
 }
 
@@ -2965,9 +3092,23 @@ if (batteryToggle) {
 }
 
 function updateAnnouncerRate(obj, value) {
-  announcerRate = parseFloat(value);
-  obj.parentElement.querySelector('span').textContent = announcerRate.toFixed(1);
-  audioAnnouncer.setRate(announcerRate);
+  // Label preview is fine to update now — DOM-only, reverts on modal reopen.
+  obj.parentElement.querySelector('span').textContent = parseFloat(value).toFixed(1);
+
+  if (settingsLoading) {
+    // Hydration: mirror the persisted value into the runtime state.
+    announcerRate = parseFloat(value);
+    audioAnnouncer.setRate(announcerRate);
+    return;
+  }
+
+  // Defer the runtime rate change — dedup so a slider drag collapses to
+  // a single apply on Save.
+  deferApply('announcerRate', async () => {
+    const v = parseFloat(document.getElementById('rate')?.value || '1.0');
+    announcerRate = v;
+    audioAnnouncer.setRate(v);
+  });
   autoSaveConfig();
 }
 
@@ -2982,9 +3123,22 @@ function updateAlarmThreshold(obj, value) {
 }
 
 function updateMaxLaps(obj, value) {
-  maxLaps = parseInt(value);
-  const displayText = maxLaps === 0 ? 'Inf.' : String(maxLaps);
-  obj.parentElement.querySelector('span').textContent = displayText;
+  // Label preview is fine to update now — DOM-only, reverts on modal reopen.
+  const previewN = parseInt(value);
+  obj.parentElement.querySelector('span').textContent = previewN === 0 ? 'Inf.' : String(previewN);
+
+  if (settingsLoading) {
+    // Hydration: sync the runtime global to the persisted value.
+    maxLaps = previewN;
+    return;
+  }
+
+  // Defer the runtime maxLaps change so a cancelled edit does not affect
+  // the currently-armed race's stop condition.
+  deferApply('maxLaps', async () => {
+    const v = parseInt(document.getElementById('maxLaps')?.value || '0');
+    maxLaps = v;
+  });
   autoSaveConfig();
 }
 
@@ -3495,35 +3649,57 @@ function changeLedPreset() {
   const presetSelect = document.getElementById('ledPreset');
   const preset = parseInt(presetSelect.value, 10);
 
+  // UI affordance (hides/shows the Speed slider for presets that ignore it)
+  // is fine to run immediately — it's reversible local DOM.
   updateLedPresetUI();
 
-  // Keep existing live behavior
-  if (preset === 9) {
-    const pilotColor = document.getElementById('pilotColor')?.value || '#0080FF';
-    const color = pilotColor.substring(1);
-    sendLedCommand('color', { color }).catch(err => console.error('Failed to set pilot color:', err));
-  } else if (preset === 2) {
-    setSolidColor();
-  } else if (preset === 6) {
-    setFadeColor();
-  } else if (preset === 7) {
-    setStrobeColor();
+  // Defer the /led/* commit until Apply & Save.  Reads the relevant color
+  // input at apply time (not now) so the user can adjust both the preset
+  // and its color before saving and only one /led command lands.
+  if (settingsLoading) {
+    // Just sync staged value during modal hydration; don't queue an apply.
+    stageConfig('ledPreset', Number.isFinite(preset) ? preset : 0);
+    return;
   }
+  deferApply('ledPreset', async () => {
+    try {
+      const p = parseInt(document.getElementById('ledPreset')?.value || '0', 10);
+      if (p === 9) {
+        const pilotColor = document.getElementById('pilotColor')?.value || '#0080FF';
+        await sendLedCommand('color', { color: pilotColor.substring(1) });
+      } else if (p === 2) {
+        const c = (document.getElementById('ledSolidColor')?.value || '#FF00FF').substring(1);
+        await sendLedCommand('color', { color: c });
+      } else if (p === 6) {
+        const c = (document.getElementById('ledFadeColor')?.value || '#0080FF').substring(1);
+        await sendLedCommand('fadecolor', { color: c });
+      } else if (p === 7) {
+        const c = (document.getElementById('ledStrobeColor')?.value || '#FFFFFF').substring(1);
+        await sendLedCommand('strobecolor', { color: c });
+      }
+    } catch (err) {
+      console.error('[LED] Failed to apply preset on save:', err);
+    }
+  });
 
-  // Stage config
   stageConfig('ledPreset', Number.isFinite(preset) ? preset : 0);
 }
 
+
+// LED color/brightness/speed are intentional live-preview controls.  They
+// apply to the device immediately AND auto-persist via saveConfigPatchImmediate
+// — this matches the design ("see the change now and don't lose it on close")
+// without dirtying the Apply & Save button.
 
 function setSolidColor() {
   const colorInput = document.getElementById('ledSolidColor');
   const colorHex = colorInput.value.substring(1);
 
   sendLedCommand('color', { color: colorHex })
-    .then(data => console.log('LED solid color changed:', data))
     .catch(err => console.error('Failed to change LED solid color:', err));
 
-  stageConfig('ledColor', parseInt(colorHex, 16));
+  const ledColor = parseInt(colorHex, 16);
+  if (!settingsLoading) saveConfigPatchImmediate({ ledColor });
 }
 
 function setFadeColor() {
@@ -3531,10 +3707,10 @@ function setFadeColor() {
   const colorHex = colorInput.value.substring(1);
 
   sendLedCommand('fadecolor', { color: colorHex })
-    .then(data => console.log('LED fade color changed:', data))
     .catch(err => console.error('Failed to change LED fade color:', err));
 
-  stageConfig('ledFadeColor', parseInt(colorHex, 16));
+  const ledFadeColor = parseInt(colorHex, 16);
+  if (!settingsLoading) saveConfigPatchImmediate({ ledFadeColor });
 }
 
 function setStrobeColor() {
@@ -3542,23 +3718,21 @@ function setStrobeColor() {
   const colorHex = colorInput.value.substring(1);
 
   sendLedCommand('strobecolor', { color: colorHex })
-    .then(data => console.log('LED strobe color changed:', data))
     .catch(err => console.error('Failed to change LED strobe color:', err));
 
-  stageConfig('ledStrobeColor', parseInt(colorHex, 16));
+  const ledStrobeColor = parseInt(colorHex, 16);
+  if (!settingsLoading) saveConfigPatchImmediate({ ledStrobeColor });
 }
 
 function updateLedBrightness(obj, value) {
   const brightness = parseInt(value, 10);
   obj.parentElement.querySelector('span').textContent = brightness;
 
-  // Keep existing live behavior
   sendLedCommand('brightness', { brightness })
-    .then(data => console.log('LED brightness changed:', data))
     .catch(err => console.error('Failed to change LED brightness:', err));
 
-  // Stage config
-  stageConfig('ledBrightness', Number.isFinite(brightness) ? brightness : 128);
+  const ledBrightness = Number.isFinite(brightness) ? brightness : 128;
+  if (!settingsLoading) saveConfigPatchImmediate({ ledBrightness });
 }
 
 
@@ -3566,21 +3740,31 @@ function updateLedSpeed(obj, value) {
   const speed = parseInt(value, 10);
   obj.parentElement.querySelector('span').textContent = speed;
 
-  // Keep existing live behavior
   sendLedCommand('speed', { speed })
-    .then(data => console.log('LED speed changed:', data))
     .catch(err => console.error('Failed to change LED speed:', err));
 
-  // Stage config
-  stageConfig('ledSpeed', Number.isFinite(speed) ? speed : 10);
+  const ledSpeed = Number.isFinite(speed) ? speed : 10;
+  if (!settingsLoading) saveConfigPatchImmediate({ ledSpeed });
 }
 
 function toggleLedManualOverride(enabled) {
   const enable = enabled ? 1 : 0;
 
-  sendLedCommand('override', { enable })
-    .then(data => console.log('LED manual override:', enabled ? 'enabled' : 'disabled', data))
-    .catch(err => console.error('Failed to toggle LED manual override:', err));
+  // Defer the /led/override commit until Apply & Save — flipping the
+  // toggle should NOT push device-side override on/off if the user
+  // ultimately cancels.
+  if (!settingsLoading) {
+    deferApply('ledManualOverride', async () => {
+      try {
+        const el = document.getElementById('ledManualOverride');
+        const v = (el && el.checked) ? 1 : 0;
+        await sendLedCommand('override', { enable: v });
+        console.log('LED manual override:', v ? 'enabled' : 'disabled');
+      } catch (err) {
+        console.error('Failed to toggle LED manual override on save:', err);
+      }
+    });
+  }
 
   stageConfig('ledManualOverride', enable);
 }
@@ -3952,16 +4136,34 @@ function setBandChannelIndex(freq) {
 
 
 
-// Theme functionality
+// Theme functionality.  Bucket A: setting <html data-theme> and swapping
+// the logo/favicon are visible side effects.  If we applied on change and
+// the user then cancelled Settings, the page would keep the wrong theme
+// until reload — the "applied but not saved" bug.  Defer the DOM apply
+// until Apply & Save; the picker itself still shows the pending value.
 function changeTheme() {
     const theme = document.getElementById('themeSelect').value;
-    if (theme === 'lighter') {
-      document.documentElement.removeAttribute('data-theme');
-    } else {
-      document.documentElement.setAttribute('data-theme', theme);
+
+    // Modal-open hydration: this fires as the form populates from /config.
+    // In that case we DO want the visible state to match the persisted
+    // value — the theme was previously saved, so applying it is correct.
+    if (settingsLoading) {
+      if (theme === 'lighter') document.documentElement.removeAttribute('data-theme');
+      else                     document.documentElement.setAttribute('data-theme', theme);
+      updateThemeLogos(theme);
+      return;
     }
-    updateThemeLogos(theme);
-    autoSaveConfig(); // Save to device
+
+    // User-triggered change: stage + defer the visual apply.  Reads the
+    // live picker at apply time so a rapid A→B→C sequence collapses to a
+    // single "apply theme C" on Save.
+    deferApply('theme', async () => {
+      const t = document.getElementById('themeSelect')?.value || 'lighter';
+      if (t === 'lighter') document.documentElement.removeAttribute('data-theme');
+      else                 document.documentElement.setAttribute('data-theme', t);
+      updateThemeLogos(t);
+    });
+    autoSaveConfig();
   }
   
   function updateThemeLogos(theme) {
@@ -5209,7 +5411,7 @@ function downloadConfig() {
     if (!confirm(
         'You have unsaved configuration changes. The downloaded file will ' +
         'reflect the device\'s currently SAVED state, not your unsaved edits.\n\n' +
-        'Cancel and click Save Configuration first, or proceed to download the saved snapshot.'
+        'Cancel and click Apply & Save first, or proceed to download the saved snapshot.'
     )) {
       return;
     }
@@ -6304,9 +6506,13 @@ function closeSettingsModal(force = false) {
     return; // user cancelled
   }
 
-  // Safe to close → clear staged state
+  // Safe to close → clear staged state AND drop any deferred applies
+  // (e.g. a pending /led/preset call from a preset change the user did
+  // not save).  Without this drop, the next Save in a later session
+  // would replay the orphaned change.
   stagedDirty = false;
   stagedConfig = {};
+  _clearPendingApply();
   updateSaveButton();
 
   const modal = document.getElementById('settingsModal');
@@ -6994,6 +7200,7 @@ function openSettingsModal() {
         if (config.nodeMode !== undefined) {
           mnNodeMode = config.nodeMode;
           onRaceTabOpen();  // switch Race tab to master view if needed
+          applyCalibMasterNote();
         }
         const nodeModeSelect = document.getElementById('nodeModeSelect');
         if (nodeModeSelect && config.nodeMode !== undefined) {
@@ -7057,6 +7264,16 @@ let mnRaceRunning        = false;
 let mnMasterRaceActive   = false;  // true when master initiated the current race
 let mnMyNodeId           = 0;      // this client's assigned node ID
 let mnNodeMode           = 0;      // 0=standalone, 1=master, 2=client (cached from /api/mode)
+
+// Show/hide the master-only note above the Calibration tab's Start Wizard
+// button.  In master mode the tab still only calibrates the master's own
+// RX5808 — client calibration happens via the pilot pencil on the Race
+// tab.  Called from the config-load path once mnNodeMode is populated.
+function applyCalibMasterNote() {
+  const note = document.getElementById('calibMasterNote');
+  if (!note) return;
+  note.style.display = (mnNodeMode === 1) ? 'block' : 'none';
+}
 let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE / polling
 let mnImportedNodes      = null;   // non-null while viewing an imported race; blocks polling from overwriting
 let mnRaceTimerIntervalId = null;
