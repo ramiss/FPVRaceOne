@@ -6541,21 +6541,30 @@ function switchSettingsSection(sectionName) {
   // Hide all sections
   const sections = document.querySelectorAll('.settings-section');
   sections.forEach(section => section.classList.remove('active'));
-  
+
   // Show selected section
   const targetSection = document.getElementById(`settings-${sectionName}`);
   if (targetSection) {
     targetSection.classList.add('active');
   }
-  
-  // Update nav items
+
+  // Update nav items — resolve the matching one via its onclick attribute
+  // instead of the deprecated implicit `event` global.  The previous
+  // implementation broke when this function was called programmatically
+  // (e.g. from setLEDSettingsVisible after LED support is disabled), where
+  // `event` was either undefined or a stale window.event whose target had
+  // no .closest() method — throwing "closest is not a function".  Looking
+  // the nav item up by its onclick attribute works for both click-driven
+  // and programmatic callers, and keeps every existing HTML caller
+  // (`onclick="switchSettingsSection('foo')"`) working with no changes.
+  const marker = `switchSettingsSection('${sectionName}')`;
   const navItems = document.querySelectorAll('.settings-nav-item');
   navItems.forEach(item => {
     item.classList.remove('active');
+    if ((item.getAttribute('onclick') || '').includes(marker)) {
+      item.classList.add('active');
+    }
   });
-  
-  // Add active class to clicked nav item
-  event?.target?.closest('.settings-nav-item')?.classList.add('active');
 }
 
 // Self-Test Functions
