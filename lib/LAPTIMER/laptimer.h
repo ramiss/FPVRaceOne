@@ -4,8 +4,70 @@
 #include "RX5808.h"
 #include "buzzer.h"
 #include "config.h"
-#include "kalman.h"
 #include "led.h"
+
+// ── Small odd-window running median filter ──────────────────────────────────
+// Matches the design intent of RotorHazard's FastRunningMedian (single-stage
+// filter, spike-rejecting, peak-preserving) but sized for our shared-Core
+// sample rate.  Their 255-sample window only works at ~1 kHz sampling; ours
+// runs on Core 1 alongside the Arduino loop() so we get ~200-500 Hz.
+//
+// MaxN = 15 caps the runtime-selected window at ~50 ms even in the worst
+// under-sampled case, which is the widest window that still preserves the
+// peak of a 50 ms fast-pass (competitive racing drone at ~150 mph).
+//
+// Cost per addAndGet(): one 15-element insertion sort — well under 1 μs on
+// the ESP32.  Kept in-header so it's trivially inline-able.
+template <uint8_t MaxN>
+class RunningMedian {
+public:
+    void reset() {
+        _writeIdx = 0;
+        _count = 0;
+    }
+    // Change window size — clears the history buffer if the size actually
+    // changed so we never mix samples from two configurations.
+    void setWindow(uint8_t n) {
+        if (n < 3) n = 3;
+        if ((n & 1) == 0) n++;      // enforce odd so median is well-defined
+        if (n > MaxN) n = MaxN;
+        if (n != _n) {
+            _n        = n;
+            _writeIdx = 0;
+            _count    = 0;
+        }
+    }
+    uint8_t window() const { return _n; }
+    // Push one sample, return the median of what's currently buffered.
+    // Before the window fills we return the median of the samples so far,
+    // matching RotorHazard's "isFilled()" behaviour — early samples don't
+    // gate lap detection but they also aren't representative until the
+    // buffer stabilises.
+    uint8_t addAndGet(uint8_t v) {
+        _buf[_writeIdx] = v;
+        _writeIdx = (uint8_t)((_writeIdx + 1) % _n);
+        if (_count < _n) _count++;
+        uint8_t scratch[MaxN];
+        for (uint8_t i = 0; i < _count; i++) scratch[i] = _buf[i];
+        for (uint8_t i = 1; i < _count; i++) {
+            uint8_t x = scratch[i];
+            int8_t  j = (int8_t)i - 1;
+            while (j >= 0 && scratch[j] > x) {
+                scratch[(uint8_t)(j + 1)] = scratch[j];
+                j--;
+            }
+            scratch[(uint8_t)(j + 1)] = x;
+        }
+        return scratch[_count / 2];
+    }
+    bool isFilled() const { return _count >= _n; }
+
+private:
+    uint8_t _buf[MaxN] = {};
+    uint8_t _writeIdx  = 0;
+    uint8_t _count     = 0;
+    uint8_t _n         = 3;
+};
 #if RSSI_LOGGING_ENABLED
 #include "rssilog.h"   // for RssiSnapshot — logger is wired in main.cpp only
 #endif
@@ -74,7 +136,6 @@ class LapTimer {
     Buzzer *buz;
     Led *led;
     WebhookManager *webhooks;
-    KalmanFilter filter;
     boolean lapCountWraparound;
     uint32_t raceStartTimeMs;
     uint32_t startTimeMs;
@@ -82,25 +143,23 @@ class LapTimer {
     uint8_t rssiCount;
     uint32_t lapTimes[LAPTIMER_LAP_HISTORY];
     uint8_t rssi[LAPTIMER_RSSI_HISTORY];
-    uint8_t rssi_window[7];
-    uint8_t rssi_window_index;
 
-    // Pre-filter pipeline state (Kalman → Median-3 → MA → EMA → step limiter)
-    uint8_t v1KHist[3];     // Median-of-3 history buffer
-    uint8_t v1KHistIdx;
-    float   v1Ema;          // EMA accumulator (NAN = uninitialised)
-    bool    v1OutInit;      // Step-limiter has a valid previous sample
-    uint8_t v1OutPrev;      // Step-limiter previous output
+    // Single-stage running median.  Replaces the previous cascade of
+    // Kalman → Median-3 → MA(7) → EMA → step limiter, which combined to
+    // attenuate the peak of a fast pass by 30-50 % and made high-speed
+    // gate crossings hard to detect.  Window size is driven by
+    // conf->getV1Smoothing() (0-10) → medianNFromSlider(level).
+    RunningMedian<15> medianFilter;
 
     uint8_t rssiPeak;
     uint32_t rssiPeakTimeMs;
     uint8_t lastLapPeakRssi = 0;  // peak RSSI of the most recently completed lap
 
-    // Gate state tracking / debounce helpers
-    bool gateExited;          // True when gate has re-armed (sustained below exit after last lap)
-    bool enteredGate;         // True once we have crossed the enter threshold
-    uint8_t enterHoldSamples; // Consecutive samples at/above enter (debounce counter)
-    uint32_t enterHoldStartMs;// Timestamp of first at-enter sample (used for ceiling-drift watchdog)
+    // Gate state tracking — RotorHazard-style: no enter-hold debounce, no
+    // ceiling-drift watchdog.  The median filter is what rejects transient
+    // spikes; there's no need for a redundant sample-count debounce on top.
+    bool gateExited;          // True when gate has re-armed (crossed back below exit)
+    bool enteredGate;         // True once filtered RSSI crossed enterAt
     bool gate1Armed;          // Gate-1 bootstrap fired for current race
 
 #if RSSI_STREAM_ENABLED
@@ -111,11 +170,11 @@ class LapTimer {
     uint32_t _streamCountMs  = 0;
 #endif
 
-    // Debug helpers (last processed RSSI chain)
+    // Debug helpers — last raw ADC read and last median-filtered output,
+    // used for the periodic race debug print and for the /status page.
     uint8_t lastRawRssi;
-    uint8_t lastKalmanRssi;
-    uint8_t lastAvgRssi;
-    uint8_t prevAvgRssi;
+    uint8_t lastFilteredRssi;
+    uint8_t prevFilteredRssi;   // one-sample delay for edge-detect debug prints
     uint32_t lastRaceDebugPrintMs;
 
     bool lapAvailable = false;

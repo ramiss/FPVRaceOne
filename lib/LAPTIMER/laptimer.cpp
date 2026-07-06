@@ -8,15 +8,6 @@
 extern RgbLed* g_rgbLed;
 #endif
 
-// ── Kalman filter tuning ──────────────────────────────────────────────────
-//
-// Verbatim upstream FPVGate gains.  Note that upstream uses an *inverted*
-// naming convention (their `Q` maps to setMeasurementNoise, their `R` maps
-// to setProcessNoise) — we apply the gains the same way upstream does so
-// the Kalman behaviour matches the original RX5808 path byte-for-byte.
-static const float kKalmanMeasurementNoise = 9.0f;
-static const float kKalmanProcessNoise     = 0.002f;
-
 // Race debug output (Serial) — throttled so it doesn't overwhelm.
 // Set to 0 to compile out the periodic race debug print.
 #ifndef LAPTIMER_RACE_DEBUG
@@ -25,52 +16,41 @@ static const float kKalmanProcessNoise     = 0.002f;
 
 static const uint32_t kRaceDebugPeriodMs = 100;  // 10 Hz
 
-// Moving average window (must match rssi_window[] size in laptimer.h)
-static const uint8_t kMaWindow = 7;
-
-// EMA low-pass tuning.
-// alpha closer to 0 = stronger smoothing (slower response, more lag)
-// alpha closer to 1 = weaker smoothing (faster response, more noise)
+// ── Median filter window size, mapped from the v1Smoothing slider ────────
 //
-// Exposed to the user as a 0..10 slider (`v1Smoothing` in config).  Level 5
-// is exactly the upstream FPVGate alpha (0.15) so the saved default produces
-// behaviour identical to the original pre-slider firmware.  Lower numbers
-// reduce lag at the cost of letting more noise through; higher numbers add
-// extra smoothing on top of upstream's design.
-static const float kEmaAlphaTable[11] = {
-    0.50f,  // 0  — almost no EMA; minimum lag, most noise
-    0.40f,  // 1
-    0.30f,  // 2
-    0.25f,  // 3
-    0.20f,  // 4
-    0.15f,  // 5  ── upstream default ──
-    0.12f,  // 6
-    0.10f,  // 7
-    0.07f,  // 8
-    0.05f,  // 9
-    0.03f,  // 10 — heaviest smoothing; noticeable lag, minimum noise
+// The slider is 0..10 in the UI; each level maps to an odd running-median
+// window size.  Sizes chosen for a shared-Core sample rate of ~200-500 Hz
+// so the effective window stays under 50 ms even at the low end — a peak
+// of a fast racing pass (50-100 ms) is preserved without noticeable
+// attenuation.
+//
+// Design intent matches RotorHazard's FastRunningMedian (single stage,
+// spike-rejecting, peak-preserving) — the numeric window differs because
+// their 1 kHz sample rate on a dedicated ATmega gave them headroom to run
+// N=255.
+//
+// Level 5 (default) → N=7 → ~14-35 ms window at 500-200 Hz respectively.
+// Lower = more peak fidelity + more noise; higher = more smoothing + more lag.
+static const uint8_t kMedianWindowTable[11] = {
+    3,   // 0  — bare metal, near-raw, most peak fidelity
+    3,   // 1
+    5,   // 2  — high-speed racing (100+ mph), clean RF
+    5,   // 3
+    7,   // 4
+    7,   // 5  ── default ── race speeds, mixed RF
+    9,   // 6
+    11,  // 7  — slower race pace / noisier RF
+    13,  // 8
+    13,  // 9
+    15,  // 10 — cruise / freestyle / very noisy environment
 };
-static inline float getEmaAlpha(uint8_t level) {
+static inline uint8_t medianNFromSlider(uint8_t level) {
     if (level > 10) level = 10;
-    return kEmaAlphaTable[level];
+    return kMedianWindowTable[level];
 }
 
-// NEW: reject one-sample "teleport" drops/rises with a step limiter.
-// This is NOT a low-pass; it only clamps absurd per-sample jumps.
-// Lower = stricter (less likely to false-trigger), Higher = more responsive.
-static const int kMaxStepPerSample = 12;
-
-// ── Enter/exit debounce constants (from upstream FPVGate) ─────────────────
-static const uint8_t kEnterHoldSamplesMin   = 4;   // consecutive at-or-above-enter samples before peak tracking starts
-static const uint8_t kExitConfirmSamples    = 2;   // consecutive below-exit samples to confirm exit (raw, not smoothed)
-static const uint8_t kPeakMinAboveExit      = 5;   // peak must exceed exit by at least this much to be valid
-// Gate-1 relaxations (used only when gate1Bootstrap is enabled):
-static const uint8_t kGate1RelaxMargin      = 4;   // effective Gate-1 enter ~= exit + 4 (if enter is much higher)
-static const uint8_t kGate1HoldSamplesMin   = 2;   // lower debounce just for Gate 1
-static const uint8_t kGate1PeakMinAboveExit = 3;   // lower peak margin just for Gate 1
-// Ceiling-drift watchdog: if the gate has been "entered" longer than
-// this without exit, force-reset state (signal must have drifted up to enter).
-static const uint32_t kCeilingDriftTimeoutMs = 3000;
+// ── Gate-1 relaxations (used only when gate1Bootstrap is enabled) ────────
+static const uint8_t kGate1RelaxMargin = 4;   // effective Gate-1 enter ~= exit + 4 (if enter is much higher)
 
 void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook) {
     conf = config;
@@ -79,37 +59,25 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     led = l;
     webhooks = webhook;
 
-    // Apply the upstream Kalman gains once at construction.  These never
-    // change at runtime since there's only one filter mode now.
-    filter.setMeasurementNoise(kKalmanMeasurementNoise);
-    filter.setProcessNoise(kKalmanProcessNoise);
-
     stop();
     lapCount = 0;
     lapCountWraparound = false;
     memset(lapTimes, 0, sizeof(lapTimes));
     memset(rssi, 0, sizeof(rssi));
-    memset(rssi_window, 0, sizeof(rssi_window));
-    rssi_window_index = 0;
 
-    // Pre-filter pipeline state
-    memset(v1KHist, 0, sizeof(v1KHist));
-    v1KHistIdx  = 0;
-    v1Ema       = NAN;
-    v1OutInit   = false;
-    v1OutPrev   = 0;
+    // Median filter starts empty; window is set from the config slider
+    // on the first sample in handleLapTimerUpdate.
+    medianFilter.reset();
+    medianFilter.setWindow(medianNFromSlider(conf ? conf->getV1Smoothing() : 5));
 
     // Debug/state init
-    lastRawRssi = 0;
-    lastKalmanRssi = 0;
-    lastAvgRssi = 0;
-    prevAvgRssi = 0;
+    lastRawRssi          = 0;
+    lastFilteredRssi     = 0;
+    prevFilteredRssi     = 0;
     lastRaceDebugPrintMs = 0;
-    enteredGate = false;
-    gateExited = true;
-    enterHoldSamples = 0;
-    enterHoldStartMs = 0;
-    gate1Armed = false;
+    enteredGate          = false;
+    gateExited           = true;
+    gate1Armed           = false;
 
 #if RSSI_STREAM_ENABLED
     _lastStreamMs    = 0;
@@ -127,16 +95,10 @@ void LapTimer::start() {
     DEBUG("\nCurrent RSSI: %u\n", rssi[rssiCount]);
     DEBUG("====================\n\n");
 
-    // Verbatim upstream FPVGate behaviour: keep the Kalman filter running
-    // across races.  Upstream's comment: "resetting it causes a transient
-    // ramp that can false-trigger the first lap; the step limiter rate-
-    // limits output changes anyway, so a reset provides no benefit."
-
-    memset(v1KHist, 0, sizeof(v1KHist));
-    v1KHistIdx = 0;
-    v1Ema      = NAN;
-    v1OutInit  = false;
-    v1OutPrev  = 0;
+    // Re-apply the configured median window in case the user changed the
+    // slider between races.  setWindow() only clears history when the size
+    // actually changed, so a same-size call is a cheap no-op.
+    medianFilter.setWindow(medianNFromSlider(conf ? conf->getV1Smoothing() : 5));
 
     lapCount = 0;
     lapCountWraparound = false;
@@ -149,18 +111,16 @@ void LapTimer::start() {
     rssiPeak = 0;
     rssiPeakTimeMs = 0;
 
-    gateExited = true;   // Gate 1 may open immediately at race start
+    gateExited  = true;   // Gate 1 may open immediately at race start
     enteredGate = false;
-    enterHoldSamples = 0;
-    enterHoldStartMs = 0;
-    gate1Armed = false;  // Gate-1 bootstrap re-arms each race
+    gate1Armed  = false;  // Gate-1 bootstrap re-arms each race
 
 #if RSSI_STREAM_ENABLED
     _lastStreamMs  = 0;
     _streamCount   = 0;
     _streamCountMs = 0;
 #endif
-    prevAvgRssi = 0;
+    prevFilteredRssi     = 0;
     lastRaceDebugPrintMs = 0;
 
     buz->beep(500);
@@ -199,11 +159,9 @@ void LapTimer::stop() {
     rssiPeakTimeMs = 0;
     startTimeMs = 0;
 
-    gateExited = true;
+    gateExited  = true;
     enteredGate = false;
-    enterHoldSamples = 0;
-    enterHoldStartMs = 0;
-    gate1Armed = false;
+    gate1Armed  = false;
 
     // lapCount and lapTimes are intentionally preserved so they survive page refresh
     // after the race ends. They are reset when the next race starts().
@@ -234,60 +192,22 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         return;
     }
 
-    // --- Stage 1: raw RSSI ---
+    // ── Single-stage pipeline (RotorHazard-style) ──────────────────────────
+    // 1. Raw RSSI from the RX5808 ADC (12-bit → 8-bit in RX5808::readRssi).
+    // 2. Running median with a small odd window — replaces the previous
+    //    Kalman + Median-3 + MA(7) + EMA + step-limiter cascade.  The
+    //    median rejects single-sample spikes while preserving the true peak
+    //    amplitude of a fast pass, which the old cascade was smearing to
+    //    the point that high-speed gate crossings sometimes missed enter.
+    //
+    // Refresh window size every sample — cheap, and lets the user tune the
+    // filter mid-race via the settings slider without a restart.
+    medianFilter.setWindow(medianNFromSlider(conf->getV1Smoothing()));
     const uint8_t rawRssi = rx->readRssi();
+    const uint8_t out     = medianFilter.addAndGet(rawRssi);
 
-    // --- Stage 2: Kalman ---
-    const uint8_t kalman_filtered = (uint8_t)round(filter.filter(rawRssi, 0));
-
-    // --- Stage 2.5: Median-of-3 ---
-    v1KHist[v1KHistIdx] = kalman_filtered;
-    v1KHistIdx = (v1KHistIdx + 1) % 3;
-    const uint8_t a = v1KHist[0], b = v1KHist[1], c = v1KHist[2];
-    const uint8_t median_kal =
-        (a > b) ? ((b > c) ? b : ((a > c) ? c : a))
-                : ((a > c) ? a : ((b > c) ? c : b));
-
-    // --- Stage 3: Moving average ---
-    rssi_window[rssi_window_index] = median_kal;
-    rssi_window_index = (rssi_window_index + 1) % kMaWindow;
-    uint16_t sum = 0;
-    for (int i = 0; i < kMaWindow; i++) sum += rssi_window[i];
-    const uint8_t ma = (uint8_t)(sum / kMaWindow);
-
-    // --- Stage 4: EMA — alpha is user-tunable via the v1Smoothing slider.
-    // Level 5 (default) = 0.15 = upstream FPVGate behaviour.
-    const float emaAlpha = getEmaAlpha(conf->getV1Smoothing());
-    if (isnan(v1Ema)) {
-        v1Ema = (float)ma;
-    } else {
-        v1Ema = (emaAlpha * (float)ma) + ((1.0f - emaAlpha) * v1Ema);
-    }
-    const uint8_t lp = (uint8_t)lroundf(v1Ema);
-
-    // --- Stage 5: Step limiter ---
-    uint8_t out = lp;
-    if (v1OutInit) {
-        const int delta = (int)lp - (int)v1OutPrev;
-        // Clamp to [0,255]. Previously `(uint8_t)(v1OutPrev + kMaxStepPerSample)`
-        // wrapped 256->0 on strong-signal passes near 255 (and the negative branch
-        // wrapped below 0 -> ~255), corrupting peak tracking exactly on the loudest
-        // crossings.
-        if (delta > kMaxStepPerSample) {
-            const int v = (int)v1OutPrev + kMaxStepPerSample;
-            out = (uint8_t)(v > 255 ? 255 : v);
-        } else if (delta < -kMaxStepPerSample) {
-            const int v = (int)v1OutPrev - kMaxStepPerSample;
-            out = (uint8_t)(v < 0 ? 0 : v);
-        }
-    } else {
-        v1OutInit = true;
-    }
-    v1OutPrev = out;
-
-    lastRawRssi    = rawRssi;
-    lastKalmanRssi = kalman_filtered;
-    lastAvgRssi    = ma;
+    lastRawRssi      = rawRssi;
+    lastFilteredRssi = out;
 
     // Store final value used by lap logic
     rssi[rssiCount] = out;
@@ -297,20 +217,45 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // runs at hundreds of Hz so we catch the actual maximum.
     if (out > rssiPeakSinceLast) rssiPeakSinceLast = out;
 
+    // ── One-shot: measure the loop sample rate over the first ~2 s of
+    // uptime and log it.  Helps the operator know whether the median
+    // window they picked lands in the intended time window — e.g. N=7 at
+    // 400 Hz gives ~17 ms, at 200 Hz gives ~35 ms.
+    {
+        static uint32_t rateStartMs   = 0;
+        static uint32_t rateSampleCnt = 0;
+        static bool     ratePrinted   = false;
+        if (!ratePrinted) {
+            if (rateStartMs == 0) rateStartMs = currentTimeMs;
+            rateSampleCnt++;
+            if (currentTimeMs - rateStartMs >= 2000) {
+                const uint32_t hz = (rateSampleCnt * 1000UL) / (currentTimeMs - rateStartMs);
+                DEBUG("[RSSI] Sample rate: %lu Hz (median N=%u → %lu ms window)\n",
+                      (unsigned long)hz,
+                      (unsigned)medianFilter.window(),
+                      (unsigned long)((medianFilter.window() * 1000UL) / (hz ? hz : 1)));
+                ratePrinted = true;
+            }
+        }
+    }
+
 #if RSSI_LOGGING_ENABLED
-    snapshot.timeMs           = currentTimeMs;
-    snapshot.raw              = rawRssi;
-    snapshot.kalman           = lastKalmanRssi;
-    snapshot.ma               = lastAvgRssi;
-    snapshot.out              = out;
-    snapshot.enterThresh      = conf->getEnterRssi();
-    snapshot.exitThresh       = conf->getExitRssi();
-    snapshot.peak             = rssiPeak;
-    snapshot.timerState       = (uint8_t)state;
-    snapshot.enteredGate      = enteredGate;
-    snapshot.gateExited       = gateExited;
-    snapshot.enterHoldSamples = enterHoldSamples;
-    snapshot.filterMode       = 0;   // log-format compat (single-mode firmware)
+    // The RSSI CSV log format retains "kalman" and "ma" columns for tooling
+    // compat, but the corresponding pipeline stages are gone.  Duplicate
+    // `out` into both slots so historical parsers still line up.
+    snapshot.timeMs      = currentTimeMs;
+    snapshot.raw         = rawRssi;
+    snapshot.kalman      = out;
+    snapshot.ma          = out;
+    snapshot.out         = out;
+    snapshot.enterThresh = conf->getEnterRssi();
+    snapshot.exitThresh  = conf->getExitRssi();
+    snapshot.peak        = rssiPeak;
+    snapshot.timerState  = (uint8_t)state;
+    snapshot.enteredGate = enteredGate;
+    snapshot.gateExited  = gateExited;
+    snapshot.enterHoldSamples = 0;      // debounce removed — always 0 in the log
+    snapshot.filterMode  = 0;
     // snapshot.lapEvent is set in finishLap(); lapTimeMs and lapCount updated there
 #endif
 
@@ -320,12 +265,12 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         const uint8_t enter = conf->getEnterRssi();
         const uint8_t exitT = conf->getExitRssi();
 
-        if (prevAvgRssi < enter && cur >= enter) {
+        if (prevFilteredRssi < enter && cur >= enter) {
             DEBUG("[RACE] ENTER crossed: out=%u raw=%u ent=%d gex=%d peak=%u t=%lu ms\n",
                   cur, rawRssi, (int)enteredGate, (int)gateExited, rssiPeak,
                   (unsigned long)(millis() - startTimeMs));
         }
-        if (prevAvgRssi >= exitT && cur < exitT) {
+        if (prevFilteredRssi >= exitT && cur < exitT) {
             DEBUG("[RACE] EXIT  crossed: out=%u ent=%d gex=%d peak=%u t=%lu ms\n",
                   cur, (int)enteredGate, (int)gateExited, rssiPeak,
                   (unsigned long)(millis() - startTimeMs));
@@ -336,7 +281,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             lastRaceDebugPrintMs = now;
         }
 
-        prevAvgRssi = cur;
+        prevFilteredRssi = cur;
     }
 #endif
 
@@ -373,44 +318,34 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             const bool minLapElapsed = (currentTimeMs - startTimeMs) > conf->getMinLapMs();
             bool canCapture = false;
 
-            // gate1Bootstrap=on: run the upstream first-lap bootstrap.
+            // gate1Bootstrap=on: run the first-lap bootstrap.  If the drone
+            // is already inside the gate at race start, seed the peak so
+            // the first exit fires Gate 1 rather than being ignored.
             // Off: Gate 1 may fire immediately (no bootstrap, no minLap gate).
             const bool useGate1Bootstrap = conf->getGate1Bootstrap();
             if (useGate1Bootstrap && isGate1) {
                 if (!gate1Armed) {
-                    const uint8_t cur = rssi[rssiCount];
+                    const uint8_t cur   = rssi[rssiCount];
                     const uint8_t enter = conf->getEnterRssi();
-                    const uint32_t now = millis();
+                    const uint32_t now  = millis();
 
                     gate1Armed = true;
 
-                    // Bootstrap based on where we are at race start:
-                    //   - If already in gate (>= enter), treat the first confirmed
-                    //     exit as Gate 1 and seed the peak so validPeak passes.
-                    //   - Otherwise, fall through to normal enter→peak→exit.
                     if (cur >= enter) {
-                        const uint8_t exitT = conf->getExitRssi();
-                        uint8_t seedPeak = cur;
-                        const uint8_t minValidPeak = (exitT >= (255 - kGate1PeakMinAboveExit))
-                                                     ? 255 : (uint8_t)(exitT + kGate1PeakMinAboveExit);
-                        if (seedPeak < minValidPeak) seedPeak = minValidPeak;
-                        enteredGate = true;
-                        gateExited = false;
-                        enterHoldSamples = kEnterHoldSamplesMin;
-                        enterHoldStartMs = now;
-                        rssiPeak = seedPeak;
+                        // In-gate at start — seed the peak so the first
+                        // filtered drop below exit fires Gate 1.
+                        enteredGate    = true;
+                        gateExited     = false;
+                        rssiPeak       = cur;
                         rssiPeakTimeMs = now;
-                        DEBUG("[Gate1] Armed in-gate bootstrap (cur=%u enter=%u seedPeak=%u)\n",
-                              cur, enter, seedPeak);
+                        DEBUG("[Gate1] Armed in-gate bootstrap (cur=%u enter=%u)\n", cur, enter);
                     } else {
-                        enteredGate = false;
-                        gateExited = true;
-                        enterHoldSamples = 0;
-                        enterHoldStartMs = 0;
-                        rssiPeak = 0;
+                        // Out-of-gate at start — normal enter → peak → exit.
+                        enteredGate    = false;
+                        gateExited     = true;
+                        rssiPeak       = 0;
                         rssiPeakTimeMs = 0;
-                        DEBUG("[Gate1] Armed out-of-gate bootstrap (cur=%u enter=%u)\n",
-                              cur, enter);
+                        DEBUG("[Gate1] Armed out-of-gate bootstrap (cur=%u enter=%u)\n", cur, enter);
                     }
                 }
                 canCapture = gate1Armed;
@@ -450,12 +385,17 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
 }
 
 // ===========================================================================
-//  Lap detection — verbatim upstream FPVGate state machine
+//  Lap detection — RotorHazard-style state machine
 // ===========================================================================
-//   - 4-sample enter debounce (kEnterHoldSamplesMin), relaxed to 2 on Gate 1
-//   - Peak must exceed exit by kPeakMinAboveExit (3 on Gate 1)
-//   - 2-sample raw exit confirm (uses rssi[], not a smoothed copy)
-//   - Ceiling-drift watchdog forces reset if "in gate" longer than 3 s
+//   - Enter when filtered RSSI ≥ enterAt
+//   - Track running max of filtered RSSI while inside the crossing
+//   - Exit when filtered RSSI < exitAt (single sample — the median filter
+//     is what rejects spikes; a second-sample confirm on top of a median
+//     is redundant)
+//   - Fire lap if peak reached enterAt during the crossing
+//   - No enter-hold debounce, no peak-above-exit margin, no ceiling-drift
+//     watchdog: the median filter's inherent spike rejection replaces all
+//     of that machinery.
 // ---------------------------------------------------------------------------
 
 void LapTimer::lapPeakCapture() {
@@ -463,120 +403,61 @@ void LapTimer::lapPeakCapture() {
     const uint32_t now = millis();
     const bool isGate1 = (lapCount == 0 && !lapCountWraparound && gate1Armed);
 
-    bool entryCondition;
-    bool noiseBlipExit;
-    uint8_t holdSamplesRequired;
-
-    {
-        const uint8_t enter = conf->getEnterRssi();
-        const uint8_t exitT = conf->getExitRssi();
-        uint8_t effectiveEnter = enter;
-        // Gate 1 only: relax effective enter slightly so the first crossing
-        // is not lost when enter is set very high relative to exit.
-        const uint8_t gate1RelaxedEnter =
-            (exitT >= (255 - kGate1RelaxMargin)) ? 255 : (uint8_t)(exitT + kGate1RelaxMargin);
-        if (isGate1 && gate1RelaxedEnter < enter) {
-            effectiveEnter = gate1RelaxedEnter;
-            holdSamplesRequired = kGate1HoldSamplesMin;
-        } else {
-            holdSamplesRequired = kEnterHoldSamplesMin;
-        }
-        entryCondition = (cur >= effectiveEnter);
-        noiseBlipExit  = (cur < exitT && rssiPeak == 0);
+    const uint8_t enter = conf->getEnterRssi();
+    const uint8_t exitT = conf->getExitRssi();
+    uint8_t effectiveEnter = enter;
+    // Gate 1 only: relax effective enter slightly so the first crossing
+    // isn't lost when enter is set high relative to exit.
+    const uint8_t gate1RelaxedEnter =
+        (exitT >= (255 - kGate1RelaxMargin)) ? 255 : (uint8_t)(exitT + kGate1RelaxMargin);
+    if (isGate1 && gate1RelaxedEnter < enter) {
+        effectiveEnter = gate1RelaxedEnter;
     }
 
-    if (entryCondition) {
+    if (cur >= effectiveEnter) {
+        // Inside the crossing window: mark entered and track running max.
         if (!enteredGate) {
             enteredGate = true;
-            enterHoldSamples = 1;
-            enterHoldStartMs = now;
-            gateExited = false;
-        } else {
-            if (enterHoldSamples < 255) enterHoldSamples++;
-
-            // Ceiling-drift watchdog: if we've been "in the gate" for too long
-            // without an exit, the antenna RSSI must have drifted up to enter.
-            // Force-reset rather than emit a phantom lap.
-            if ((now - enterHoldStartMs) > kCeilingDriftTimeoutMs) {
-                DEBUG("[FPVGate] Ceiling-drift timeout (>%lu ms in gate) — resetting state\n",
-                      (unsigned long)kCeilingDriftTimeoutMs);
-                enteredGate = false;
-                gateExited = true;
-                enterHoldSamples = 0;
-                enterHoldStartMs = 0;
-                rssiPeak = 0;
-                rssiPeakTimeMs = 0;
-                return;
-            }
+            gateExited  = false;
         }
-
-        if (enterHoldSamples >= holdSamplesRequired) {
-            if (cur > rssiPeak) {
-                rssiPeak = cur;
-                rssiPeakTimeMs = now;
-                DEBUG("*** PEAK CAPTURED: %u (raw=%u kal=%u ma=%u) at %lu ms ***\n",
-                      rssiPeak, lastRawRssi, lastKalmanRssi, lastAvgRssi,
-                      (unsigned long)(rssiPeakTimeMs - startTimeMs));
-            }
-        }
-    } else {
-        if (enteredGate && noiseBlipExit) {
-            enteredGate = false;
-            gateExited = true;
-            enterHoldSamples = 0;
-            enterHoldStartMs = 0;
-        } else {
-            enterHoldSamples = 0;
+        if (cur > rssiPeak) {
+            rssiPeak       = cur;
+            rssiPeakTimeMs = now;
+            DEBUG("*** PEAK CAPTURED: %u (raw=%u) at %lu ms ***\n",
+                  rssiPeak, lastRawRssi,
+                  (unsigned long)(rssiPeakTimeMs - startTimeMs));
         }
     }
 }
 
 bool LapTimer::lapPeakCaptured() {
-    const bool isGate1 = (lapCount == 0 && !lapCountWraparound && gate1Armed);
-    bool validPeak;
-    bool droppedBelowExit;
+    const uint8_t cur   = rssi[rssiCount];
+    const uint8_t exitT = conf->getExitRssi();
 
-    {
-        const uint8_t enter = conf->getEnterRssi();
-        const uint8_t exitT = conf->getExitRssi();
-        uint8_t peakThreshold = enter;
-        const uint8_t gate1RelaxedPeak =
-            (exitT >= (255 - kGate1RelaxMargin)) ? 255 : (uint8_t)(exitT + kGate1RelaxMargin);
-        if (isGate1 && gate1RelaxedPeak < enter) {
-            peakThreshold = gate1RelaxedPeak;
-        }
-        const uint8_t minPeakMargin    = isGate1 ? kGate1PeakMinAboveExit : kPeakMinAboveExit;
-        const uint8_t minPeakAboveExit =
-            (exitT >= (255 - minPeakMargin)) ? 255 : (uint8_t)(exitT + minPeakMargin);
+    // Not currently inside a crossing — nothing to fire.
+    if (!enteredGate) return false;
 
-        validPeak =
-            (rssiPeak > 0) && (rssiPeak >= peakThreshold) && (rssiPeak > minPeakAboveExit);
+    // Filtered value has dropped below exit — end of crossing.
+    if (cur >= exitT) return false;
 
-        // 2-sample raw exit confirm — same as upstream.
-        const uint16_t prevIdx = (rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY;
-        droppedBelowExit = (rssi[rssiCount] < exitT) && (rssi[prevIdx] < exitT);
-    }
-
-    const bool captured = enteredGate && validPeak && droppedBelowExit;
-
-    if (captured) {
-        DEBUG("\n*** LAP DETECTED! ***\n");
-        DEBUG("  Current RSSI: %u\n", rssi[rssiCount]);
-        DEBUG("  Peak was: %u\n", rssiPeak);
-        DEBUG("  Enter: %u  Exit: %u\n", conf->getEnterRssi(), conf->getExitRssi());
-        DEBUG("******************\n\n");
-    }
-
-    if (!captured && enteredGate && droppedBelowExit && !validPeak) {
+    // Peak was captured during the crossing (any sample that reached enter
+    // has been recorded).  No margin check: if we entered, the median-
+    // filtered signal already reached enterAt, which is by definition a
+    // valid pass.
+    if (rssiPeak == 0) {
+        // Should not happen if enteredGate == true, but guard anyway —
+        // reset state and skip.
         enteredGate = false;
-        gateExited = true;
-        enterHoldSamples = 0;
-        enterHoldStartMs = 0;
-        rssiPeak = 0;
-        rssiPeakTimeMs = 0;
+        gateExited  = true;
+        return false;
     }
 
-    return captured;
+    DEBUG("\n*** LAP DETECTED! ***\n");
+    DEBUG("  Current RSSI: %u\n", cur);
+    DEBUG("  Peak was: %u\n", rssiPeak);
+    DEBUG("  Enter: %u  Exit: %u\n", conf->getEnterRssi(), exitT);
+    DEBUG("******************\n\n");
+    return true;
 }
 
 void LapTimer::startLap() {
@@ -586,9 +467,7 @@ void LapTimer::startLap() {
     rssiPeakTimeMs = 0;
 
     enteredGate = false;
-    enterHoldSamples = 0;
-    enterHoldStartMs = 0;
-    gateExited = true;
+    gateExited  = true;
 
     buz->beep(200);
     led->on(200);
