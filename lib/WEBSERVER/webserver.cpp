@@ -396,6 +396,7 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     uint8_t  masterChan    = conf ? conf->getChannelIndex()      : 0;
     uint16_t masterFreq    = conf ? conf->getFrequency()         : 0;
     bool     masterSkip    = conf ? conf->getMnSkipMasterStart() : false;
+    uint8_t  masterFastDrn = conf ? conf->getFastDroneMode()     : 0;
 
     uint32_t elapsedMs     = timer ? timer->getElapsedMs() : 0;
     bool     prearmActive  = multiNode && multiNode->getPrearmPhase();
@@ -430,6 +431,7 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     out += ",\"skipEnabled\":";  out += masterSkip ? "true" : "false";
     out += ",\"enterRssi\":";    out += masterEnter;
     out += ",\"exitRssi\":";     out += masterExit;
+    out += ",\"fastDroneMode\":"; out += (int)masterFastDrn;
     out += ",\"running\":";      out += masterRunning ? "true" : "false";
     out += ",\"lapCount\":";     out += masterCnt;
     out += ",\"laps\":[";
@@ -464,6 +466,7 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
             out += ",\"apSuffix\":\"";     _jsonEscapeAppend(out, n.apSuffix); out += "\"";
             out += ",\"enterRssi\":";      out += (int)n.enterRssi;
             out += ",\"exitRssi\":";       out += (int)n.exitRssi;
+            out += ",\"fastDroneMode\":";  out += (int)n.fastDroneMode;
             out += ",\"laps\":[";
             for (size_t i = 0; i < n.laps.size(); i++) {
                 if (i > 0) out += ',';
@@ -2454,13 +2457,14 @@ EEPROM:\n\
 
             String macAddress   = obj["mac"]      | "";
             String apSuffix     = obj["apSuffix"] | "";   // last 6 hex chars of the client's broadcast SSID
-            uint8_t enterRssi   = obj["enterRssi"] | 0;
-            uint8_t exitRssi    = obj["exitRssi"]  | 0;
-            uint8_t assignedId  = obj["nodeId"]   | 0;    // client's self-reported nodeId (0 on first registration)
+            uint8_t enterRssi     = obj["enterRssi"]     | 0;
+            uint8_t exitRssi      = obj["exitRssi"]      | 0;
+            uint8_t fastDroneMode = obj["fastDroneMode"] | 0;
+            uint8_t assignedId    = obj["nodeId"]        | 0;    // client's self-reported nodeId (0 on first registration)
             bool stateChanged = false;
             bool ok = multiNode->handleRegister(pilotName,
                                                  pilotColor, bandIndex, channelIndex, freq,
-                                                 enterRssi, exitRssi,
+                                                 enterRssi, exitRssi, fastDroneMode,
                                                  staIP, clientIP,
                                                  macAddress, apSuffix, assignedId,
                                                  stateChanged);
@@ -2693,6 +2697,8 @@ EEPROM:\n\
             uint8_t    enterRssi        = obj["enterRssi"]        | 0;
             bool       hasExit          = obj.containsKey("exitRssi");
             uint8_t    exitRssi         = obj["exitRssi"]         | 0;
+            bool       hasFastDrone     = obj.containsKey("fastDroneMode");
+            uint8_t    fastDroneMode    = obj["fastDroneMode"]    | 0;
 
             // nodeId 0 is the master itself — short-circuit the HTTP proxy
             // (we'd be trying to talk to ourselves) and apply the patch
@@ -2708,9 +2714,10 @@ EEPROM:\n\
                     patch["chan"] = chanIndex;
                     patch["freq"] = freq;
                 }
-                if (hasSkip)  patch["mnSkipMasterStart"] = skipMasterStart;
-                if (hasEnter) patch["enterRssi"]         = enterRssi;
-                if (hasExit)  patch["exitRssi"]          = exitRssi;
+                if (hasSkip)      patch["mnSkipMasterStart"] = skipMasterStart;
+                if (hasEnter)     patch["enterRssi"]         = enterRssi;
+                if (hasExit)      patch["exitRssi"]          = exitRssi;
+                if (hasFastDrone) patch["fastDroneMode"]     = fastDroneMode;
                 conf->fromJson(patch.as<JsonObject>());
                 conf->write();
                 DynamicJsonDocument notify(128);
@@ -2750,9 +2757,10 @@ EEPROM:\n\
                     body["chan"] = chanIndex;
                     body["freq"] = freq;
                 }
-                if (hasSkip)  body["mnSkipMasterStart"] = skipMasterStart;
-                if (hasEnter) body["enterRssi"]         = enterRssi;
-                if (hasExit)  body["exitRssi"]          = exitRssi;
+                if (hasSkip)      body["mnSkipMasterStart"] = skipMasterStart;
+                if (hasEnter)     body["enterRssi"]         = enterRssi;
+                if (hasExit)      body["exitRssi"]          = exitRssi;
+                if (hasFastDrone) body["fastDroneMode"]     = fastDroneMode;
                 String bodyStr;
                 serializeJson(body, bodyStr);
                 sent = (http.POST(bodyStr) == 200);
@@ -2761,13 +2769,14 @@ EEPROM:\n\
             if (sent) {
                 if (hasPilotName || hasPilotColor) multiNode->updateNodePilot(nodeId, pilotName, pilotColor);
                 if (hasBand)  multiNode->updateNodeChannel(nodeId, bandIndex, chanIndex, freq);
-                // Update master's cached NodeInfo for RSSI so the modal sees fresh values
-                // without waiting for the next registration.
-                if (hasEnter || hasExit) {
+                // Update master's cached NodeInfo so the modal sees fresh
+                // values without waiting for the next registration.
+                if (hasEnter || hasExit || hasFastDrone) {
                     for (auto& n : const_cast<std::vector<NodeInfo>&>(multiNode->getNodes())) {
                         if (n.nodeId == nodeId) {
-                            if (hasEnter) n.enterRssi = enterRssi;
-                            if (hasExit)  n.exitRssi  = exitRssi;
+                            if (hasEnter)     n.enterRssi     = enterRssi;
+                            if (hasExit)      n.exitRssi      = exitRssi;
+                            if (hasFastDrone) n.fastDroneMode = fastDroneMode;
                             break;
                         }
                     }
@@ -2815,6 +2824,7 @@ EEPROM:\n\
             if (obj.containsKey("mnSkipMasterStart")) patch["mnSkipMasterStart"] = obj["mnSkipMasterStart"].as<uint8_t>();
             if (obj.containsKey("enterRssi"))         patch["enterRssi"]         = obj["enterRssi"].as<uint8_t>();
             if (obj.containsKey("exitRssi"))          patch["exitRssi"]          = obj["exitRssi"].as<uint8_t>();
+            if (obj.containsKey("fastDroneMode"))     patch["fastDroneMode"]     = obj["fastDroneMode"].as<uint8_t>();
             conf->fromJson(patch.as<JsonObject>());
             conf->write();
             // Push update to this client's browser so name/color reflect immediately

@@ -16,6 +16,12 @@ class RX5808 {
     void handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyNewFreq);
     bool verifyFrequency();
     bool isSettingFrequency();
+    // Whatever frequency setFrequency() last programmed.  Exposed for the
+    // selftest's cleanup path: after the frequency-sweep loop it needs to
+    // restore this value and re-verify so the UI's "Calibrating pilot
+    // frequency" banner gets its expected "RX5808 frequency verified
+    // properly" log line.
+    uint16_t getCurrentFrequency() const { return currentFrequency; }
     bool recentSetFreqFlag = false;
 
    private:

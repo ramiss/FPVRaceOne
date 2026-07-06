@@ -52,6 +52,23 @@ static inline uint8_t medianNFromSlider(uint8_t level) {
 // ── Gate-1 relaxations (used only when gate1Bootstrap is enabled) ────────
 static const uint8_t kGate1RelaxMargin = 4;   // effective Gate-1 enter ~= exit + 4 (if enter is much higher)
 
+// ── Detection safety knobs ────────────────────────────────────────────────
+//
+// The 2-sample enter debounce is now a RUNTIME config field
+// (`conf->getFastDroneMode()`): the user can flip it via the "Fast Drone
+// Mode" toggle in Signal Processing settings (also exposed per-pilot on
+// the master's Edit Pilot modal for multi-node fleets).  When Fast Drone
+// Mode is ON, the debounce is skipped and any single sample above enter
+// starts the crossing — catches very fast passes at the cost of more
+// noise-induced false positives.
+//
+// The ceiling-drift watchdog stays compile-time because it's a pure
+// safety net with no downside in normal operation.  Flip
+// kEnableCeilingWatchdog to false for bench characterisation only.
+static constexpr uint8_t  kEnterHoldMin          = 2;
+static constexpr bool     kEnableCeilingWatchdog = true;
+static constexpr uint32_t kCeilingDriftTimeoutMs = 3000;
+
 void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook) {
     conf = config;
     rx = rx5808;
@@ -78,6 +95,8 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     enteredGate          = false;
     gateExited           = true;
     gate1Armed           = false;
+    enterHoldSamples     = 0;
+    enterHoldStartMs     = 0;
 
 #if RSSI_STREAM_ENABLED
     _lastStreamMs    = 0;
@@ -95,9 +114,12 @@ void LapTimer::start() {
     DEBUG("\nCurrent RSSI: %u\n", rssi[rssiCount]);
     DEBUG("====================\n\n");
 
-    // Re-apply the configured median window in case the user changed the
-    // slider between races.  setWindow() only clears history when the size
-    // actually changed, so a same-size call is a cheap no-op.
+    // Fresh median every race (Fix #6) — clears any samples accumulated
+    // during the idle/countdown window so the first race sample doesn't
+    // mix with stale pre-race noise.  Combined with the isFilled() gate
+    // in the RUNNING branch, this gives a clean ~N-sample warmup before
+    // detection begins.
+    medianFilter.reset();
     medianFilter.setWindow(medianNFromSlider(conf ? conf->getV1Smoothing() : 5));
 
     lapCount = 0;
@@ -111,9 +133,11 @@ void LapTimer::start() {
     rssiPeak = 0;
     rssiPeakTimeMs = 0;
 
-    gateExited  = true;   // Gate 1 may open immediately at race start
-    enteredGate = false;
-    gate1Armed  = false;  // Gate-1 bootstrap re-arms each race
+    gateExited       = true;   // Gate 1 may open immediately at race start
+    enteredGate      = false;
+    gate1Armed       = false;  // Gate-1 bootstrap re-arms each race
+    enterHoldSamples = 0;
+    enterHoldStartMs = 0;
 
 #if RSSI_STREAM_ENABLED
     _lastStreamMs  = 0;
@@ -159,9 +183,11 @@ void LapTimer::stop() {
     rssiPeakTimeMs = 0;
     startTimeMs = 0;
 
-    gateExited  = true;
-    enteredGate = false;
-    gate1Armed  = false;
+    gateExited       = true;
+    enteredGate      = false;
+    gate1Armed       = false;
+    enterHoldSamples = 0;
+    enterHoldStartMs = 0;
 
     // lapCount and lapTimes are intentionally preserved so they survive page refresh
     // after the race ends. They are reset when the next race starts().
@@ -254,7 +280,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     snapshot.timerState  = (uint8_t)state;
     snapshot.enteredGate = enteredGate;
     snapshot.gateExited  = gateExited;
-    snapshot.enterHoldSamples = 0;      // debounce removed — always 0 in the log
+    snapshot.enterHoldSamples = enterHoldSamples;   // debounce is back (Fix #1)
     snapshot.filterMode  = 0;
     // snapshot.lapEvent is set in finishLap(); lapTimeMs and lapCount updated there
 #endif
@@ -306,6 +332,11 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             break;
 
         case WAITING:
+            // Fix #5: skip detection until the median filter has enough
+            // samples to give a representative output.  Prevents cold-
+            // start bias (a partially-filled median is skewed upward)
+            // from firing spurious enter crossings.
+            if (!medianFilter.isFilled()) break;
             lapPeakCapture();
             if (lapPeakCaptured()) {
                 state = RUNNING;
@@ -314,8 +345,14 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             break;
 
         case RUNNING: {
+            // Fix #5: same warm-up gate as above.  The median filter is
+            // reset in start() (Fix #6), so we need ~N samples of new
+            // race data before we trust it for detection.
+            if (!medianFilter.isFilled()) break;
             const bool isGate1 = (lapCount == 0 && !lapCountWraparound);
-            const bool minLapElapsed = (currentTimeMs - startTimeMs) > conf->getMinLapMs();
+            // Fix #4: use >= so the exact-boundary tick counts as elapsed
+            // (previously off by one sample).
+            const bool minLapElapsed = (currentTimeMs - startTimeMs) >= conf->getMinLapMs();
             bool canCapture = false;
 
             // gate1Bootstrap=on: run the first-lap bootstrap.  If the drone
@@ -332,19 +369,24 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
                     gate1Armed = true;
 
                     if (cur >= enter) {
-                        // In-gate at start — seed the peak so the first
-                        // filtered drop below exit fires Gate 1.
-                        enteredGate    = true;
-                        gateExited     = false;
-                        rssiPeak       = cur;
-                        rssiPeakTimeMs = now;
+                        // In-gate at start — seed the peak AND the debounce
+                        // state (as if debounce had already been satisfied)
+                        // so the first filtered drop below exit fires Gate 1.
+                        enteredGate      = true;
+                        gateExited       = false;
+                        rssiPeak         = cur;
+                        rssiPeakTimeMs   = now;
+                        enterHoldSamples = kEnterHoldMin;
+                        enterHoldStartMs = now;
                         DEBUG("[Gate1] Armed in-gate bootstrap (cur=%u enter=%u)\n", cur, enter);
                     } else {
                         // Out-of-gate at start — normal enter → peak → exit.
-                        enteredGate    = false;
-                        gateExited     = true;
-                        rssiPeak       = 0;
-                        rssiPeakTimeMs = 0;
+                        enteredGate      = false;
+                        gateExited       = true;
+                        rssiPeak         = 0;
+                        rssiPeakTimeMs   = 0;
+                        enterHoldSamples = 0;
+                        enterHoldStartMs = 0;
                         DEBUG("[Gate1] Armed out-of-gate bootstrap (cur=%u enter=%u)\n", cur, enter);
                     }
                 }
@@ -415,18 +457,56 @@ void LapTimer::lapPeakCapture() {
     }
 
     if (cur >= effectiveEnter) {
-        // Inside the crossing window: mark entered and track running max.
-        if (!enteredGate) {
-            enteredGate = true;
-            gateExited  = false;
+        // Count consecutive at-or-above-enter samples for debounce.
+        if (enterHoldSamples < 255) enterHoldSamples++;
+        if (enterHoldStartMs == 0) enterHoldStartMs = now;
+
+        // Enter debounce: require kEnterHoldMin consecutive samples above
+        // enter before starting the crossing.  Fast Drone Mode (runtime
+        // config) skips this, letting a single median-sample above enter
+        // start the crossing — needed to catch extreme-speed passes whose
+        // apex spans only 1-2 samples, at the cost of more noise-triggered
+        // false laps in RF-cluttered environments.
+        const uint8_t needed = conf->getFastDroneMode() ? 1 : kEnterHoldMin;
+
+        if (enterHoldSamples >= needed) {
+            if (!enteredGate) {
+                enteredGate = true;
+                gateExited  = false;
+            }
+            if (cur > rssiPeak) {
+                rssiPeak       = cur;
+                rssiPeakTimeMs = now;
+                DEBUG("*** PEAK CAPTURED: %u (raw=%u) at %lu ms ***\n",
+                      rssiPeak, lastRawRssi,
+                      (unsigned long)(rssiPeakTimeMs - startTimeMs));
+            }
         }
-        if (cur > rssiPeak) {
-            rssiPeak       = cur;
-            rssiPeakTimeMs = now;
-            DEBUG("*** PEAK CAPTURED: %u (raw=%u) at %lu ms ***\n",
-                  rssiPeak, lastRawRssi,
-                  (unsigned long)(rssiPeakTimeMs - startTimeMs));
+
+        // Ceiling-drift watchdog (Fix #3): if we've been "in gate" too long
+        // without an exit, the antenna baseline must have drifted up to
+        // enter.  Force-reset so detection can recover.  Flip
+        // kEnableCeilingWatchdog to false at compile time to observe the
+        // stuck-state behaviour directly.
+        if (kEnableCeilingWatchdog && enteredGate &&
+            (now - enterHoldStartMs) > kCeilingDriftTimeoutMs) {
+            DEBUG("[LAP] Ceiling-drift timeout (>%lu ms in gate) — resetting state\n",
+                  (unsigned long)kCeilingDriftTimeoutMs);
+            enteredGate      = false;
+            gateExited       = true;
+            rssiPeak         = 0;
+            rssiPeakTimeMs   = 0;
+            enterHoldSamples = 0;
+            enterHoldStartMs = 0;
         }
+    } else {
+        // Below enter: reset the debounce counter so a future above-enter
+        // burst starts a fresh count.  Do NOT clear enteredGate here — if
+        // the crossing already started (debounce satisfied earlier in this
+        // pass), we're descending from the peak and lapPeakCaptured() will
+        // fire the lap when we drop below exit.
+        enterHoldSamples = 0;
+        if (!enteredGate) enterHoldStartMs = 0;
     }
 }
 
@@ -466,8 +546,10 @@ void LapTimer::startLap() {
     rssiPeak = 0;
     rssiPeakTimeMs = 0;
 
-    enteredGate = false;
-    gateExited  = true;
+    enteredGate      = false;
+    gateExited       = true;
+    enterHoldSamples = 0;
+    enterHoldStartMs = 0;
 
     buz->beep(200);
     led->on(200);

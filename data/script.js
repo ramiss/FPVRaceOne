@@ -7202,6 +7202,14 @@ function openSettingsModal() {
           v1SmoothingSlider.value = Number.isFinite(v) ? v : 5;
           if (v1SmoothingSpan) v1SmoothingSpan.textContent = v1SmoothingSlider.value;
         }
+        // UI-facing name is "Disable Debounce"; internal config key stays
+        // fastDroneMode so all the multi-node sync plumbing keeps working.
+        const disableDebounceToggle = document.getElementById('disableDebounceToggle');
+        const disableDebounceLabel  = document.getElementById('disableDebounceLabel');
+        if (disableDebounceToggle && config.fastDroneMode !== undefined) {
+          disableDebounceToggle.checked = (parseInt(config.fastDroneMode, 10) || 0) === 1;
+          if (disableDebounceLabel) disableDebounceLabel.textContent = disableDebounceToggle.checked ? 'On' : 'Off';
+        }
 
         // Multi-node settings
         // Update mnNodeMode FIRST so onNodeModeChange() (which calls
@@ -8517,6 +8525,7 @@ function _mnSetPilotModalLocked(locked) {
     'mnPilotModalEnter',
     'mnPilotModalExit',
     'mnPilotModalSkip',
+    'mnPilotModalDisableDebounce',
     'mnPilotModalRssiToggle',
     'mnPilotModalCalibrateBtn',
   ];
@@ -8574,6 +8583,10 @@ function mnOpenPilotModal(nodeId) {
   }
   const skipEl = document.getElementById('mnPilotModalSkip');
   if (skipEl) skipEl.checked = !!(node && node.skipEnabled);
+  // Modal checkbox is "Disable Debounce"; the underlying node field is
+  // still node.fastDroneMode (sent by the client in registration).
+  const fastEl = document.getElementById('mnPilotModalDisableDebounce');
+  if (fastEl) fastEl.checked = !!(node && node.fastDroneMode);
   // Enter/Exit RSSI — populate from the node's last-reported values (sent by
   // the client in registration; updated by the wizard / Save flow).
   const enterEl = document.getElementById('mnPilotModalEnter');
@@ -8754,6 +8767,8 @@ async function mnSavePilotModal() {
   const freq           = (freqLookup[bandIndex] || [])[chanIndex] || 0;
   const skipEl         = document.getElementById('mnPilotModalSkip');
   const skipMasterStart = skipEl ? (skipEl.checked ? 1 : 0) : undefined;
+  const fastEl         = document.getElementById('mnPilotModalDisableDebounce');
+  const fastDroneMode  = fastEl ? (fastEl.checked ? 1 : 0) : undefined;
   // Move-to-slot selection — only acted on if it differs from the current
   // slot AND this isn't the master's own card (master can't move).
   const moveEl     = document.getElementById('mnPilotModalMoveSlot');
@@ -8768,6 +8783,7 @@ async function mnSavePilotModal() {
   try {
     const body = { nodeId, pilotName: name, pilotColor, band: bandIndex, chan: chanIndex, freq };
     if (skipMasterStart !== undefined) body.skipMasterStart = skipMasterStart;
+    if (fastDroneMode  !== undefined) body.fastDroneMode  = fastDroneMode;
     // Enter/Exit RSSI sliders — push their current values so the client picks
     // them up.  The master's editPilot proxy treats these as optional fields.
     const enterEl = document.getElementById('mnPilotModalEnter');

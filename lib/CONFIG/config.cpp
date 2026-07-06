@@ -161,6 +161,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["wifiTxPower"] = conf.wifiTxPower;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["v1Smoothing"] = conf.v1Smoothing;
+    config["fastDroneMode"] = conf.fastDroneMode;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -212,6 +213,7 @@ void Config::toJsonString(char* buf) {
     config["pwd"] = conf.password;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["v1Smoothing"] = conf.v1Smoothing;
+    config["fastDroneMode"] = conf.fastDroneMode;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -421,6 +423,7 @@ void Config::fromJson(JsonObject source) {
     // ===== Signal processing mode =====
     if (source.containsKey("gate1Bootstrap"))   setU8("gate1Bootstrap",   conf.gate1Bootstrap,    0, 1);
     if (source.containsKey("v1Smoothing"))      setU8("v1Smoothing",      conf.v1Smoothing,       0, 10);
+    if (source.containsKey("fastDroneMode"))    setU8("fastDroneMode",    conf.fastDroneMode,     0, 1);
 
     // ===== Multi-node =====
     if (source.containsKey("nodeMode"))           setU8("nodeMode", conf.nodeMode, 0, 2);
@@ -582,6 +585,18 @@ uint8_t Config::getGate1Bootstrap() {
 
 uint8_t Config::getV1Smoothing() {
     return conf.v1Smoothing;
+}
+
+uint8_t Config::getFastDroneMode() {
+    return conf.fastDroneMode;
+}
+
+void Config::setFastDroneMode(uint8_t enabled) {
+    uint8_t v = enabled ? 1 : 0;
+    if (conf.fastDroneMode != v) {
+        conf.fastDroneMode = v;
+        modified = true;
+    }
 }
 
 char* Config::getPilotName() {
@@ -886,7 +901,8 @@ void Config::setDefaults(void) {
     conf.wifiExtAntenna = 1;  // External antenna by default (matches hardware)
     conf.wifiTxPower = 21;    // Maximum TX power by default
     conf.gate1Bootstrap = 0;      // Gate-1 bootstrap, off by default
-    conf.v1Smoothing = 5;         // EMA smoothing — 5 maps to alpha 0.15 (upstream default)
+    conf.v1Smoothing = 5;         // Pipeline smoothing — 5 maps to N=7 median window (default)
+    conf.fastDroneMode = 0;       // Fast Drone Mode off by default (2-sample enter debounce active)
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));

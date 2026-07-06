@@ -300,6 +300,19 @@ TestResult SelfTest::testRX5808(RX5808* rx5808) {
         return result;
     }
 
+    // Save the frequency the RX was on before we start sweeping so we can
+    // restore it — AND run verifyFrequency() at the end — for the sake of
+    // the UI's "Calibrating pilot frequency" banner.  The banner is toggled
+    // by parsing debug-log lines: "Setting frequency to" shows it, "RX5808
+    // frequency verified properly" hides it.  Without an explicit restore
+    // + verify here, the natural post-selftest cleanup path never emits the
+    // "verified properly" line and the banner sticks on forever.  Root
+    // cause: selftest clears `recentSetFreqFlag = false` after each
+    // setFrequency, which also clobbers the flag set by the concurrent
+    // parallelTask's own setFrequency(config) preemption — so
+    // handleFrequencyChange's verify branch never triggers.
+    const uint16_t initialFreq = rx5808->getCurrentFrequency();
+
     // We can't truly "verify frequency" (RX5808 has no readback).
     // Instead, infer operation by scanning a few common channels and looking
     // for RSSI variation / peaks that suggest real RF energy is being received.
@@ -348,6 +361,22 @@ TestResult SelfTest::testRX5808(RX5808* rx5808) {
 
     const uint8_t span = (uint8_t)(maxRssi - minRssi);
 
+    // ── Cleanup helper — MUST run before every return path ────────────────
+    // Restore the pre-test frequency and explicitly verify.  Emits both the
+    // "Setting frequency to X" (banner-show) AND "RX5808 frequency verified
+    // properly" (banner-hide) log lines the frontend polls for.  Ordering:
+    // set → wait → verify → clear the flag so main loop's handleFreqChange
+    // doesn't re-verify redundantly.  If initialFreq was 0 (device booted
+    // straight into selftest — unlikely), skip the restore; main loop will
+    // set it on its next tick.
+    auto restoreRx = [rx5808, initialFreq]() {
+        if (!rx5808 || initialFreq == 0) return;
+        rx5808->setFrequency(initialFreq);
+        delay(RX5808_MIN_TUNETIME + 100);
+        rx5808->verifyFrequency();
+        rx5808->recentSetFreqFlag = false;
+    };
+
     // Heuristics:
     // - If maxRssi is non-zero and we see a meaningful span, we're likely receiving RF energy.
     // - If everything is 0 (min=max=0), we cannot infer anything -> FAIL (but with clear guidance).
@@ -360,6 +389,7 @@ TestResult SelfTest::testRX5808(RX5808* rx5808) {
         result.details =
             "RSSI flatlined at 0 across scan. "
             "If receiver works elsewhere, this may be ADC scaling/attenuation or no RF present.";
+        restoreRx();
         result.duration_ms = millis() - start;
         return result;
     }
@@ -374,6 +404,7 @@ TestResult SelfTest::testRX5808(RX5808* rx5808) {
             " MHz, max=" + String(maxRssi) + " @ " + String(maxFreq) +
             " MHz, span=" + String(span) + "). "
             "Try powering a VTX near the gate and re-run selftest.";
+        restoreRx();
         result.duration_ms = millis() - start;
         return result;
     }
@@ -384,6 +415,7 @@ TestResult SelfTest::testRX5808(RX5808* rx5808) {
         " MHz, max=" + String(maxRssi) + " @ " + String(maxFreq) +
         " MHz, span=" + String(span) +
         ", samples=" + String(firstAvg) + "/" + String(midAvg) + "/" + String(lastAvg) + ").";
+    restoreRx();
     result.duration_ms = millis() - start;
     return result;
 }

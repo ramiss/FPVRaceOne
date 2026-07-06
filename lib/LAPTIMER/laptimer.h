@@ -155,12 +155,16 @@ class LapTimer {
     uint32_t rssiPeakTimeMs;
     uint8_t lastLapPeakRssi = 0;  // peak RSSI of the most recently completed lap
 
-    // Gate state tracking — RotorHazard-style: no enter-hold debounce, no
-    // ceiling-drift watchdog.  The median filter is what rejects transient
-    // spikes; there's no need for a redundant sample-count debounce on top.
-    bool gateExited;          // True when gate has re-armed (crossed back below exit)
-    bool enteredGate;         // True once filtered RSSI crossed enterAt
-    bool gate1Armed;          // Gate-1 bootstrap fired for current race
+    // Gate state tracking.  The 2-sample enter-hold debounce sits alongside
+    // the median filter's spike rejection; it can be disabled at runtime via
+    // the "Fast Drone Mode" toggle (conf->getFastDroneMode()) for extreme-
+    // speed passes.  The ceiling-drift watchdog stays compile-time
+    // (kEnableCeilingWatchdog in laptimer.cpp) since it's a pure safety net.
+    bool     gateExited;        // True when gate has re-armed (crossed back below exit)
+    bool     enteredGate;       // True once filtered RSSI crossed enterAt for enough samples
+    bool     gate1Armed;        // Gate-1 bootstrap fired for current race
+    uint8_t  enterHoldSamples;  // Consecutive at-or-above-enter samples (debounce counter)
+    uint32_t enterHoldStartMs;  // millis() when we first saw at-or-above-enter (0 = reset)
 
 #if RSSI_STREAM_ENABLED
     // USB RSSI stream (toggle via /api/rssistream)
