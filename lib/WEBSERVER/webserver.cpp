@@ -1454,18 +1454,19 @@ EEPROM:\n\
         led->on(200);
     });
 
-    // Peak-since-last-call RSSI as a single value.  Used by the master's
-    // Edit Pilot modal to poll a client's live signal at 5 Hz over HTTP.
-    // We return the PEAK rather than the instantaneous sample because a
-    // fast drone's gate pass produces a peak that may only last a few ms —
-    // sampling at 5 Hz would miss it most of the time.  The accumulator
-    // updates at full sample rate (handleLapTimerUpdate, hundreds of Hz)
-    // so we always capture the true peak between polls.
+    // Instantaneous median-filtered RSSI as a single value.  Used by the
+    // master's Edit Pilot modal (own card via direct call, client cards via
+    // the /api/multinode/rssi proxy) to draw a live signal chart at 5 Hz.
     //
-    // The Calibration tab's chart is unaffected — it uses the separate
-    // SSE "rssi" event which still streams getRssi() at 10 Hz.
+    // History: this endpoint previously returned getRssiPeakSinceLast() —
+    // the maximum sample seen between polls — to catch fast-drone peaks
+    // even at a low poll rate.  In practice with the median filter the
+    // peak-of-window was dominated by noise-driven brief excursions, so
+    // the Edit Pilot chart showed a wildly bouncing trace 3× the amplitude
+    // of the Calibration tab for the same idle signal.  Returning the
+    // instantaneous filtered value makes the two views consistent.
     server.on("/timer/rssi", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        uint8_t rssi = timer ? timer->getRssiPeakSinceLast() : 0;
+        uint8_t rssi = timer ? timer->getRssi() : 0;
         char buf[24];
         snprintf(buf, sizeof(buf), "{\"rssi\":%u}", rssi);
         request->send(200, "application/json", buf);

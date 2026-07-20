@@ -238,11 +238,6 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // Store final value used by lap logic
     rssi[rssiCount] = out;
 
-    // Track the peak between web reads — the modal's live RSSI view at 5 Hz
-    // would otherwise miss the brief peak of a fast pass.  Sampling here
-    // runs at hundreds of Hz so we catch the actual maximum.
-    if (out > rssiPeakSinceLast) rssiPeakSinceLast = out;
-
     // ── One-shot: measure the loop sample rate over the first ~2 s of
     // uptime and log it.  Helps the operator know whether the median
     // window they picked lands in the intended time window — e.g. N=7 at
@@ -593,17 +588,6 @@ uint8_t LapTimer::getRssi() {
     // points to the *next* slot to write. The most recently written value is one
     // slot behind.
     return rssi[(rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY];
-}
-
-uint8_t LapTimer::getRssiPeakSinceLast() {
-    // Read-then-reset.  Reset back to the latest sample (not 0) so a caller
-    // who polls during a "quiet" interval sees the current floor rather
-    // than a spurious zero.  Small race window if a sample lands between
-    // the two lines — at most one peak update lost, indistinguishable from
-    // the sample being 1 ms late.
-    uint8_t peak = rssiPeakSinceLast;
-    rssiPeakSinceLast = rssi[(rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY];
-    return peak;
 }
 
 uint32_t LapTimer::getLapTime() {
