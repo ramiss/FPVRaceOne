@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-A single node personal lap timing solution for 5.8 GHz FPV drones that can be networked for multi-pilot racing. Perfect for personal practice sessions on small indoor tracks using a single unit, up to large scale MultiGP race events with multiple units. No transponders, no complex infrastructure — just plug in a USB battery, wirelessly connect, calibrate, and fly.
+A single node personal lap timing solution for 5.8 GHz FPV drones that can be networked to other units (8 total) for multi-pilot racing. Perfect for personal race or practice sessions with one unit (indoor and large scale) up to MultiGP race events with multiple units. No additional networking hardware required — just plug in a USB power, connect over wifi, calibrate, and fly.
 
 **Up to 8 devices can wirelessly network with each other to act as a single multi-node lap timer (no additional hardware or software needed)** — one device is set to master mode and acts as race director with up to 7 additional clients. Manually connect clients or have the master automatically recruit clients in range.  Master can see all pilot times and control the race, while single pilots can remain logged into their device and see all other racer times - or initiate individual practice races. 
 
@@ -71,24 +71,24 @@ The time between consecutive peaks is your lap time. The signal processing pipel
 - **Built-in Multi-Node Networking** — up to 8 lap timers can connect together to to run a multi pilot race.
 
 ### Signal Processing
-A single 5-stage RSSI processing pipeline: 
+An RSSI processing pipeline optimized for the ESP32:
 **Kalman → Median-of-3 → 7-sample moving average → EMA → step limiter**
 
 ### RSSI Automatic Calibration Wizard
-- Guided fly-over recording with real-time RSSI chart
+Guided calibration wizard with real-time RSSI charts: Fly 3 passes over the start gate (timer) and let the wizard auto calibrate
 - Automatic 3-peak detection with manual override
 - Enter / Exit threshold calculation with conservative safety margins (Enter ≈ 95 % of weakest peak, Exit ≈ 7 RSSI units below Enter, raised above the noise floor)
 - Peak-spread warning if the three peaks aren't reasonably equal — flagged for re-fly before applying
 - Live RSSI chart shows exactly what the lap detector sees (final pipeline output)
-**Note that the device can only record for 100 seconds. it is recommended to fly through the timing gate, to the next closest gate, and repeat twice more.
+**Note that the timer can only record for 100 seconds. It is recommended to fly through the timing gate, to the next closest gate, back through the gate to the next gate and back through a third time. Land and stop recording.
 
 ### Multi-Node Racing — Built-In Race Directing
-Network **up to 8 devices** together with no router and no extra hardware. One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically.
+Network **up to 8 devices** together using on-board Wifi (no router or extra hardware required). One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically. Each pilot should remain connected to their own device over wifi.  All devices in multi-mode will see the entire race board.
 
-- **Master Recruit** — the master scans for every `FPVRaceOne_*` AP in range and configures each one as a client in one tap. Ad-hoc events with pilots who haven't pre-configured their timers go from "everyone open Settings" to "tap one button"
-- **One-tap Start All / Stop All** — broadcast a synchronised race start to every pilot on the network
-- **Live per-pilot dashboard on the master** — each client renders as a card with pilot name, running indicator (●/○), live lap count, and last lap time, updated via Server-Sent Events with sub-second latency. Slot cards labelled A through G match what the director sees in serial logs
-- **Edit pilot from the Race tab** — pencil icon on every slot card opens a per-pilot editor for name, color, band, channel, RSSI thresholds, and skip flag — works on the master's own host card too
+- **Master Recruit** — the master can automatically scan for FPVRaceOne clients in range and configure them to joing the network. Or each client can search for a master and connect manually.
+- **One-tap Start All / Stop All** — broadcast a synchronised race start to all pilot on the network
+- **Live all-pilots dashboard on the master and clients** — each client renders as a card with pilot name, running indicator (●/○), live lap count, and last lap time, updated via Server-Sent Events with sub-second latency. Slot cards labelled A through G match what the director sees in serial logs
+- **Master can edit and configure all pilots from the Race tab** — pencil icon on every slot card opens a per-pilot editor for name, color, band, channel, RSSI thresholds, and skip flag — works on the master's own host card too
 - **Calibration Wizard from the modal** — run the full guided wizard against any connected client; the wizard records on the target client and pushes thresholds back when you click Apply
 - **Live RSSI feed in the modal** — toggle on the right of the title polls the selected client at 5 Hz; the firmware-side peak-since-last sampler catches a brief gate pass even at that rate. Red Enter / orange Exit threshold lines track the sliders as you drag
 - **Move (Swap) Pilot to Slot** — letter dropdown (A–G) reassigns a node to a different slot; if it's occupied, the two pilots swap places and both persist their new slot to NVS
