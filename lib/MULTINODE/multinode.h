@@ -34,7 +34,6 @@ struct NodeInfo {
     uint16_t frequency    = 0;
     uint8_t  enterRssi    = 0;   // sent by client in registration so the master's Edit Pilot modal can show + edit it
     uint8_t  exitRssi     = 0;
-    uint8_t  fastDroneMode = 0;  // 1=client has Fast Drone Mode enabled (no enter debounce); shown on master's Edit Pilot modal
     String   clientIP;   // client's own AP IP (master uses this to push commands)
     String   staIP;      // client's STA IP assigned by master's DHCP
     String   macAddress; // client's WiFi MAC — primary unique key
@@ -86,7 +85,6 @@ public:
                           uint32_t pilotColor,
                           uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
                           uint8_t enterRssi, uint8_t exitRssi,
-                          uint8_t fastDroneMode,
                           const String& staIP, const String& clientIP,
                           const String& macAddress,
                           const String& apSuffix,

@@ -52,19 +52,26 @@ static inline uint8_t medianNFromSlider(uint8_t level) {
 // ── Gate-1 relaxations (used only when gate1Bootstrap is enabled) ────────
 static const uint8_t kGate1RelaxMargin = 4;   // effective Gate-1 enter ~= exit + 4 (if enter is much higher)
 
-// ── Detection safety knobs ────────────────────────────────────────────────
+// ── Detection safety knobs (compile-time) ────────────────────────────────
 //
-// The 2-sample enter debounce is now a RUNTIME config field
-// (`conf->getFastDroneMode()`): the user can flip it via the "Fast Drone
-// Mode" toggle in Signal Processing settings (also exposed per-pilot on
-// the master's Edit Pilot modal for multi-node fleets).  When Fast Drone
-// Mode is ON, the debounce is skipped and any single sample above enter
-// starts the crossing — catches very fast passes at the cost of more
-// noise-induced false positives.
+// Both defaults ON — safe for every drone we've seen in the field.  Flip
+// either to false ONLY for bench characterisation of pipeline behaviour;
+// production builds should keep both enabled.
 //
-// The ceiling-drift watchdog stays compile-time because it's a pure
-// safety net with no downside in normal operation.  Flip
-// kEnableCeilingWatchdog to false for bench characterisation only.
+// kEnableEnterDebounce=true: require kEnterHoldMin consecutive at-or-
+//   above-enter samples before the crossing starts.  Backs up the median
+//   filter's spike rejection so a 4-sample noise burst that lifts the
+//   median to enter can't start a false crossing.  Detection latency
+//   added: (kEnterHoldMin - 1) samples ≈ 3-7 ms depending on loop rate.
+//   Disable ONLY if characterising pipeline behaviour on the bench — a
+//   drone would need to be flying faster than any current racing drone
+//   for this to become the failure mode.
+//
+// kEnableCeilingWatchdog=true: if we've been "in gate" longer than
+//   kCeilingDriftTimeoutMs without an exit, force-reset the crossing
+//   state so a slow RSSI drift up to the enter threshold can't lock
+//   detection.
+static constexpr bool     kEnableEnterDebounce   = true;
 static constexpr uint8_t  kEnterHoldMin          = 2;
 static constexpr bool     kEnableCeilingWatchdog = true;
 static constexpr uint32_t kCeilingDriftTimeoutMs = 3000;
@@ -457,12 +464,10 @@ void LapTimer::lapPeakCapture() {
         if (enterHoldStartMs == 0) enterHoldStartMs = now;
 
         // Enter debounce: require kEnterHoldMin consecutive samples above
-        // enter before starting the crossing.  Fast Drone Mode (runtime
-        // config) skips this, letting a single median-sample above enter
-        // start the crossing — needed to catch extreme-speed passes whose
-        // apex spans only 1-2 samples, at the cost of more noise-triggered
-        // false laps in RF-cluttered environments.
-        const uint8_t needed = conf->getFastDroneMode() ? 1 : kEnterHoldMin;
+        // enter before starting the crossing.  Compile-time constant —
+        // flip kEnableEnterDebounce to false in this file for bench
+        // characterisation.
+        const uint8_t needed = kEnableEnterDebounce ? kEnterHoldMin : 1;
 
         if (enterHoldSamples >= needed) {
             if (!enteredGate) {

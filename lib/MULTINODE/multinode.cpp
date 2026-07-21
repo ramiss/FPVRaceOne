@@ -322,7 +322,6 @@ void MultiNodeManager::_sendRegistration() {
     doc["mac"]           = _myMacAddress;
     doc["enterRssi"]     = _conf->getEnterRssi();
     doc["exitRssi"]      = _conf->getExitRssi();
-    doc["fastDroneMode"] = _conf->getFastDroneMode();
     // Last 6 hex chars of our own AP SSID (FPVRaceOne_xxxxxx).  Master shows
     // this in the Edit Pilot modal so the director can correlate a slot to a
     // physical unit by its broadcast SSID.
@@ -451,7 +450,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
                                        uint32_t pilotColor,
                                        uint8_t bandIndex, uint8_t channelIndex, uint16_t frequency,
                                        uint8_t enterRssi, uint8_t exitRssi,
-                                       uint8_t fastDroneMode,
                                        const String& staIP, const String& clientIP,
                                        const String& macAddress,
                                        const String& apSuffix,
@@ -488,7 +486,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
                 (n.frequency     != frequency)     ||
                 (n.enterRssi     != enterRssi)     ||
                 (n.exitRssi      != exitRssi)      ||
-                (n.fastDroneMode != fastDroneMode) ||
                 (n.clientIP      != clientIP)      ||
                 (n.staIP         != staIP)         ||
                 (apSuffix.length() > 0 && n.apSuffix != apSuffix);
@@ -500,7 +497,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
             n.frequency     = frequency;
             n.enterRssi     = enterRssi;
             n.exitRssi      = exitRssi;
-            n.fastDroneMode = fastDroneMode;
             n.clientIP      = clientIP;
             n.staIP         = staIP;
             if (macAddress.length() > 0) n.macAddress = macAddress;
@@ -569,7 +565,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     n.frequency     = frequency;
     n.enterRssi     = enterRssi;
     n.exitRssi      = exitRssi;
-    n.fastDroneMode = fastDroneMode;
     n.staIP         = staIP;
     n.clientIP      = clientIP;
     n.macAddress    = macAddress;

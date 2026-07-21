@@ -396,7 +396,6 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     uint8_t  masterChan    = conf ? conf->getChannelIndex()      : 0;
     uint16_t masterFreq    = conf ? conf->getFrequency()         : 0;
     bool     masterSkip    = conf ? conf->getMnSkipMasterStart() : false;
-    uint8_t  masterFastDrn = conf ? conf->getFastDroneMode()     : 0;
 
     uint32_t elapsedMs     = timer ? timer->getElapsedMs() : 0;
     bool     prearmActive  = multiNode && multiNode->getPrearmPhase();
@@ -431,7 +430,6 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     out += ",\"skipEnabled\":";  out += masterSkip ? "true" : "false";
     out += ",\"enterRssi\":";    out += masterEnter;
     out += ",\"exitRssi\":";     out += masterExit;
-    out += ",\"fastDroneMode\":"; out += (int)masterFastDrn;
     out += ",\"running\":";      out += masterRunning ? "true" : "false";
     out += ",\"lapCount\":";     out += masterCnt;
     out += ",\"laps\":[";
@@ -466,7 +464,6 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
             out += ",\"apSuffix\":\"";     _jsonEscapeAppend(out, n.apSuffix); out += "\"";
             out += ",\"enterRssi\":";      out += (int)n.enterRssi;
             out += ",\"exitRssi\":";       out += (int)n.exitRssi;
-            out += ",\"fastDroneMode\":";  out += (int)n.fastDroneMode;
             out += ",\"laps\":[";
             for (size_t i = 0; i < n.laps.size(); i++) {
                 if (i > 0) out += ',';
@@ -1021,6 +1018,25 @@ void Webserver::startServices() {
     // <script src="script.js"> tag near the end of the document and the page never loads.
     // With JS/CSS served via immutable cache, only HTML + logo + SSE make new TCP
     // connections per reload, so TIME_WAIT accumulation is no longer a problem.
+    //
+    // FUTURE: rapid-fire API polling can defeat this.  Every closed TCP socket
+    // sits in TIME_WAIT for 2×MSL (~60 s on LwIP defaults) while still
+    // occupying one of the ESP32-C6's 16 hard TCP slots.  Anything that
+    // fetches an API endpoint faster than ~1 req / 4 s per client sustained
+    // (e.g. an external dashboard polling /api/multinode/nodes at 10 Hz, an
+    // OSD app pulling /timer/rssi at 20 Hz, a heatmap tool over /races) will
+    // saturate the pool inside ~15 requests and start seeing spurious
+    // "Failed to fetch" / ECONNREFUSED on new requests until slots clear.
+    // The test harness's "20 back-to-back /api/multinode/nodes fetches" tripped
+    // this exact wall during M6 development and had to pace itself + retry to
+    // work around it.
+    //
+    // If you ever need to support that traffic pattern, the fix is per-route
+    // header override — leave HTML/logo/SSE on `Connection: close` (the
+    // stall workaround above) but set `Connection: keep-alive` on the JSON
+    // API endpoints so the browser can reuse one TCP connection across
+    // many requests.  ESPAsyncWebServer supports `response->addHeader(...)`
+    // per request; the plumbing exists, we just don't currently need it.
     DefaultHeaders::Instance().addHeader("Connection", "close");
 
     startLittleFS();
@@ -2460,12 +2476,11 @@ EEPROM:\n\
             String apSuffix     = obj["apSuffix"] | "";   // last 6 hex chars of the client's broadcast SSID
             uint8_t enterRssi     = obj["enterRssi"]     | 0;
             uint8_t exitRssi      = obj["exitRssi"]      | 0;
-            uint8_t fastDroneMode = obj["fastDroneMode"] | 0;
             uint8_t assignedId    = obj["nodeId"]        | 0;    // client's self-reported nodeId (0 on first registration)
             bool stateChanged = false;
             bool ok = multiNode->handleRegister(pilotName,
                                                  pilotColor, bandIndex, channelIndex, freq,
-                                                 enterRssi, exitRssi, fastDroneMode,
+                                                 enterRssi, exitRssi,
                                                  staIP, clientIP,
                                                  macAddress, apSuffix, assignedId,
                                                  stateChanged);
@@ -2698,8 +2713,6 @@ EEPROM:\n\
             uint8_t    enterRssi        = obj["enterRssi"]        | 0;
             bool       hasExit          = obj.containsKey("exitRssi");
             uint8_t    exitRssi         = obj["exitRssi"]         | 0;
-            bool       hasFastDrone     = obj.containsKey("fastDroneMode");
-            uint8_t    fastDroneMode    = obj["fastDroneMode"]    | 0;
 
             // nodeId 0 is the master itself — short-circuit the HTTP proxy
             // (we'd be trying to talk to ourselves) and apply the patch
@@ -2715,10 +2728,9 @@ EEPROM:\n\
                     patch["chan"] = chanIndex;
                     patch["freq"] = freq;
                 }
-                if (hasSkip)      patch["mnSkipMasterStart"] = skipMasterStart;
-                if (hasEnter)     patch["enterRssi"]         = enterRssi;
-                if (hasExit)      patch["exitRssi"]          = exitRssi;
-                if (hasFastDrone) patch["fastDroneMode"]     = fastDroneMode;
+                if (hasSkip)  patch["mnSkipMasterStart"] = skipMasterStart;
+                if (hasEnter) patch["enterRssi"]         = enterRssi;
+                if (hasExit)  patch["exitRssi"]          = exitRssi;
                 conf->fromJson(patch.as<JsonObject>());
                 conf->write();
                 DynamicJsonDocument notify(128);
@@ -2758,10 +2770,9 @@ EEPROM:\n\
                     body["chan"] = chanIndex;
                     body["freq"] = freq;
                 }
-                if (hasSkip)      body["mnSkipMasterStart"] = skipMasterStart;
-                if (hasEnter)     body["enterRssi"]         = enterRssi;
-                if (hasExit)      body["exitRssi"]          = exitRssi;
-                if (hasFastDrone) body["fastDroneMode"]     = fastDroneMode;
+                if (hasSkip)  body["mnSkipMasterStart"] = skipMasterStart;
+                if (hasEnter) body["enterRssi"]         = enterRssi;
+                if (hasExit)  body["exitRssi"]          = exitRssi;
                 String bodyStr;
                 serializeJson(body, bodyStr);
                 sent = (http.POST(bodyStr) == 200);
@@ -2770,14 +2781,14 @@ EEPROM:\n\
             if (sent) {
                 if (hasPilotName || hasPilotColor) multiNode->updateNodePilot(nodeId, pilotName, pilotColor);
                 if (hasBand)  multiNode->updateNodeChannel(nodeId, bandIndex, chanIndex, freq);
-                // Update master's cached NodeInfo so the modal sees fresh
-                // values without waiting for the next registration.
-                if (hasEnter || hasExit || hasFastDrone) {
+                // Update master's cached NodeInfo for RSSI so the modal
+                // sees fresh values without waiting for the next
+                // registration.
+                if (hasEnter || hasExit) {
                     for (auto& n : const_cast<std::vector<NodeInfo>&>(multiNode->getNodes())) {
                         if (n.nodeId == nodeId) {
-                            if (hasEnter)     n.enterRssi     = enterRssi;
-                            if (hasExit)      n.exitRssi      = exitRssi;
-                            if (hasFastDrone) n.fastDroneMode = fastDroneMode;
+                            if (hasEnter) n.enterRssi = enterRssi;
+                            if (hasExit)  n.exitRssi  = exitRssi;
                             break;
                         }
                     }
@@ -2825,7 +2836,6 @@ EEPROM:\n\
             if (obj.containsKey("mnSkipMasterStart")) patch["mnSkipMasterStart"] = obj["mnSkipMasterStart"].as<uint8_t>();
             if (obj.containsKey("enterRssi"))         patch["enterRssi"]         = obj["enterRssi"].as<uint8_t>();
             if (obj.containsKey("exitRssi"))          patch["exitRssi"]          = obj["exitRssi"].as<uint8_t>();
-            if (obj.containsKey("fastDroneMode"))     patch["fastDroneMode"]     = obj["fastDroneMode"].as<uint8_t>();
             conf->fromJson(patch.as<JsonObject>());
             conf->write();
             // Push update to this client's browser so name/color reflect immediately

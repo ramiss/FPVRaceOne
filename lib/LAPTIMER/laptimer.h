@@ -141,11 +141,10 @@ class LapTimer {
     uint32_t rssiPeakTimeMs;
     uint8_t lastLapPeakRssi = 0;  // peak RSSI of the most recently completed lap
 
-    // Gate state tracking.  The 2-sample enter-hold debounce sits alongside
-    // the median filter's spike rejection; it can be disabled at runtime via
-    // the "Fast Drone Mode" toggle (conf->getFastDroneMode()) for extreme-
-    // speed passes.  The ceiling-drift watchdog stays compile-time
-    // (kEnableCeilingWatchdog in laptimer.cpp) since it's a pure safety net.
+    // Gate state tracking.  The 2-sample enter-hold debounce and the
+    // ceiling-drift watchdog are both compile-time in laptimer.cpp
+    // (kEnableEnterDebounce / kEnableCeilingWatchdog) — flip either to
+    // false ONLY for bench characterisation of pipeline behaviour.
     bool     gateExited;        // True when gate has re-armed (crossed back below exit)
     bool     enteredGate;       // True once filtered RSSI crossed enterAt for enough samples
     bool     gate1Armed;        // Gate-1 bootstrap fired for current race

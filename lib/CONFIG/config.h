@@ -177,7 +177,6 @@ typedef struct {
     uint8_t otaIncludePrereleases;  // 0=stable only (default), 1=also offer beta / pre-release builds in Check for Updates
     uint8_t mnClientRaceAudio;  // client mode: 1=play master's race-start countdown + beep locally, 0=silent (default)
     uint8_t mnPreferredSlot;    // client mode: last slot assigned by a master (1-7). 0=none. Sent as nodeId in registration so the master can honour it.
-    uint8_t fastDroneMode;      // 1=skip the 2-sample enter-hold debounce (catch faster passes at the cost of more RF-noise false positives), 0=off (default)
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -233,8 +232,6 @@ class Config {
     uint8_t getWifiTxPower();
     uint8_t getGate1Bootstrap();
     uint8_t getV1Smoothing();
-    uint8_t getFastDroneMode();
-    void    setFastDroneMode(uint8_t enabled);
     char*   getPilotName();
     uint8_t getNodeMode();
     char*   getMasterSSID();
