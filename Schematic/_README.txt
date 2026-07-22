@@ -1,0 +1,1 @@
+Please note that we sell a fully assembled and flashed unit with case for $39.99.  See link on main page to purchase.
