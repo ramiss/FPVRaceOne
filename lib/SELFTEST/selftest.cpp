@@ -421,6 +421,93 @@ TestResult SelfTest::testRX5808(RX5808* rx5808) {
 }
 
 
+TestResult SelfTest::testRX5808SpiMode(RX5808* rx5808) {
+    TestResult result;
+    result.name = "RX5808 SPI Programming";
+    uint32_t start = millis();
+
+    if (!rx5808) {
+        result.passed = false;
+        result.details = "RX5808 pointer is null";
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    // Save the RX's initial frequency so we can restore it at the end.
+    // Same rationale + banner-hide handshake as testRX5808 — see that
+    // function's comments for the full explanation.
+    const uint16_t initialFreq = rx5808->getCurrentFrequency();
+
+    auto restoreRx = [rx5808, initialFreq]() {
+        if (!rx5808 || initialFreq == 0) return;
+        rx5808->setFrequency(initialFreq);
+        delay(RX5808_MIN_TUNETIME + 100);
+        rx5808->verifyFrequency();
+        rx5808->recentSetFreqFlag = false;
+    };
+
+    // ── Two-frequency verify ──────────────────────────────────────────────
+    //
+    // Write freq A, delay for tune settle, read register back, compare.
+    // Then repeat with freq B (well-separated in the RX5808's register
+    // space so a stuck-bit failure surfaces as a mismatch on at least
+    // one of them).  If BOTH readbacks match what we wrote, the SPI
+    // programming path is confirmed working with high confidence.
+    //
+    // A single-frequency test could false-positive if the module happens
+    // to hold that value from a previous programming attempt or from
+    // hardwired defaults.  Two well-separated values eliminates that
+    // ambiguity.
+    const uint16_t freqA = 5800;   // Fatshark F4 — common freq
+    const uint16_t freqB = 5860;   // Fatshark F8 — differs from A across multiple register bits
+
+    // ── Test freq A ────────────────────────────────
+    rx5808->setFrequency(freqA);
+    delay(RX5808_MIN_TUNETIME + 100);
+    const bool verifiedA = rx5808->verifyFrequency();
+
+    if (!verifiedA) {
+        result.passed = false;
+        result.details =
+            "SPI register read did not match written value at " + String(freqA) + " MHz. "
+            "The RX5808 module is likely in manual mode (MODE pin strapping "
+            "wrong on the PCB) OR the SPI wiring is broken. In manual mode, the "
+            "chip ignores register writes and picks its channel from hardwired "
+            "CH0-CH2/BS pins — this timer will read a fixed RSSI regardless of "
+            "the configured channel.";
+        restoreRx();
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    // ── Test freq B ────────────────────────────────
+    rx5808->setFrequency(freqB);
+    delay(RX5808_MIN_TUNETIME + 100);
+    const bool verifiedB = rx5808->verifyFrequency();
+
+    if (!verifiedB) {
+        result.passed = false;
+        result.details =
+            "SPI register read matched at " + String(freqA) + " MHz but not at " +
+            String(freqB) + " MHz. This suggests a partial SPI failure — possibly "
+            "a stuck bit on the DATA or CLK line, or a marginal signal integrity "
+            "issue.  Check the CH1/CH2/CH3 wiring for shorts, cold joints, or "
+            "damaged pull-ups.";
+        restoreRx();
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    // Both verified — SPI programming path confirmed.
+    result.passed = true;
+    result.details = "SPI programming confirmed — register readback matched at " +
+                     String(freqA) + " MHz and " + String(freqB) + " MHz.";
+    restoreRx();
+    result.duration_ms = millis() - start;
+    return result;
+}
+
+
 TestResult SelfTest::testLapTimer(LapTimer* timer) {
     TestResult result;
     result.name = "Lap Timer";

@@ -1206,6 +1206,7 @@
                 Tunes the EMA stage of the 5-stage pipeline (Kalman → median-3 → moving average → EMA → step limiter). <strong>5 (default)</strong>. Lower values reduce signal lag at the cost of letting more noise through; higher values add extra smoothing.
               </div>
 
+              <!-- Disabled until tested
               <h3>Gate-1 Bootstrap</h3>
               <div class="config-item">
                 <label for="gate1BootstrapToggle">Gate-1 Bootstrap:</label>
@@ -1220,7 +1221,7 @@
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
                 When <strong>on</strong>, the first lap of a race is special-cased: if the drone is already in the gate at start (RSSI ≥ enter), the first confirmed exit counts as Gate 1, with relaxed thresholds (~exit + 4) and a lower 2-sample debounce. When <strong>off</strong>, Gate 1 behaves like any other gate.
               </div>
-
+              -->
             </div>
 
             <!-- Firmware Update Section -->
@@ -1356,28 +1357,28 @@
                 <label for="themeSelect">Theme:</label>
                 <select id="themeSelect" onchange="changeTheme()">
                   <option value="oceanic" selected>Material Oceanic</option>
-                  <option value="lighter"    hidden>Material Lighter</option>
-                  <option value="darker"     hidden>Material Darker</option>
-                  <option value="palenight"  hidden>Material Palenight</option>
-                  <option value="deepocean"  hidden>Material Deep Ocean</option>
-                  <option value="forest"     hidden>Material Forest</option>
-                  <option value="skyblue"    hidden>Material Sky Blue</option>
-                  <option value="sandybeach" hidden>Material Sandy Beach</option>
-                  <option value="volcano"    hidden>Material Volcano</option>
-                  <option value="space"      hidden>Material Space</option>
-                  <option value="monokai"    hidden>Monokai Pro</option>
-                  <option value="dracula"    hidden>Dracula</option>
+                  <!--<option value="lighter">Material Lighter</option>
+                  <option value="darker">Material Darker</option>
+                  <option value="palenight">Material Palenight</option>
+                  <option value="deepocean">Material Deep Ocean</option>
+                  <option value="forest">Material Forest</option>
+                  <option value="skyblue">Material Sky Blue</option>
+                  <option value="sandybeach">Material Sandy Beach</option>
+                  <option value="volcano">Material Volcano</option>
+                  <option value="space">Material Space</option>
+                  <option value="monokai">Monokai Pro</option>
+                  <option value="dracula">Dracula</option>-->
                   <option value="github">GitHub</option>
-                  <option value="githubdark"    hidden>GitHub Dark</option>
-                  <option value="arcdark"    hidden>Arc Dark</option>
-                  <option value="onedark"    hidden>One Dark</option>
+                  <!--<option value="githubdark">GitHub Dark</option>
+                  <option value="arcdark">Arc Dark</option>
+                  <option value="onedark">One Dark</option>-->
                   <option value="onelight">One Light</option>
-                  <option value="solarizeddark"    hidden>Solarized Dark</option>
-                  <option value="solarizedlight"    hidden>Solarized Light</option>
-                  <option value="nightowl"    hidden>Night Owl</option>
+                  <!--<option value="solarizeddark">Solarized Dark</option>
+                  <option value="solarizedlight">Solarized Light</option>
+                  <option value="nightowl">Night Owl</option>-->
                   <option value="lightowl">Light Owl</option>
-                  <option value="moonlight"    hidden>Moonlight</option>
-                  <option value="synthwave"    hidden>SynthWave '84</option>
+                  <!--<option value="moonlight">Moonlight</option>
+                  <option value="synthwave">SynthWave '84</option>-->
                 </select>
               </div>
 

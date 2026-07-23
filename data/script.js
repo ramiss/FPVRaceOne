@@ -19,6 +19,21 @@ const SCANNER_BUFFER_WHILE_PAUSED = false;
 let mnClientSkipEnabled   = false; // mirrors config.mnSkipMasterStart — set at page load and on toggle change
 let mnClientRaceAudio     = false; // mirrors config.mnClientRaceAudio — client mode race-start audio toggle
 let _raceCountdownAborted = false; // set by stopRace/mnStopRace to cancel in-progress countdown
+// Multi-tab sync (single/standalone mode): when two browsers view the same
+// unit, only the tab that pressed Start ("initiator") announces laps/race
+// events.  Spectator tabs mirror the display via SSE raceState events but
+// suppress TTS to avoid a stereo announcer.  Defaults true so a lone tab
+// still announces normally; flips to false when a raceState=prearming or
+// =started arrives that we didn't originate.  Resets to true on =stopped.
+
+let _iAmRaceInitiator = true;
+// Wall-clock timestamp of the last local startRace() call.  Used by the
+// raceState=started SSE branch to self-heal when the prearming event was
+// missed — e.g. a spectator that connected mid-countdown, or the onConnect
+// replay of "started" for a tab that joined mid-race.  If `started` arrives
+// and we haven't pressed Start locally in the last 30 s, we're a spectator
+// and must run startRaceDisplayOnly() to sync the timer + flash animation.
+let _localRaceStartTs = 0;
 
 // --- Wizard loop control (prevents stale timers/fetches blocking restart) ---
 let wizardRecordingTimerId = null;
@@ -551,17 +566,94 @@ function setupWiFiEvents() {
     }
   }, false);
 
-  // Sync race button state when the server starts or stops a race
-  // (e.g. maxLaps reached on server side, or raced from another client)
+  // Multi-tab sync (single/standalone mode): server broadcasts
+  // prearming / started / stopped / cleared over the raceState SSE channel so
+  // every browser viewing this unit mirrors the race lifecycle.  The tab that
+  // pressed Start owns the announcer (_iAmRaceInitiator); spectator tabs
+  // suppress TTS in addLap() but still update the display.  Also fires when
+  // the server auto-stops a race (maxLaps reached) so the local button state
+  // resyncs even for the initiator.
   eventSource.addEventListener("raceState", function (e) {
-    if (e.data === "started") {
+    // Multi-tab sync is a SINGLE/STANDALONE-mode feature only.  In master
+    // and client modes, coordinated races use their own event channels
+    // (masterRaceState, directorState, multiNodeState) — applying the
+    // spectator-sync logic here would spuriously start the Race tab's
+    // display timer during coord races and, worse, flip _iAmRaceInitiator
+    // to false, which would silence the client pilot's own lap
+    // announcements.  In those modes fall back to the original behavior:
+    // just update button-disabled state, don't touch the display or the
+    // announcer-owner flag.
+    if (mnNodeMode !== 0) {
+      if (e.data === "started" || e.data.indexOf("started:") === 0) {
+        startRaceButton.disabled = true;
+        stopRaceButton.disabled = false;
+        addLapButton.disabled = false;
+      } else if (e.data === "stopped") {
+        stopRaceButton.disabled = true;
+        startRaceButton.disabled = false;
+        addLapButton.disabled = true;
+      }
+      return;
+    }
+    // A "local origin" event is one that echoes our own recent action —
+    // detected by whether startRace() ran in this tab within the last 30 s.
+    // Anything else is another tab's action (or the onConnect replay of a
+    // race that was already running before we joined) → spectator mode.
+    const isLocalOrigin = (_localRaceStartTs > 0) && (Date.now() - _localRaceStartTs < 30000);
+    if (e.data === "prearming") {
+      if (!isLocalOrigin) {
+        _iAmRaceInitiator = false;
+        if (startRaceButton) startRaceButton.classList.add('active');
+        clearInterval(timerInterval);
+        if (timer) timer.innerHTML = '00:00:00s';
+        const hdr = lapTable ? lapTable.rows.length : 0;
+        for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
+        lapNo = -1; lapTimes = [];
+        updateLapCounter();
+      }
+    } else if (e.data === "started" || e.data.indexOf("started:") === 0) {
+      // The onConnect replay for a mid-race refresh sends "started:<elapsedMs>"
+      // so the new tab's display timer picks up at the correct offset instead
+      // of restarting from zero.  Normal /timer/start broadcasts send just
+      // "started" (offset = 0, race is starting right now).
+      let offsetMs = 0;
+      const colon = e.data.indexOf(':');
+      if (colon > 0) {
+        const parsed = parseInt(e.data.substring(colon + 1), 10);
+        if (!isNaN(parsed) && parsed >= 0) offsetMs = parsed;
+      }
       startRaceButton.disabled = true;
       stopRaceButton.disabled = false;
       addLapButton.disabled = false;
+      // Self-heal: if we didn't originate this locally (missed prearming,
+      // late-join replay, cross-tab), enter spectator mode now.
+      if (!isLocalOrigin) {
+        _iAmRaceInitiator = false;
+      }
+      if (!_iAmRaceInitiator) {
+        if (startRaceButton) startRaceButton.classList.remove('active');
+        startRaceDisplayOnly(offsetMs);
+      }
     } else if (e.data === "stopped") {
       stopRaceButton.disabled = true;
       startRaceButton.disabled = false;
       addLapButton.disabled = true;
+      if (!_iAmRaceInitiator) {
+        if (startRaceButton) startRaceButton.classList.remove('active');
+        stopRaceDisplayOnly();
+      }
+      // Race ended — default back to announcer role for the next race, and
+      // clear the local-start timestamp so origin detection for the next
+      // race is based on a fresh startRace() call, not this stale one.
+      _iAmRaceInitiator = true;
+      _localRaceStartTs = 0;
+    } else if (e.data === "cleared") {
+      // Another tab cleared laps — mirror the table wipe locally.
+      const hdr = lapTable ? lapTable.rows.length : 0;
+      for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
+      lapNo = -1; lapTimes = [];
+      updateLapCounter();
+      if (typeof updateAnalysisView === 'function') updateAnalysisView();
     }
   }, false);
 
@@ -2652,12 +2744,11 @@ function handleUpdateProgress(data) {
   }
 }
 
-// Promise resolver/rejecter used by handleUpdateProgress() to wake up the
-// in-flight checkForUpdates() when SSE delivers a terminal state.  This is
-// what makes the flow resilient to the AP-retune disconnect that drops the
-// original /api/update/check HTTP response: even if the response is lost,
-// the SSE channel will eventually report state UP_TO_DATE / UPDATE_AVAILABLE
-// / ERROR and we wake the awaiter with the cached server-side info.
+// Promise resolver used by handleUpdateProgress() to wake up the in-flight
+// checkForUpdates() when SSE delivers a terminal state.  Kept as a safety
+// net for the rare case where the /api/update/check HTTP response is lost
+// (network hiccup) — the SSE channel will still report UP_TO_DATE /
+// UPDATE_AVAILABLE / ERROR and we resume the awaiter with that verdict.
 let _otaCheckResolver = null;
 
 // Promise that resolves when SSE reports a terminal state (>= UPDATE_AVAILABLE).
@@ -2687,9 +2778,11 @@ async function checkForUpdates() {
     }
   } catch (_) { /* older firmware — leave disruptionMsg empty */ }
 
-  // Splash dialog — modelled on recruitNearbyUnits() so the UI language is
-  // consistent.  Inline styles so the modal is independent of any open
-  // settings modal that might still be visible behind it.
+  // Splash dialog — the AP stays up during the check now, so no more
+  // "browser will disconnect" scare paragraph.  The disruption block is
+  // still shown when the device is a master with connected pilots or a
+  // client attached to a master (mesh is briefly interrupted while the
+  // device queries GitHub).
   const confirmed = await new Promise(resolve => {
     const overlay = document.createElement('div');
     overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
@@ -2702,14 +2795,8 @@ async function checkForUpdates() {
     box.innerHTML = `
       <h3 style="margin:0 0 12px;font-size:17px;color:#222;">Check for firmware updates?</h3>
       ${disruptionBlock}
-      <p style="margin:0 0 12px;font-size:14px;color:#444;line-height:1.5;">
-        The device will briefly join your home WiFi to query GitHub for the latest release. The check usually takes 15–30 seconds.
-      </p>
-      <p style="margin:0 0 12px;font-size:14px;color:#c0392b;line-height:1.5;font-weight:600;">
-        Your browser will disconnect from this device's WiFi during the check. Do not navigate away from or refresh this page.
-      </p>
-      <p style="margin:0 0 20px;font-size:13px;color:#666;line-height:1.5;">
-        Some devices auto-reconnect to <code>FPVRaceOne_XXXX</code> when it comes back; some don't. If yours doesn't, reconnect manually in your WiFi settings and this page will pick up the result.
+      <p style="margin:0 0 20px;font-size:14px;color:#444;line-height:1.5;">
+        The device will briefly join your home WiFi to query GitHub for the latest release. This usually takes 15–30 seconds.
       </p>
       <div style="display:flex;gap:12px;justify-content:flex-end;">
         <button id="_otaCancel"   style="padding:8px 20px;border-radius:6px;border:1px solid #aaa;background:#f5f5f5;color:#333;cursor:pointer;font-size:14px;">Cancel</button>
@@ -2724,114 +2811,53 @@ async function checkForUpdates() {
 
   setUpdateBusy(true, 'Checking…');
   showUpdateStatus('Connecting to home WiFi and contacting GitHub…', 10);
+  // Progress updates from here on come via the updateProgress SSE channel,
+  // which handleUpdateProgress() routes into showUpdateStatus() automatically.
+  // No blocking working-overlay any more — the button "Checking…" state and
+  // the Update Status panel are enough now that the AP stays up.
 
-  // Working overlay — opaque, modelled on the recruit overlay.  Painted now
-  // so it appears immediately even while the AP is dropping.  The Cancel
-  // button on the overlay is the user's escape hatch if the device never
-  // comes back (replaces the old 60-second hard timeout — some home WiFi
-  // setups need manual reconnection of the browser to the FPVRaceOne AP,
-  // which can take arbitrarily long).
-  const overlay = document.createElement('div');
-  overlay.id = '_otaCheckOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;background:#1a1a1a;z-index:10001;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:inherit;text-align:center;padding:24px;';
-  overlay.innerHTML = `
-    <div style="font-size:26px;font-weight:700;margin-bottom:14px;">Checking for firmware updates…</div>
-    <div style="font-size:15px;opacity:0.85;margin-bottom:6px;max-width:540px;line-height:1.55;">
-      Device is joining your home WiFi to query GitHub.<br>
-      Your browser is disconnected from <code>FPVRaceOne_XXXX</code> while this runs.<br>
-      <strong>If it doesn't auto-reconnect, please reconnect manually in your WiFi settings.</strong><br>
-      This page will pick up the result as soon as the device is reachable again.
-    </div>
-    <div id="_otaStatusLine" style="font-size:13px;opacity:0.7;margin-top:18px;">Waiting for device…</div>
-    <button id="_otaCheckCancelBtn" style="margin-top:24px;padding:8px 20px;border-radius:6px;border:1px solid #888;background:transparent;color:#fff;cursor:pointer;font-size:14px;">Cancel and resume</button>`;
-  document.body.appendChild(overlay);
-  await new Promise(r => setTimeout(r, 0));   // yield so the overlay paints
-
-  // Cancel handler — closes the overlay, resumes multinode immediately so
-  // the mesh doesn't sit paused until the 5-minute backend safety-resume.
-  let cancelled = false;
-  document.getElementById('_otaCheckCancelBtn').onclick = () => {
-    cancelled = true;
-  };
-
-  // Kick off the check on the device.  Fire-and-forget: the response is
-  // almost always lost to the AP drop, but we don't need it — polling does.
-  let httpResult = null;
-  fetch('/api/update/check', { method: 'POST' })
-    .then(async (r) => {
+  // Arm the SSE terminal-state waiter BEFORE POSTing /api/update/check so we
+  // can't miss the resolver arming on a fast device.  /api/update/check
+  // returns 202 immediately (kicks off the check on the parallel task); the
+  // real verdict arrives via the updateProgress SSE channel a few seconds
+  // later.  The full info payload — including the options[] list of
+  // installable versions — is then fetched from /api/update/status.
+  const ssePromise = _waitForCheckTerminal();
+  try {
+    const r = await fetch('/api/update/check', { method: 'POST' });
+    if (!r.ok) {
       const data = await r.json().catch(() => ({}));
-      httpResult = r.ok ? { ok: true, data } : { ok: false, error: data.error || `HTTP ${r.status}` };
-    })
-    .catch(() => { httpResult = null; });
-
-  // Poll /api/update/status every 2 s with NO hard timeout — the user has a
-  // Cancel button if they want out.  Surface the device's own state message
-  // on the overlay so the user knows whether progress is happening.  Logging
-  // every poll result to the console so DevTools shows the sequence if a
-  // run ever gets stuck.
-  const STATE_NAME = {
-    0: 'IDLE',
-    1: 'CONNECTING',
-    2: 'CHECKING',
-    3: 'UPDATE_AVAILABLE',
-    4: 'UP_TO_DATE',
-    5: 'DOWNLOADING_FS',
-    6: 'DOWNLOADING_FW',
-    7: 'REBOOTING',
-    99: 'ERROR',
-  };
-  const statusLine = document.getElementById('_otaStatusLine');
-  let info = null;
-  let pollIdx = 0;
-  while (!cancelled) {
-    pollIdx++;
-    let logEntry = `[OTA poll ${pollIdx}] `;
-    try {
-      const r = await fetch('/api/update/status', { cache: 'no-store' });
-      if (r.ok) {
-        const s = await r.json();
-        logEntry += `state=${s.state}(${STATE_NAME[s.state] || '?'}) msg="${s.message || ''}" available=${s.available}`;
-        console.log(logEntry);
-        if (s) {
-          // Surface BOTH the device's own message AND the state name so the user
-          // can see whether the device is still working or actually terminal.
-          if (statusLine) {
-            const stateLabel = STATE_NAME[s.state] || ('state ' + s.state);
-            statusLine.textContent = `[${stateLabel}] ${s.message || ''}`;
-          }
-          // Accept ANY terminal state, even if s.available isn't a boolean yet
-          // (loosened from earlier — info is refetched downstream if missing).
-          const isTerminal = s.state === OTA_STATE.UP_TO_DATE ||
-                             s.state === OTA_STATE.UPDATE_AVAILABLE ||
-                             s.state === OTA_STATE.ERROR;
-          if (isTerminal) {
-            info = s;
-            console.log('[OTA poll] terminal state reached, breaking', s);
-            break;
-          }
-        }
-      } else {
-        logEntry += `HTTP ${r.status}`;
-        console.log(logEntry);
-        if (statusLine) statusLine.textContent = `Device returned HTTP ${r.status} — retrying…`;
-      }
-    } catch (e) {
-      logEntry += `fetch threw: ${e && e.message}`;
-      console.log(logEntry);
-      if (statusLine) {
-        statusLine.textContent = 'Device not reachable yet — keep waiting (or reconnect WiFi manually)…';
-      }
+      showUpdateStatus('Check failed: ' + (data.error || `HTTP ${r.status}`), 0);
+      setUpdateBusy(false);
+      _otaCheckResolver = null;
+      return;
     }
-    await new Promise(r => setTimeout(r, 2000));
+  } catch (e) {
+    // Fire-and-forget — the check runs on the parallel task even if the
+    // HTTP response was lost.  Fall through to await the SSE terminal.
   }
 
-  overlay.remove();
+  // Wait for the SSE-delivered terminal state (UP_TO_DATE, UPDATE_AVAILABLE,
+  // or ERROR).  handleUpdateProgress() resolves this promise the moment the
+  // OTA state machine reaches one of those.
+  const terminal = await ssePromise;
+  if (!terminal.ok) {
+    showUpdateStatus('Check failed: ' + (terminal.message || 'unknown error'), 0);
+    setUpdateBusy(false);
+    return;
+  }
 
-  // Scroll the Update Status panel into view once the device is reachable
-  // again — the director's been staring at the disconnect overlay for 20+
-  // seconds, the verdict shouldn't be hiding below the fold.  Deferred to
-  // the next frame so any showUpdateStatus() that follows has applied its
-  // display:'' before the browser computes scroll offsets.
+  // Fetch the full info payload — /api/update/status returns the cached
+  // UpdateInfo including the options[] list of installable versions.
+  let info = null;
+  try {
+    const sr = await fetch('/api/update/status', { cache: 'no-store' });
+    if (sr.ok) info = await sr.json();
+  } catch (_) {}
+
+  // Scroll the Update Status panel into view so the verdict isn't hidden
+  // below the fold — deferred to the next frame so any showUpdateStatus()
+  // that follows has applied its display:'' before scroll offsets compute.
   requestAnimationFrame(() => {
     const panel = document.getElementById('updateStatusPanel');
     if (panel && typeof panel.scrollIntoView === 'function') {
@@ -2839,22 +2865,11 @@ async function checkForUpdates() {
     }
   });
 
-  if (cancelled) {
-    showUpdateStatus('Check cancelled by user.', 0);
-    setUpdateBusy(false);
-    // Resume the mesh immediately so it doesn't sit paused.
-    fetch('/api/update/resume-multinode', { method: 'POST' }).catch(() => {});
-    return;
-  }
-
   if (info && info.state === OTA_STATE.ERROR) {
     if (info.message) showUpdateStatus(info.message, 0);
     setUpdateBusy(false);
     return;
   }
-
-  // Fall back to httpResult if /api/update/status didn't give us the info.
-  if (!info && httpResult && httpResult.ok) info = httpResult.data;
 
   if (!info) {
     showUpdateStatus('Could not retrieve update info from the device.', 0);
@@ -2871,10 +2886,10 @@ async function checkForUpdates() {
   renderUpdateOptions(info);
 
   if (!info.available) {
-    // The AP drop killed our SSE channel, so the device's terminal message
-    // never reached the panel — write it explicitly so the user sees the
-    // actual verdict (e.g. "You're on the latest release" or "No releases
-    // published yet") instead of the stale "Connecting to home WiFi…".
+    // Write the terminal verdict explicitly so the user sees the actual
+    // outcome (e.g. "You're on the latest release" or "No releases
+    // published yet") instead of the stale "Connecting to home WiFi…"
+    // that showUpdateStatus() painted at the start of the check.
     //
     // For pre-release builds specifically, if the device reports no stable
     // release available, point the user at the Include Pre-releases toggle
@@ -3149,22 +3164,82 @@ function updateMaxLaps(obj, value) {
 // Shared AudioContext for beeps (reused to avoid iOS issues)
 var beepAudioContext = null;
 
+// iOS/Safari audio unlock on first user gesture.
+// Web Speech + AudioContext both require an in-gesture unlock. Today
+// audioAnnouncer.enable() is called from the config-load handler (no
+// gesture), which leaves TTS and beeps silent for the FIRST race —
+// only the second Start press supplies enough accumulated user
+// gestures for iOS to relent.  Installing a document-level capture
+// listener here means the user's very first tap anywhere (nav bar,
+// tab, anything) primes both audio paths, so by the time they press
+// Start audio is already unlocked.  Self-disarms after firing once.
+let _iosAudioPrimed = false;
+// Base64-encoded ~1 ms silent WAV.  Playing this through an <audio>
+// element inside a user gesture is the canonical iOS Safari audio
+// unlock — more reliable than oscillator-based tricks, which iOS
+// sometimes doesn't count.  Same payload as audio-announcer.js.
+const _IOS_SILENT_WAV = 'data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA';
+function _primeAudioOnGesture() {
+  if (_iosAudioPrimed) return;
+  _iosAudioPrimed = true;
+  // 1. Play a silent <audio> element — the canonical iOS Safari unlock.
+  try {
+    const a = new Audio();
+    a.src = _IOS_SILENT_WAV;
+    a.volume = 0;
+    const p = a.play();
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (_) {}
+  // 2. Create + resume AudioContext + walk the graph with a zero-gain
+  //    oscillator so WebAudio (used by beep()) is unlocked too.
+  try {
+    if (!beepAudioContext && typeof AudioContext !== 'undefined') {
+      beepAudioContext = new AudioContext();
+    }
+    if (beepAudioContext) {
+      if (beepAudioContext.state === 'suspended') beepAudioContext.resume();
+      const osc  = beepAudioContext.createOscillator();
+      const gain = beepAudioContext.createGain();
+      gain.gain.value = 0;
+      osc.connect(gain).connect(beepAudioContext.destination);
+      osc.start();
+      osc.stop(beepAudioContext.currentTime + 0.05);
+    }
+  } catch (_) {}
+  // 3. Prime Web Speech.  iOS lazy-loads its voice list on first
+  //    gesture-scoped getVoices() call — priming here avoids a stall
+  //    when the first countdown utterance fires.  We don't rely on a
+  //    silent utterance for TTS unlock — startRace() speaks the real
+  //    "Arm your quad" synchronously in the click gesture instead,
+  //    which is what iOS actually accepts.
+  try {
+    if ('speechSynthesis' in window) speechSynthesis.getVoices();
+  } catch (_) {}
+}
+document.addEventListener('pointerdown', _primeAudioOnGesture, { capture: true });
+document.addEventListener('touchstart',  _primeAudioOnGesture, { capture: true });
+document.addEventListener('click',       _primeAudioOnGesture, { capture: true });
+
 function beep(duration, frequency, type) {
-  // Create or reuse AudioContext
+  // Create or reuse AudioContext.  On iOS Safari the FIRST creation MUST
+  // happen inside a user gesture — see startRace()'s AudioContext prime
+  // block.  If we end up creating it here (no prior gesture), it starts
+  // suspended and iOS won't let us resume it outside a gesture.
   if (!beepAudioContext) {
-    beepAudioContext = new AudioContext();
+    try { beepAudioContext = new AudioContext(); } catch (_) { return; }
   }
-  
-  // iOS/Safari: ensure AudioContext is running
-  if (beepAudioContext.state === 'suspended') {
-    beepAudioContext.resume().then(() => {
-      playBeepTone(duration, frequency, type);
-    }).catch(err => {
-      console.warn('[Beep] AudioContext resume failed:', err);
-    });
-  } else {
-    playBeepTone(duration, frequency, type);
+
+  // Only play when the context is actually running.  The previous code
+  // did resume().then(play), which — on iOS Safari — never fulfilled
+  // when called mid-countdown (5 s after the tap), then fulfilled
+  // instantly on the NEXT Start tap (a fresh gesture), causing a
+  // phantom beep before "Arm your quad".  Dropping the beep silently
+  // when the context isn't running eliminates the queued replay.
+  if (beepAudioContext.state !== 'running') {
+    console.warn('[Beep] context state=' + beepAudioContext.state + ', dropping beep');
+    return;
   }
+  playBeepTone(duration, frequency, type);
 }
 
 function playBeepTone(duration, frequency, type) {
@@ -3273,56 +3348,69 @@ function addLap(lapStr) {
   // reliably across browsers, unlike Web Speech which varies.
   // formatMsSpeak("12 point 3 4") would defeat that.
   const lapSpeak = lapStr;
-  switch (announcerSelect.options[announcerSelect.selectedIndex].value) {
-    case "beep":
-      beep(100, 330, "square");
-      break;
-    case "1lap":
-      if (lapNo == 0) {
-        queueSpeak(`<p>${pilotName} entered gate 1</p>`);
-      } else {
-        let text;
-        switch (lapFormat) {
-          case 'pilottime':
-            text = `<p>${pilotName} ${lapSpeak}</p>`;
-            break;
-          case 'timeonly':
-            text = `<p>${lapSpeak}</p>`;
-            break;
-          default:  // 'full', 'laptime'
-            text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
+  // Multi-tab sync (SINGLE mode only): only the initiator tab announces +
+  // owns auto-stop.  Spectator tabs still update the lap table and counter
+  // above so the display stays in sync — they just skip TTS and the
+  // redundant stop POST.  In master/client modes this gate is bypassed
+  // (announce as before) so pilot phones still speak their own laps
+  // during coordinated races.
+  const _syncGateActive = (mnNodeMode === 0);
+  if (!_syncGateActive || _iAmRaceInitiator) {
+    switch (announcerSelect.options[announcerSelect.selectedIndex].value) {
+      case "beep":
+        beep(100, 330, "square");
+        break;
+      case "1lap":
+        if (lapNo == 0) {
+          queueSpeak(`<p>${pilotName} entered gate 1</p>`);
+        } else {
+          let text;
+          switch (lapFormat) {
+            case 'pilottime':
+              text = `<p>${pilotName} ${lapSpeak}</p>`;
+              break;
+            case 'timeonly':
+              text = `<p>${lapSpeak}</p>`;
+              break;
+            default:  // 'full', 'laptime'
+              text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
+          }
+          queueSpeak(text);
         }
-        queueSpeak(text);
-      }
-      break;
-    case "2lap":
-      if (lapNo == 0) {
-        queueSpeak(`<p>${pilotName} entered gate 1</p>`);
-      } else if (last2lapStr != "") {
-        const text2 = "<p>" + pilotName + " 2 laps " + formatMsSpeak(Math.round(parseFloat(last2lapStr) * 1000)) + "</p>";
-        queueSpeak(text2);
-      }
-      break;
-    case "3lap":
-      if (lapNo == 0) {
-        queueSpeak(`<p>${pilotName} entered gate 1</p>`);
-      } else if (last3lapStr != "") {
-        const text3 = "<p>" + pilotName + " 3 laps " + formatMsSpeak(Math.round(parseFloat(last3lapStr) * 1000)) + "</p>";
-        queueSpeak(text3);
-      }
-      break;
-    default:
-      break;
+        break;
+      case "2lap":
+        if (lapNo == 0) {
+          queueSpeak(`<p>${pilotName} entered gate 1</p>`);
+        } else if (last2lapStr != "") {
+          const text2 = "<p>" + pilotName + " 2 laps " + formatMsSpeak(Math.round(parseFloat(last2lapStr) * 1000)) + "</p>";
+          queueSpeak(text2);
+        }
+        break;
+      case "3lap":
+        if (lapNo == 0) {
+          queueSpeak(`<p>${pilotName} entered gate 1</p>`);
+        } else if (last3lapStr != "") {
+          const text3 = "<p>" + pilotName + " 3 laps " + formatMsSpeak(Math.round(parseFloat(last3lapStr) * 1000)) + "</p>";
+          queueSpeak(text3);
+        }
+        break;
+      default:
+        break;
+    }
   }
-  
+
   // Update lap counter
   updateLapCounter();
 
   // Update lap analysis
   updateAnalysisView();
 
-  // Auto-stop race if max laps reached (excluding hole shot, and if maxLaps > 0)
-  if (maxLaps > 0 && lapNo > 0 && lapNo >= maxLaps) {
+  // Auto-stop race if max laps reached (excluding hole shot, and if maxLaps > 0).
+  // In single mode, only the initiator sends /timer/stop (spectators resync
+  // via raceState=stopped).  In master/client modes the initiator gate is
+  // bypassed — behavior falls back to pre-change (every browser races on
+  // its own auto-stop, same as before we added the sync).
+  if ((mnNodeMode !== 0 || _iAmRaceInitiator) && maxLaps > 0 && lapNo > 0 && lapNo >= maxLaps) {
     setTimeout(function() {
       if (!stopRaceButton.disabled) {
         stopRace();
@@ -3333,6 +3421,13 @@ function addLap(lapStr) {
 }
 
 function startTimer() {
+  // Defensive: clear any previous interval before creating a new one.
+  // If a spectator race ended and stopRaceDisplayOnly ran correctly this
+  // is a no-op, but if a stale interval reference is still ticking
+  // (e.g. from a browser-specific event ordering) we'd otherwise orphan
+  // it — stopRace() only holds the LATEST timerInterval reference, so a
+  // leaked one would keep updating `timer` forever after Stop.
+  clearInterval(timerInterval);
   const _timerStart = Date.now();
   timerInterval = setInterval(function () {
     const elapsed = Date.now() - _timerStart;
@@ -3865,13 +3960,31 @@ function highlightFastestLap() {
 async function _raceCountdown(armPhrase) {
   const _wait = () => new Promise(r => setTimeout(r, 50));
   const _speechDone = async () => {
-    while (audioAnnouncer.isSpeaking() || audioAnnouncer.audioQueue.length > 0) {
+    // Belt-and-suspenders: never poll forever.  If the announcer ever wedges
+    // (iOS Safari has been known to drop utterance.onend after an interrupted
+    // speak), we'd rather bail out of the wait and continue than leave the
+    // countdown flashing forever with no way to recover except a page reload.
+    const t0 = Date.now();
+    // Also poll speechSynthesis.speaking/pending so the wait honors a
+    // direct speechSynthesis.speak() call (used by startRace's iOS TTS
+    // unlock) in addition to audioAnnouncer's internal queue.
+    const ttsBusy = () => (typeof speechSynthesis !== 'undefined')
+        && (speechSynthesis.speaking || speechSynthesis.pending);
+    while (audioAnnouncer.isSpeaking() || audioAnnouncer.audioQueue.length > 0 || ttsBusy()) {
       if (_raceCountdownAborted) return;
+      if (Date.now() - t0 > 15000) {
+        console.warn('[Race] _speechDone timeout — proceeding without wait');
+        return;
+      }
       await _wait();
     }
   };
 
-  queueSpeak(`<p>${armPhrase}</p>`);
+  // Empty armPhrase means the caller (startRace on iOS) already fired a
+  // gesture-scoped speechSynthesis.speak() directly for the arm phrase.
+  // Don't queue it again — just wait for it (and any direct utterance)
+  // to finish before moving to "Starting in 5".
+  if (armPhrase) queueSpeak(`<p>${armPhrase}</p>`);
   await _speechDone();
   if (_raceCountdownAborted) return false;
   // "Starting in 5" as one utterance — no inter-utterance gap from Web Speech API.
@@ -3913,24 +4026,60 @@ async function startRace() {
 
   updateLapCounter();
   _raceCountdownAborted = false;
+  _iAmRaceInitiator = true;   // this tab owns the announcer for this race
+  _localRaceStartTs = Date.now();
   startRaceButton.disabled = true;
   startRaceButton.classList.add('active');
   stopRaceButton.disabled = false;  // allow cancelling during countdown
 
-  // Notify master immediately so the solo-race label appears during countdown
-  if (mnNodeMode === 2) fetch('/timer/prearm', { method: 'POST' }).catch(() => {});
-
-  // iOS/Safari: unlock AudioContext for beeps during user interaction
-  if (beepAudioContext && beepAudioContext.state === 'suspended') {
+  // iOS Safari: fire the FIRST TTS call DIRECTLY and SYNCHRONOUSLY here,
+  // still inside the click gesture.  Going through audioAnnouncer's
+  // queueSpeak → processQueue → speak → playWebSpeech chain adds enough
+  // async microtasks that iOS treats the actual speechSynthesis.speak()
+  // call as outside the gesture and silently drops it (verified: HUD
+  // showed speaking=false pending=false, no onstart/onend).  Speaking
+  // the real "Arm your quad" utterance here at real volume unlocks TTS
+  // for the rest of the countdown AND doubles as the announcement.
+  // _raceCountdown is called with '' below so it skips its own queueSpeak
+  // of the arm phrase (would cause a double-speak).
+  let _spokenDirectly = false;
+  if (audioEnabled && 'speechSynthesis' in window) {
     try {
-      await beepAudioContext.resume();
-      console.log('[Race] AudioContext resumed for beeps');
-    } catch (err) {
-      console.warn('[Race] AudioContext resume failed:', err);
-    }
+      const u = new SpeechSynthesisUtterance('Arm your quad');
+      // Use the announcer's configured rate if available so cadence matches.
+      if (audioAnnouncer && typeof audioAnnouncer.rate === 'number') u.rate = audioAnnouncer.rate;
+      speechSynthesis.speak(u);
+      _spokenDirectly = true;
+    } catch (_) {}
   }
 
-  const completed = await _raceCountdown("Arm your quad");
+  // Fire prearm in single (0) AND client (2) modes so the server can broadcast
+  // raceState=prearming to any other tab viewing this unit for display sync.
+  // Master (1) uses its own masterRaceState path via mnStartRace, so skip it.
+  if (mnNodeMode !== 1) fetch('/timer/prearm', { method: 'POST' }).catch(() => {});
+
+  // iOS/Safari: create + resume the AudioContext INSIDE the user gesture
+  // so iOS lets us play beeps 5 s later without a fresh tap.  Skipping
+  // the creation here is what caused the silent-start-beep bug — beep()
+  // would then create it mid-countdown (no gesture) and iOS parked it
+  // suspended for good.  Also prime with a zero-gain oscillator so the
+  // audio graph is actually walked before the real start beep fires.
+  try {
+    if (!beepAudioContext) beepAudioContext = new AudioContext();
+    if (beepAudioContext.state === 'suspended') await beepAudioContext.resume();
+    if (beepAudioContext.state === 'running') {
+      const silentOsc  = beepAudioContext.createOscillator();
+      const silentGain = beepAudioContext.createGain();
+      silentGain.gain.value = 0;
+      silentOsc.connect(silentGain).connect(beepAudioContext.destination);
+      silentOsc.start();
+      silentOsc.stop(beepAudioContext.currentTime + 0.05);
+    }
+  } catch (err) {
+    console.warn('[Race] AudioContext prime failed:', err);
+  }
+
+  const completed = await _raceCountdown(_spokenDirectly ? '' : 'Arm your quad');
   if (!completed) {
     // Countdown was aborted — reset button state without starting
     startRaceButton.disabled = false;
@@ -6547,6 +6696,15 @@ function switchSettingsSection(sectionName) {
   if (targetSection) {
     targetSection.classList.add('active');
   }
+
+  // Reset the scroll of the shared scrollable container back to the top
+  // whenever we switch sections.  All settings sections share the same
+  // .settings-content parent (overflow-y:auto) — without this reset, a
+  // user who scrolled down in one section would land at the same scroll
+  // position in the next one, which feels wrong because the new section's
+  // header is off-screen.
+  const scrollContainer = document.querySelector('.settings-content');
+  if (scrollContainer) scrollContainer.scrollTop = 0;
 
   // Update nav items — resolve the matching one via its onclick attribute
   // instead of the deprecated implicit `event` global.  The previous
@@ -9518,10 +9676,23 @@ async function mnStartRace() {
     await fetch('/api/multinode/race/prearm' + prearmExclude, { method: 'POST' });
   } catch (_) {}
 
-  // Unlock AudioContext (iOS/Safari)
-  if (typeof beepAudioContext !== 'undefined' && beepAudioContext && beepAudioContext.state === 'suspended') {
-    await beepAudioContext.resume().catch(() => {});
-  }
+  // iOS/Safari: create + resume + prime the AudioContext INSIDE the user
+  // gesture so the start beep 5 s later isn't silent (see startRace() for
+  // the full rationale).  Match the solo-race prime block exactly.
+  try {
+    if (typeof AudioContext !== 'undefined') {
+      if (!beepAudioContext) beepAudioContext = new AudioContext();
+      if (beepAudioContext.state === 'suspended') await beepAudioContext.resume();
+      if (beepAudioContext.state === 'running') {
+        const silentOsc  = beepAudioContext.createOscillator();
+        const silentGain = beepAudioContext.createGain();
+        silentGain.gain.value = 0;
+        silentOsc.connect(silentGain).connect(beepAudioContext.destination);
+        silentOsc.start();
+        silentOsc.stop(beepAudioContext.currentTime + 0.05);
+      }
+    }
+  } catch (_) {}
 
   // Enable stop buttons before countdown so the director can cancel
   ['mnStopRaceBtn', 'mnStopRaceBtnMain'].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = false; });

@@ -40,6 +40,13 @@ class SelfTest {
     TestResult testWiFi();
     TestResult testBattery();
     TestResult testRX5808(RX5808* rx5808);
+    // Confirms the RX5808 module is wired in SPI (register-programming) mode
+    // rather than the legacy manual mode.  Writes two different frequencies
+    // and reads them back via the module's register-read command — a match
+    // proves the SPI programming path is live.  A failure here means either
+    // the module's MODE pin is strapped to the wrong state, the SPI wiring
+    // is broken, or the module itself is defective.
+    TestResult testRX5808SpiMode(RX5808* rx5808);
     TestResult testLapTimer(LapTimer* timer);
     TestResult testAudio(Buzzer* buzzer);
     TestResult testConfig(Config* config);

@@ -95,4 +95,13 @@ class Webserver : public TransportInterface {
     // current mesh state instead of the "Race Director" fallback.  Empty
     // string means no push has been received yet on this boot.
     String cachedDirectorState;
+
+    // Multi-tab prearm heartbeat.  When /timer/prearm is POSTed we set an
+    // absolute deadline (millis()+~6000).  process() re-broadcasts
+    // raceState=prearming at 500 ms intervals while millis() < deadline so
+    // any browser that dropped the first SSE frame (Safari and some Chrome
+    // builds silently miss a lone rapid event on AsyncEventSource) catches
+    // the next one during the 5-second countdown window.
+    uint32_t prearmHeartbeatUntilMs = 0;
+    uint32_t prearmHeartbeatNextMs  = 0;
 };

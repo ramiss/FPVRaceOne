@@ -212,12 +212,24 @@ class AudioAnnouncer {
                 reject(new Error('Web Speech API not supported'));
                 return;
             }
-            
+
             const utterance = new SpeechSynthesisUtterance(text);
             utterance.rate = this.rate;
-            utterance.onend = resolve;
-            utterance.onerror = reject;
-            
+            // iOS Safari occasionally drops `onend` when the utterance is
+            // interrupted mid-speak (e.g. the user hits Stop during the
+            // countdown).  Without a fallback, processQueue's `await this.speak`
+            // hangs forever, leaves isPlaying=true, and every subsequent
+            // queueSpeak short-circuits — the only recovery is a page reload.
+            // Guard by treating onerror (fires from speechSynthesis.cancel())
+            // as a normal resolution AND capping the Promise with a
+            // text-length-based timeout.
+            let done = false;
+            const finish = () => { if (!done) { done = true; resolve(); } };
+            utterance.onend = finish;
+            utterance.onerror = finish;
+            const budgetMs = Math.max(4000, text.length * 120);
+            setTimeout(finish, budgetMs);
+
             speechSynthesis.speak(utterance);
         });
     }
@@ -791,6 +803,14 @@ class AudioAnnouncer {
      */
     clearQueue() {
         this.audioQueue = [];
+        // Cancel any in-flight utterance so its playWebSpeech Promise resolves
+        // (onerror path).  Force isPlaying=false too — otherwise processQueue's
+        // top-of-function guard silently drops every subsequent queueSpeak
+        // until page reload, which was the "Race stopped never speaks" bug.
+        if ('speechSynthesis' in window) {
+            try { speechSynthesis.cancel(); } catch (_) {}
+        }
+        this.isPlaying = false;
     }
 
     /**

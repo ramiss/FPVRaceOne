@@ -640,6 +640,21 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         sseKeepaliveMs = currentTimeMs;
     }
 
+    // Prearm heartbeat.  While the initiator's 5 s countdown is running the
+    // server re-broadcasts raceState=prearming at 500 ms intervals so any
+    // browser that dropped the initial rapid frame (Safari and some Chrome
+    // builds are known to silently miss lone AsyncEventSource messages)
+    // catches a subsequent one in time to mirror the flashing button.
+    // Reset unconditionally by /timer/start and /timer/stop.
+    if (prearmHeartbeatUntilMs != 0 && servicesStarted) {
+        if (currentTimeMs >= prearmHeartbeatUntilMs) {
+            prearmHeartbeatUntilMs = 0;
+        } else if (currentTimeMs >= prearmHeartbeatNextMs) {
+            if (transportMgr) transportMgr->broadcastRaceStateEvent("prearming");
+            prearmHeartbeatNextMs = currentTimeMs + 500;
+        }
+    }
+
     // [Previously: closed all SSE clients when events.count() > 1 for >500 ms
     //  to evict Windows-Chrome-refresh zombies that AsyncTCP's ACK timeout
     //  can't detect.  That heuristic broke multi-client racing — two
@@ -1240,6 +1255,7 @@ EEPROM:\n\
 
     server.on("/timer/start", HTTP_POST, [this](AsyncWebServerRequest *request) {
         timer->start();
+        prearmHeartbeatUntilMs = 0;   // countdown finished — stop re-broadcasting
         if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
         if (multiNode && multiNode->isClientMode()) multiNode->setTimerRunning(true);
         request->send(200, "application/json", "{\"status\": \"OK\"}");
@@ -1247,13 +1263,34 @@ EEPROM:\n\
 
     // Called by the client browser at the start of its local countdown so the master
     // sees running=true immediately (before /timer/start fires after the countdown).
+    // Also broadcasts raceState=prearming over SSE so any OTHER browser tab viewing
+    // this same unit (single/standalone multi-tab sync) can mirror the countdown UI.
+    //
+    // Multi-tab sync is a SINGLE-mode-only feature: master and client nodes have
+    // their own coordination channels (masterRaceState, directorState) and the
+    // extra raceState=prearming traffic here would be inert on the client browser
+    // JS (which gates raceState handling to single mode) — but firing it anyway
+    // wastes SSE frames and confuses trace logs.  Gate on nodeMode == 0.
+    //
+    // Some browsers (observed on Safari and certain Chrome builds) silently drop a
+    // single rapid AsyncEventSource frame — the initiator's own tab receives its
+    // echo but sibling tabs sometimes don't.  Set a 6 s heartbeat window so
+    // process() re-broadcasts prearming at 500 ms intervals until either
+    // /timer/start or /timer/stop cancels it.  Rebroadcasts are idempotent on the
+    // client side (prearming branch is safe to run repeatedly).
     server.on("/timer/prearm", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (multiNode && multiNode->isClientMode()) multiNode->setTimerRunning(true);
+        if (conf && conf->getNodeMode() == 0) {
+            if (transportMgr) transportMgr->broadcastRaceStateEvent("prearming");
+            prearmHeartbeatUntilMs = millis() + 6000;
+            prearmHeartbeatNextMs  = millis() + 500;
+        }
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
     server.on("/timer/stop", HTTP_POST, [this](AsyncWebServerRequest *request) {
         timer->stop();
+        prearmHeartbeatUntilMs = 0;   // countdown aborted — stop re-broadcasting
         if (transportMgr) transportMgr->broadcastRaceStateEvent("stopped");
         if (multiNode && multiNode->isClientMode()) {
             if (multiNode->isMasterRaceActive()) {
@@ -1266,6 +1303,12 @@ EEPROM:\n\
 
     server.on("/timer/clearLaps", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (timer) timer->clearLapData();
+        // Broadcast so other tabs viewing this unit wipe their lap tables too.
+        // Single-mode multi-tab sync only — see /timer/prearm above for the
+        // rationale on why coordinated modes shouldn't fire this broadcast.
+        if (conf && conf->getNodeMode() == 0) {
+            if (transportMgr) transportMgr->broadcastRaceStateEvent("cleared");
+        }
         pushMultiNodeState();
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
@@ -1622,6 +1665,34 @@ EEPROM:\n\
             DEBUG("Client reconnected! Last message ID that it got is: %u\n", client->lastId());
         }
         client->send("start", NULL, millis(), 1000);
+        // Multi-tab sync: if a race is already running when this browser
+        // connects (late-joiner scenario), replay raceState=started so the
+        // new tab can start its display timer and enter spectator mode
+        // instead of sitting idle until /timer/stop fires.  SSE has no
+        // native message replay for late subscribers — we do it explicitly.
+        //
+        // Skip the replay when we're a client node in an active master-
+        // coordinated race: the raceState=started path doesn't set the
+        // mnMasterRaceActive flag, and without it Stop skips the
+        // "quit race?" confirmation and silently DNFs.  Client-mode
+        // coordinated races are meant to sync via masterRaceState instead.
+        // Multi-tab sync (single-mode-only): replay the current race state
+        // to the newly connected browser so a mid-race page refresh picks up
+        // at the correct elapsed offset instead of restarting from 0.
+        // Master and client modes have their own resume-on-connect paths
+        // (cachedDirectorState below, masterRaceState via mnHeartbeat) and
+        // firing raceState here would put master's Race tab or client's
+        // solo Race tab into an incorrect spectator state during coord races.
+        if (conf && conf->getNodeMode() == 0 && timer && timer->isRunning()) {
+            // Late-joiner: include the race elapsed time so the new tab's
+            // display timer resumes at the correct offset instead of
+            // restarting from 0.  Format is "started:<elapsedMs>" so the
+            // normal /timer/start broadcast (plain "started") stays
+            // untouched — that path is a race that just began now, no
+            // offset needed.  Client parses the optional colon suffix.
+            String payload = "started:" + String(timer->getElapsedMs());
+            client->send(payload.c_str(), "raceState", millis(), 1000);
+        }
         // If we're a client node and have a cached directorState from the
         // master, replay it to this browser immediately.  Otherwise the
         // Multi Race tab renders the "Race Director" fallback until the
@@ -2186,9 +2257,15 @@ EEPROM:\n\
 
     // Self-test endpoint
     server.on("/api/selftest", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        // Run RX5808 test
+        // Run RX5808 test (RF receive smoke test)
         TestResult rxTest = selftest->testRX5808(rx);
-        
+
+        // Run RX5808 SPI-mode test — confirms the module accepts SPI
+        // register writes rather than being in the legacy manual-channel
+        // mode.  Run this AFTER testRX5808 so its own frequency restore
+        // finishes before we start our own set-and-verify sweep.
+        TestResult rxSpiTest = selftest->testRX5808SpiMode(rx);
+
         // Run Lap Timer test
         TestResult timerTest = selftest->testLapTimer(timer);
         
@@ -2252,6 +2329,7 @@ EEPROM:\n\
         };
         
         addTest(rxTest, true);
+        addTest(rxSpiTest);
         addTest(timerTest);
         addTest(audioTest);
         addTest(configTest);
