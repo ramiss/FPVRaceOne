@@ -4,6 +4,8 @@
 
 **Personal FPV Lap Timer**
 
+[Purchase your FPVRaceOne on our Etsy store here!](https://www.etsy.com/listing/4542323349/fpvraceone-a-personal-lap-timer-for-fpv)
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 A single node personal lap timing solution for 5.8 GHz FPV drones that can be networked to other units (8 total) for multi-pilot racing. Perfect for personal race or practice sessions with one unit (indoor and large scale) up to MultiGP race events with multiple units. No additional networking hardware required — just plug in a USB power, connect over wifi, calibrate, and fly.
@@ -85,7 +87,7 @@ Guided calibration wizard with real-time RSSI charts: Fly 3 passes over the star
 ### Multi-Node Racing — Built-In Race Directing
 Network **up to 8 devices** together using on-board Wifi (no router or extra hardware required). One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically. Each pilot should remain connected to their own device over wifi.  All devices in multi-mode will see the entire race board.
 
-- **Master Recruit** — the master can automatically scan for FPVRaceOne clients in range and configure them to joing the network. Or each client can search for a master and connect manually.
+- **Master Recruit** — the master can automatically scan for FPVRaceOne clients in range and configure them to join the network. Or each client can search for a master and connect manually.
 - **One-tap Start All / Stop All** — broadcast a synchronised race start to all pilot on the network
 - **Live all-pilots dashboard on the master and clients** — each client renders as a card with pilot name, running indicator (●/○), live lap count, and last lap time, updated via Server-Sent Events with sub-second latency. Slot cards labelled A through G match what the director sees in serial logs
 - **Master can edit and configure all pilots from the Race tab** — pencil icon on every slot card opens a per-pilot editor for name, color, band, channel, RSSI thresholds, and skip flag — works on the master's own host card too
@@ -152,7 +154,7 @@ Network **up to 8 devices** together using on-board Wifi (no router or extra har
 
 ### Hardware
 
-Pre-made and flashed hardware — (ETSY LINK Coming Soon!)
+Pre-made and flashed hardware — [Purchase your FPVRaceOne on our Etsy store here!](https://www.etsy.com/listing/4542323349/fpvraceone-a-personal-lap-timer-for-fpv)
 
 **[Detailed hardware setup →](docs/GETTING_STARTED.md)**
 
