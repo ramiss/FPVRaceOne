@@ -2277,7 +2277,15 @@ EEPROM:\n\
 
         // Run Lap Timer test
         TestResult timerTest = selftest->testLapTimer(timer);
-        
+
+        // Sampling punctuality — worst gap between consecutive RSSI samples.
+        // This is the direct evidence that lap detection is not late; read it
+        // together with the CPU Load result below, which only shows headroom.
+        TestResult jitterTest = selftest->testTimingJitter(timer, rx);
+
+        // Per-task CPU load / idle headroom.
+        TestResult cpuTest = selftest->testCpuLoad();
+
         // Run Audio test
         TestResult audioTest = selftest->testAudio(buz);
         
@@ -2340,6 +2348,8 @@ EEPROM:\n\
         addTest(rxTest, true);
         addTest(rxSpiTest);
         addTest(timerTest);
+        addTest(jitterTest);
+        addTest(cpuTest);
         addTest(audioTest);
         addTest(configTest);
         #ifdef PIN_SD_CS

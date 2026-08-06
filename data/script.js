@@ -2405,6 +2405,10 @@ function buildConfigSnapshotFromUI() {
     // (either/or) rather than the previous "include in addition" toggle.
     otaIncludePrereleases: parseInt(document.getElementById('otaChannelSelect')?.value || '0', 10) || 0,
 
+    // RSSI acquisition: 0 = polled analogRead, 1 = DMA continuous peak-hold.
+    // Latched by the firmware at boot, so a change needs a reboot to apply.
+    adcMode: parseInt(document.getElementById('adcModeSelect')?.value || '0', 10) || 0,
+
   };
 
   return cfg;
@@ -7404,6 +7408,13 @@ function openSettingsModal() {
         const otaChannelSel = document.getElementById('otaChannelSelect');
         if (otaChannelSel && config.otaIncludePrereleases !== undefined) {
           otaChannelSel.value = config.otaIncludePrereleases ? '1' : '0';
+        }
+
+        // RSSI acquisition mode (0 = polled analogRead, 1 = DMA continuous).
+        // Takes effect on reboot — the firmware latches it in RX5808::init().
+        const adcModeSel = document.getElementById('adcModeSelect');
+        if (adcModeSel && config.adcMode !== undefined) {
+          adcModeSel.value = String(config.adcMode);
         }
 
         // All UI fields populated — now unlock staging so user changes can be tracked

@@ -245,27 +245,65 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // Store final value used by lap logic
     rssi[rssiCount] = out;
 
-    // ── One-shot: measure the loop sample rate over the first ~2 s of
-    // uptime and log it.  Helps the operator know whether the median
-    // window they picked lands in the intended time window — e.g. N=7 at
-    // 400 Hz gives ~17 ms, at 200 Hz gives ~35 ms.
+#if TIMING_STATS_ENABLED
+    // ── Continuous sample-interval statistics ────────────────────────────
+    //
+    // This replaced a one-shot mean-rate log that only ran for the first 2 s
+    // of uptime.  A mean cannot answer the question that actually matters —
+    // "are we ever LATE" — because a run that averages 400 Hz can still
+    // contain a single 300 ms gap, and it is the gap that loses a lap.
+    //
+    // WORST GAP IS THE KEY NUMBER HERE.  It bounds detection jitter and
+    // bounds the risk of a narrow fast-pass peak landing entirely between
+    // two samples.  Mean rate is reported alongside only for context.
+    //
+    // micros() rather than millis(): the interval being measured is 2-5 ms,
+    // which millis() cannot resolve to any useful precision.
     {
-        static uint32_t rateStartMs   = 0;
-        static uint32_t rateSampleCnt = 0;
-        static bool     ratePrinted   = false;
-        if (!ratePrinted) {
-            if (rateStartMs == 0) rateStartMs = currentTimeMs;
-            rateSampleCnt++;
-            if (currentTimeMs - rateStartMs >= 2000) {
-                const uint32_t hz = (rateSampleCnt * 1000UL) / (currentTimeMs - rateStartMs);
-                DEBUG("[RSSI] Sample rate: %lu Hz (median N=%u → %lu ms window)\n",
-                      (unsigned long)hz,
-                      (unsigned)medianFilter.window(),
-                      (unsigned long)((medianFilter.window() * 1000UL) / (hz ? hz : 1)));
-                ratePrinted = true;
-            }
+        const uint32_t nowUs = micros();
+        if (_ts.lastSampleUs != 0) {
+            // Unsigned subtraction is wrap-safe (micros() wraps ~71 min).
+            const uint32_t dtUs = nowUs - _ts.lastSampleUs;
+            if (dtUs > _ts.maxIntervalUs) _ts.maxIntervalUs = dtUs;
+            if (dtUs < _ts.minIntervalUs) _ts.minIntervalUs = dtUs;
+            _ts.sumIntervalUs += dtUs;
+            _ts.sampleCount++;
+            if (dtUs > (TIMING_STATS_LATE_THRESHOLD_MS * 1000UL)) _ts.lateCount++;
+        }
+        _ts.lastSampleUs = nowUs;
+
+        if (_ts.windowStartMs == 0) _ts.windowStartMs = currentTimeMs;
+        if (currentTimeMs - _ts.windowStartMs >= TIMING_STATS_WINDOW_MS &&
+            _ts.sampleCount > 0) {
+            const uint32_t meanUs = (uint32_t)(_ts.sumIntervalUs / _ts.sampleCount);
+            const uint32_t hz     = meanUs ? (1000000UL / meanUs) : 0;
+            DEBUG("[TIMING] %lu Hz | interval min/mean/max = %lu/%lu/%lu us | late(>%ums)=%lu of %lu | median N=%u (~%lu ms)\n",
+                  (unsigned long)hz,
+                  (unsigned long)_ts.minIntervalUs,
+                  (unsigned long)meanUs,
+                  (unsigned long)_ts.maxIntervalUs,
+                  (unsigned)TIMING_STATS_LATE_THRESHOLD_MS,
+                  (unsigned long)_ts.lateCount,
+                  (unsigned long)_ts.sampleCount,
+                  (unsigned)medianFilter.window(),
+                  (unsigned long)((medianFilter.window() * (uint32_t)meanUs) / 1000UL));
+
+            // Publish the completed window for the Diagnostics page, then
+            // reset the accumulators.  Readers always see a whole window,
+            // never a partially-filled one.
+            _tsPublished = _ts;
+            _tsPublished.meanIntervalUs = meanUs;
+            _tsPublished.valid          = true;
+
+            _ts.minIntervalUs  = 0xFFFFFFFFUL;
+            _ts.maxIntervalUs  = 0;
+            _ts.sumIntervalUs  = 0;
+            _ts.sampleCount    = 0;
+            _ts.lateCount      = 0;
+            _ts.windowStartMs  = currentTimeMs;
         }
     }
+#endif
 
 #if RSSI_LOGGING_ENABLED
     // The RSSI CSV log format retains "kalman" and "ma" columns for tooling

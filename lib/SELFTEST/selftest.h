@@ -52,6 +52,18 @@ class SelfTest {
     TestResult testConfig(Config* config);
     TestResult testRaceHistory(RaceHistory* history);
     TestResult testWebServer();
+    // Reports the worst gap between consecutive RSSI samples over the last
+    // completed window.  This is the DIRECT evidence that the timer is not
+    // late: it bounds detection jitter and bounds the risk of a narrow
+    // fast-pass peak landing entirely between two samples.  Requires
+    // TIMING_STATS_ENABLED; reports "not compiled in" otherwise.
+    TestResult testTimingJitter(LapTimer* timer, RX5808* rx5808);
+    // Reports per-FreeRTOS-task CPU load and idle headroom.  Proves the chip
+    // is not saturated hosting web + AP + polling + race logic concurrently.
+    // NOTE: this proves headroom, NOT punctuality — a task blocked on socket
+    // I/O burns no cycles, so low load can coexist with a long stall.  Read
+    // it alongside testTimingJitter(), never instead of it.
+    TestResult testCpuLoad();
     TestResult testOTA();
     TestResult testWebhooks();
     TestResult testTransport();

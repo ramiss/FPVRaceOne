@@ -8,9 +8,16 @@
 
 // ── Small odd-window running median filter ──────────────────────────────────
 // Matches the design intent of RotorHazard's FastRunningMedian (single-stage
-// filter, spike-rejecting, peak-preserving) but sized for our shared-Core
-// sample rate.  Their 255-sample window only works at ~1 kHz sampling; ours
-// runs on Core 1 alongside the Arduino loop() so we get ~200-500 Hz.
+// filter, spike-rejecting, peak-preserving) but sized for our sample rate.
+// Their 255-sample window only works at ~1 kHz sampling on a dedicated MCU.
+//
+// NOTE ON SAMPLE RATE: the ESP32-C6 has a SINGLE HP RISC-V core.  There is no
+// "Core 1" — this filter is fed from handleLapTimerUpdate() on the Arduino
+// loop task, which shares that one core with parallelTask, WiFi and lwIP.
+// One sample is taken per loop() iteration and loop() ends in vTaskDelay(1),
+// so with CONFIG_FREERTOS_HZ=1000 the rate is hard-capped near 1 kHz and
+// measures ~200-500 Hz in practice.  The cap is the loop structure, not the
+// chip.  Enable TIMING_STATS_ENABLED to measure it on real hardware.
 //
 // MaxN = 15 caps the runtime-selected window at ~50 ms even in the worst
 // under-sampled case, which is the widest window that still preserves the
@@ -82,6 +89,27 @@ typedef enum {
     CALIBRATION_WIZARD
 } laptimer_state_e;
 
+#if TIMING_STATS_ENABLED
+// Sample-interval statistics for one reporting window.  Populated by
+// handleLapTimerUpdate() and published whole (never partially filled) so the
+// Diagnostics page and any reader always see a self-consistent snapshot.
+//
+// maxIntervalUs is the number that matters: it is the worst gap between two
+// consecutive RSSI samples, which bounds both detection jitter and the risk
+// of a narrow peak falling between samples.  Mean/rate are context only.
+struct TimingStats {
+    uint32_t minIntervalUs  = 0xFFFFFFFFUL;
+    uint32_t maxIntervalUs  = 0;
+    uint32_t meanIntervalUs = 0;   // computed at publish time
+    uint64_t sumIntervalUs  = 0;
+    uint32_t sampleCount    = 0;
+    uint32_t lateCount      = 0;   // intervals over TIMING_STATS_LATE_THRESHOLD_MS
+    uint32_t lastSampleUs   = 0;
+    uint32_t windowStartMs  = 0;
+    bool     valid          = false;
+};
+#endif
+
 #define LAPTIMER_LAP_HISTORY 10
 #define LAPTIMER_RSSI_HISTORY 100
 #define LAPTIMER_CALIBRATION_HISTORY 5000  // Increased buffer for longer recordings
@@ -100,6 +128,11 @@ class LapTimer {
 #if RSSI_LOGGING_ENABLED
     // Updated every handleLapTimerUpdate() call; read by main.cpp for RSSI logging
     RssiSnapshot snapshot = {};
+#endif
+#if TIMING_STATS_ENABLED
+    // Last completed sample-interval window.  `valid` is false until the
+    // first window closes (TIMING_STATS_WINDOW_MS after the first sample).
+    const TimingStats& getTimingStats() const { return _tsPublished; }
 #endif
     uint8_t getRssi();
     uint32_t getLapTime();
@@ -136,6 +169,11 @@ class LapTimer {
     // gate crossings hard to detect.  Window size is driven by
     // conf->getV1Smoothing() (0-10) → medianNFromSlider(level).
     RunningMedian<15> medianFilter;
+
+#if TIMING_STATS_ENABLED
+    TimingStats _ts;           // accumulating window
+    TimingStats _tsPublished;  // last completed window, safe for readers
+#endif
 
     uint8_t rssiPeak;
     uint32_t rssiPeakTimeMs;

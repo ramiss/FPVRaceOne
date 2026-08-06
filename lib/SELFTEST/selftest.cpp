@@ -2,6 +2,7 @@
 #include "debug.h"
 #include "config.h"
 #include "mac_util.h"
+#include "cpumon.h"
 #include "storage.h"
 #include "RX5808.h"
 #include "laptimer.h"
@@ -278,6 +279,107 @@ TestResult SelfTest::testWiFi() {
 
     result.passed = true;
     result.details = String("Mode: ") + modeStr + ", MAC: " + macStr;
+    result.duration_ms = millis() - start;
+    return result;
+}
+
+TestResult SelfTest::testTimingJitter(LapTimer* timer, RX5808* rx5808) {
+    TestResult result;
+    result.name = "RSSI Sample Timing";
+    uint32_t start = millis();
+
+#if TIMING_STATS_ENABLED
+    if (!timer) {
+        result.passed = false;
+        result.details = "Lap timer unavailable";
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    const TimingStats& s = timer->getTimingStats();
+    if (!s.valid) {
+        // No window has closed yet.  Not a failure — just too early.
+        result.passed = true;
+        result.details = String("Warming up — first window closes ")
+                       + String(TIMING_STATS_WINDOW_MS / 1000) + "s after boot";
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    const uint32_t hz     = s.meanIntervalUs ? (1000000UL / s.meanIntervalUs) : 0;
+    const uint32_t maxMs  = s.maxIntervalUs / 1000;
+    const uint32_t meanUs = s.meanIntervalUs;
+
+    // Pass condition is the WORST gap, not the mean.  A healthy system shows
+    // zero late samples; any late sample means a scheduling stall long enough
+    // that a fast pass could have been missed.
+    result.passed = (s.lateCount == 0);
+
+    // Report the mode actually running, not the one requested — DMA falls
+    // back to polled on init failure, and the A/B is worthless if the two
+    // runs are silently the same mode.
+    const char* modeStr = "polled";
+    if (rx5808 && rx5808->getAdcMode() == ADC_MODE_DMA) modeStr = "DMA";
+
+    result.details = String("[") + modeStr + "] " + String(hz) + " Hz, worst gap "
+                   + String(s.maxIntervalUs) + "us (" + String(maxMs) + "ms), mean "
+                   + String(meanUs) + "us, late(>"
+                   + String(TIMING_STATS_LATE_THRESHOLD_MS) + "ms)=" + String(s.lateCount)
+                   + "/" + String(s.sampleCount);
+    if (!result.passed) {
+        result.details += " — sampling stalled, see [CORE0] log for the blocking call";
+    }
+#else
+    (void)timer;
+    (void)rx5808;
+    result.passed = true;
+    result.details = "Not compiled in (TIMING_STATS_ENABLED=0)";
+#endif
+
+    result.duration_ms = millis() - start;
+    return result;
+}
+
+TestResult SelfTest::testCpuLoad() {
+    TestResult result;
+    result.name = "CPU Load";
+    uint32_t start = millis();
+
+#if CPU_MONITOR_ENABLED
+    // Read the window parallelTask already closed for us.  We deliberately do
+    // NOT measure here: computing load requires a real time window, and
+    // blocking this AsyncWebServer handler for a couple hundred ms risks the
+    // TCP slot exhaustion this project is sensitive to.
+    const CpuMonitor::Snapshot& s = CpuMonitor::getInstance().getLast();
+
+    if (!s.valid) {
+        // No window has closed yet — too early, not a failure.
+        result.passed = true;
+        result.details = String("Warming up — first window closes ")
+                       + String(CPU_MONITOR_WINDOW_MS / 1000) + "s after boot";
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    // Headroom check only.  This deliberately does NOT claim anything about
+    // punctuality — see testTimingJitter() for that.  80% busy leaves little
+    // room for a traffic burst, so flag it.
+    result.passed = (s.busyPercent < 80);
+
+    result.details = String("Busy ") + String(s.busyPercent) + "%, idle "
+                   + String(s.idlePercent) + "% | ";
+    // Per-task breakdown — this is the point of the test.  It answers
+    // "can it host web + AP + polling + race logic at once" line by line.
+    const uint8_t show = (s.taskCount < 4) ? s.taskCount : 4;
+    for (uint8_t i = 0; i < show; i++) {
+        if (i) result.details += ", ";
+        result.details += String(s.top[i].name) + " " + String(s.top[i].percent) + "%";
+    }
+#else
+    result.passed = true;
+    result.details = "Not compiled in (CPU_MONITOR_ENABLED=0)";
+#endif
+
     result.duration_ms = millis() - start;
     return result;
 }

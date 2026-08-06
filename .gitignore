@@ -100,3 +100,4 @@ tools/apply_frontend_defaults.html
 /tools/test-extension
 /.claude
 /PCB
+/.tmp.driveupload

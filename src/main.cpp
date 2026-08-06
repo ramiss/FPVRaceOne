@@ -5,6 +5,7 @@
 #endif
 #include "buzzer.h"
 #include "config.h"
+#include "cpumon.h"
 #include "laptimer.h"
 #include "multinode.h"
 #include "racehistory.h"
@@ -129,9 +130,18 @@ static void parallelTask(void *pvArgs) {
 #ifdef ESP32S3
         CORE0_TIME("rgbLed",     rgbLed.handleRgbLed(currentTimeMs));
 #endif
-        // OTA update work runs here (blocking) when an apply is pending.  The
-        // RSSI loop on Core 1 is unaffected; only this Core-0 task pauses
-        // during the download.
+        // OTA update work runs here (blocking) when an apply is pending.
+        //
+        // NOTE: the ESP32-C6 is SINGLE-core.  An earlier comment here claimed
+        // "the RSSI loop on Core 1 is unaffected" — that was never true on
+        // this chip.  This task and the Arduino loop task (which samples RSSI)
+        // share the one HP core; this task runs at priority 2, loop() at 1.
+        // A long blocking call here therefore CAN delay sampling.  In practice
+        // most of the blocking is socket I/O, during which the task yields and
+        // loop() runs — but that is a property of what we block on, not of
+        // core isolation.  Measure it, don't assume it: TIMING_STATS_ENABLED
+        // reports the worst sample gap, and the [CORE0] lines below report the
+        // worst sub-call duration.
         CORE0_TIME("ota",        otaManager.loop());
         CORE0_TIME("webUpdate",  ws.handleWebUpdate(currentTimeMs));
         CORE0_TIME("usb",        usbTransport.update(currentTimeMs));
@@ -139,6 +149,11 @@ static void parallelTask(void *pvArgs) {
         CORE0_TIME("rxFreq",     rx.handleFrequencyChange(currentTimeMs, config.getFrequency()));
         CORE0_TIME("webhooks",   webhookManager.process());
         CORE0_TIME("multinode",  multiNodeManager.process(currentTimeMs));
+#if CPU_MONITOR_ENABLED
+        // Closes a load window every CPU_MONITOR_WINDOW_MS and publishes it.
+        // Cheap: two uxTaskGetSystemState() calls per window, not per tick.
+        CORE0_TIME("cpumon",     CpuMonitor::getInstance().tick(currentTimeMs));
+#endif
 
         uint32_t tickEnd = millis();
         lastTickEndMs = tickEnd;
@@ -241,8 +256,11 @@ void setup() {
         DEBUG("Generic ESP32 build - WiFi Mode\n");
 #endif
     
-    // Note: config.init() already called above
-    rx.init();
+    // Note: config.init() already called above.
+    // adcMode is latched here for the run — 0 = polled analogRead,
+    // 1 = DMA continuous with peak-hold.  Changing it requires a reboot,
+    // which is why it is read once at init rather than polled per sample.
+    rx.init(config.getAdcMode());
 #ifdef PIN_BUZZER
     buzzer.init(PIN_BUZZER, BUZZER_INVERTED);
 #endif

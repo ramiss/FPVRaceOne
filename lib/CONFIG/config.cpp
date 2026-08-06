@@ -161,6 +161,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["wifiTxPower"] = conf.wifiTxPower;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["v1Smoothing"] = conf.v1Smoothing;
+    config["adcMode"] = conf.adcMode;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -212,6 +213,7 @@ void Config::toJsonString(char* buf) {
     config["pwd"] = conf.password;
     config["gate1Bootstrap"] = conf.gate1Bootstrap;
     config["v1Smoothing"] = conf.v1Smoothing;
+    config["adcMode"] = conf.adcMode;
     config["nodeMode"] = conf.nodeMode;
     config["masterSSID"] = conf.masterSSID;
     config["masterPassword"] = conf.masterPassword;
@@ -421,6 +423,7 @@ void Config::fromJson(JsonObject source) {
     // ===== Signal processing mode =====
     if (source.containsKey("gate1Bootstrap"))   setU8("gate1Bootstrap",   conf.gate1Bootstrap,    0, 1);
     if (source.containsKey("v1Smoothing"))      setU8("v1Smoothing",      conf.v1Smoothing,       0, 10);
+    if (source.containsKey("adcMode"))          setU8("adcMode",          conf.adcMode,           0, 1);
 
     // ===== Multi-node =====
     if (source.containsKey("nodeMode"))           setU8("nodeMode", conf.nodeMode, 0, 2);
@@ -578,6 +581,10 @@ uint8_t Config::getWifiTxPower() {
 
 uint8_t Config::getGate1Bootstrap() {
     return conf.gate1Bootstrap;
+}
+
+uint8_t Config::getAdcMode() {
+    return conf.adcMode;
 }
 
 uint8_t Config::getV1Smoothing() {
@@ -887,6 +894,7 @@ void Config::setDefaults(void) {
     conf.wifiTxPower = 21;    // Maximum TX power by default
     conf.gate1Bootstrap = 0;      // Gate-1 bootstrap, off by default
     conf.v1Smoothing = 5;         // Pipeline smoothing — 5 maps to N=7 median window (default)
+    conf.adcMode = 0;             // Polled analogRead by default; 1 = DMA continuous (A/B experiment)
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));

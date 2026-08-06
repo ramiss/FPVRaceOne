@@ -42,6 +42,37 @@
 // Set to 0 to compile it out entirely for production builds.
 #define RSSI_STREAM_ENABLED 0
 
+// ── Timing / load instrumentation ───────────────────────────────────────────
+//
+// Answers "is the timer ever LATE or INCONSISTENT" with measurements instead
+// of argument.  Two independent metrics, because they prove different things:
+//
+//   TIMING_STATS_ENABLED — worst gap between consecutive RSSI samples.  This
+//     is the DIRECT evidence: it bounds detection jitter and bounds the risk
+//     of a narrow fast-pass peak landing entirely between two samples.
+//
+//   CPU_MONITOR_ENABLED  — per-FreeRTOS-task CPU load.  This proves HEADROOM,
+//     not punctuality.  A task blocked on socket I/O burns no cycles, so a
+//     low CPU reading is perfectly compatible with a long wall-clock stall.
+//     Useful for showing what each subsystem costs; not a substitute for the
+//     sample-gap figure above.
+//
+// Both are diagnostics rather than product features and can be compiled out
+// if flash gets tight (currently ~89.5% used).  Disable CPU_MONITOR first.
+#define TIMING_STATS_ENABLED 1
+#define CPU_MONITOR_ENABLED  1
+
+// Reporting window for the sample-interval statistics, and the threshold
+// above which an interval is counted as "late".  10 ms is ~2-5x the expected
+// interval at 200-500 Hz, so a healthy system should report zero late samples.
+#define TIMING_STATS_WINDOW_MS          10000
+#define TIMING_STATS_LATE_THRESHOLD_MS  10
+
+// CPU load measurement window.  Driven from parallelTask, never from a web
+// handler — computing load needs a window, and blocking an AsyncWebServer
+// handler risks the TCP slot exhaustion this project is sensitive to.
+#define CPU_MONITOR_WINDOW_MS           5000
+
 //ESP23-C3
 #if defined(ESP32C3)
 
@@ -124,7 +155,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 27
+#define CONFIG_VERSION 28
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -177,6 +208,7 @@ typedef struct {
     uint8_t otaIncludePrereleases;  // 0=stable only (default), 1=also offer beta / pre-release builds in Check for Updates
     uint8_t mnClientRaceAudio;  // client mode: 1=play master's race-start countdown + beep locally, 0=silent (default)
     uint8_t mnPreferredSlot;    // client mode: last slot assigned by a master (1-7). 0=none. Sent as nodeId in registration so the master can honour it.
+    uint8_t adcMode;            // RSSI acquisition: 0=polled analogRead (default), 1=DMA continuous with peak-hold. Applied at boot — change requires reboot.
 } laptimer_config_t;
 
 class Storage;  // Forward declaration
@@ -232,6 +264,9 @@ class Config {
     uint8_t getWifiTxPower();
     uint8_t getGate1Bootstrap();
     uint8_t getV1Smoothing();
+    // 0 = polled analogRead, 1 = DMA continuous with peak-hold.
+    // Read once at boot by RX5808::init(); changing it requires a reboot.
+    uint8_t getAdcMode();
     char*   getPilotName();
     uint8_t getNodeMode();
     char*   getMasterSSID();

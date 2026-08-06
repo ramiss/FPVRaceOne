@@ -2,6 +2,9 @@
 #include <Arduino.h>
 #include "debug.h"
 #include "config.h"
+// Included here only, never in RX5808.h — keeps the ESP-IDF ADC driver off
+// the include path of every translation unit that touches RX5808.
+#include "esp_adc/adc_continuous.h"
 
 RX5808::RX5808(uint8_t _rssiInputPin, uint8_t _rx5808DataPin, uint8_t _rx5808SelPin, uint8_t _rx5808ClkPin) {
     rssiInputPin = _rssiInputPin;
@@ -11,7 +14,7 @@ RX5808::RX5808(uint8_t _rssiInputPin, uint8_t _rx5808DataPin, uint8_t _rx5808Sel
     lastSetFreqTimeMs = millis();
 }
 
-void RX5808::init() {
+void RX5808::init(uint8_t mode) {
     // INPUT (no pull-up): the RX5808 RSSI pin is an analog voltage output (~0–1V).
     // INPUT_PULLUP connects a ~45kΩ resistor to 3.3V which fights the signal and
     // artificially raises the ADC reading when the module has weak/no signal.
@@ -39,6 +42,129 @@ void RX5808::init() {
     recentSetFreqFlag = false;
     // Delay to ensure module is ready before first frequency change
     delay(50);
+
+    // Bring up DMA acquisition if requested.  Any failure falls back to the
+    // polled path rather than leaving the timer without RSSI — a degraded
+    // sample rate is recoverable, no signal at all is not.
+    adcMode = ADC_MODE_POLLED;
+    if (mode == ADC_MODE_DMA) {
+        if (startDmaSampling()) {
+            adcMode = ADC_MODE_DMA;
+            DEBUG("[ADC] DMA continuous mode active: %u Hz, %u-byte frames\n",
+                  (unsigned)ADC_DMA_SAMPLE_HZ, (unsigned)ADC_DMA_FRAME_BYTES);
+        } else {
+            DEBUG("[ADC] DMA init FAILED — falling back to polled analogRead\n");
+        }
+    } else {
+        DEBUG("[ADC] Polled analogRead mode active\n");
+    }
+}
+
+// ── DMA conversion-done ISR ─────────────────────────────────────────────────
+//
+// Runs in ISR context on every completed conversion frame (~625/sec at 20 kHz
+// with 128-byte frames).  Reduces the frame to its MAXIMUM and merges that
+// into a running peak.
+//
+// Peak — not mean, not last — is the entire reason DMA is worth doing here.
+// It means each readRssi() returns the highest value the hardware saw since
+// the previous read, so a narrow gate-pass peak cannot be lost just because
+// loop() was late. Mean would average the peak away; last would sample it
+// with the same aliasing problem the polled path has.
+//
+// Kept minimal and IRAM-resident: no logging, no allocation, no floating
+// point. `user_data` is the RX5808 instance's dmaPeakRaw.
+static bool IRAM_ATTR rx5808AdcConvDone(adc_continuous_handle_t handle,
+                                        const adc_continuous_evt_data_t *edata,
+                                        void *user_data) {
+    volatile uint32_t *peak = (volatile uint32_t *)user_data;
+    if (!peak || !edata || !edata->conv_frame_buffer) return false;
+
+    uint32_t frameMax = 0;
+    const uint32_t n = edata->size / SOC_ADC_DIGI_RESULT_BYTES;
+    for (uint32_t i = 0; i < n; i++) {
+        const adc_digi_output_data_t *p =
+            (const adc_digi_output_data_t *)&edata->conv_frame_buffer[i * SOC_ADC_DIGI_RESULT_BYTES];
+        const uint32_t v = p->type2.data;
+        if (v > frameMax) frameMax = v;
+    }
+
+    // Merge into the running peak.  Plain compare-and-store is safe here:
+    // this ISR is the only writer, and readRssi()'s atomic exchange either
+    // sees the old value or the new one — never a torn word.
+    if (frameMax > *peak) *peak = frameMax;
+
+    return false;  // no higher-priority task woken
+}
+
+bool RX5808::startDmaSampling() {
+    adc_unit_t    unit;
+    adc_channel_t channel;
+    if (adc_continuous_io_to_channel(rssiInputPin, &unit, &channel) != ESP_OK) {
+        DEBUG("[ADC] pin %u is not an ADC-capable input\n", (unsigned)rssiInputPin);
+        return false;
+    }
+    adcChannel = (uint8_t)channel;
+
+    adc_continuous_handle_cfg_t handleCfg = {};
+    handleCfg.max_store_buf_size = ADC_DMA_POOL_BYTES;
+    handleCfg.conv_frame_size    = ADC_DMA_FRAME_BYTES;
+    // Drop oldest rather than stall if we ever fall behind draining — we only
+    // care about the running peak, not a complete sample record.
+    handleCfg.flags.flush_pool   = 1;
+
+    adc_continuous_handle_t handle = nullptr;
+    if (adc_continuous_new_handle(&handleCfg, &handle) != ESP_OK) {
+        DEBUG("[ADC] adc_continuous_new_handle failed\n");
+        return false;
+    }
+
+    // Single channel, same attenuation as the polled path so both modes see
+    // an identical voltage-to-count mapping and the A/B stays apples-to-apples.
+    adc_digi_pattern_config_t pattern = {};
+    pattern.atten     = ADC_ATTEN_DB_6;
+    pattern.channel   = channel & 0x7;
+    pattern.unit      = unit;
+    pattern.bit_width = ADC_BITWIDTH_12;
+
+    adc_continuous_config_t contCfg = {};
+    contCfg.pattern_num    = 1;
+    contCfg.adc_pattern    = &pattern;
+    contCfg.sample_freq_hz = ADC_DMA_SAMPLE_HZ;
+    contCfg.conv_mode      = ADC_CONV_SINGLE_UNIT_1;
+    contCfg.format         = ADC_DIGI_OUTPUT_FORMAT_TYPE2;
+
+    if (adc_continuous_config(handle, &contCfg) != ESP_OK) {
+        DEBUG("[ADC] adc_continuous_config failed (freq %u Hz out of range?)\n",
+              (unsigned)ADC_DMA_SAMPLE_HZ);
+        adc_continuous_deinit(handle);
+        return false;
+    }
+
+    adc_continuous_evt_cbs_t cbs = {};
+    cbs.on_conv_done = rx5808AdcConvDone;
+    if (adc_continuous_register_event_callbacks(handle, &cbs, (void *)&dmaPeakRaw) != ESP_OK) {
+        DEBUG("[ADC] callback registration failed\n");
+        adc_continuous_deinit(handle);
+        return false;
+    }
+
+    if (adc_continuous_start(handle) != ESP_OK) {
+        DEBUG("[ADC] adc_continuous_start failed\n");
+        adc_continuous_deinit(handle);
+        return false;
+    }
+
+    adcHandle = (void *)handle;
+    return true;
+}
+
+void RX5808::stopDmaSampling() {
+    if (!adcHandle) return;
+    adc_continuous_handle_t handle = (adc_continuous_handle_t)adcHandle;
+    adc_continuous_stop(handle);
+    adc_continuous_deinit(handle);
+    adcHandle = nullptr;
 }
 
 void RX5808::handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyNewFreq) {
@@ -191,7 +317,22 @@ bool RX5808::isSettingFrequency() {
 uint8_t RX5808::readRssi() {
     if (recentSetFreqFlag) return 0; // RSSI unstable immediately after tune
 
-    uint16_t raw = (uint16_t)analogRead(rssiInputPin);
+    uint16_t raw;
+
+    if (adcMode == ADC_MODE_DMA) {
+        // Read-and-clear the running peak in one atomic operation.  A plain
+        // read-then-zero would race the ISR: a frame completing between the
+        // two would have its peak discarded.  __atomic_exchange_n is a single
+        // instruction on RISC-V and needs no critical section.
+        raw = (uint16_t)__atomic_exchange_n(&dmaPeakRaw, 0, __ATOMIC_RELAXED);
+        // A zero here means no frame completed since the last read — possible
+        // if loop() runs faster than the ~625 Hz frame rate.  Reporting 0
+        // would inject a false trough into the median, so fall back to a
+        // direct read for this tick instead.
+        if (raw == 0) raw = (uint16_t)analogRead(rssiInputPin);
+    } else {
+        raw = (uint16_t)analogRead(rssiInputPin);
+    }
 
     return (raw >= RSSI_SCALE_MAX)
            ? 255
