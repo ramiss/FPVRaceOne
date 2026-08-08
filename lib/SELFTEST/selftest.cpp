@@ -20,6 +20,16 @@
 #include "USB.h"
 #endif
 
+// Web assets are gzipped into the filesystem image at build time (see
+// _stage_web_assets in scripts/extra_script.py), so a normally built image
+// contains "/script.js.gz" and no "/script.js" at all.  Every asset presence
+// check must therefore accept either form, or the self-test reports a healthy
+// device's web UI as missing.
+static bool assetExists(const char* path) {
+    if (LittleFS.exists(path)) return true;
+    return LittleFS.exists(String(path) + ".gz");
+}
+
 SelfTest::SelfTest() : storage(nullptr), allPassed(true) {
 }
 
@@ -668,7 +678,7 @@ TestResult SelfTest::testAudio(Buzzer* buzzer) {
     #endif
     
     // Check if audio announcer JavaScript exists
-    bool audioJsExists = LittleFS.exists("/audio-announcer.js");
+    bool audioJsExists = assetExists("/audio-announcer.js");
     
     if (!audioJsExists) {
         result.passed = false;
@@ -750,9 +760,9 @@ TestResult SelfTest::testWebServer() {
     uint32_t start = millis();
     
     // Check if index.html exists
-    bool indexExists = LittleFS.exists("/index.html");
-    bool scriptExists = LittleFS.exists("/script.js");
-    bool styleExists = LittleFS.exists("/style.css");
+    bool indexExists = assetExists("/index.html");
+    bool scriptExists = assetExists("/script.js");
+    bool styleExists = assetExists("/style.css");
     
     if (!indexExists || !scriptExists || !styleExists) {
         result.passed = false;
@@ -837,7 +847,7 @@ TestResult SelfTest::testUSB() {
     bool connected = (bool)Serial;
     
     // Check USB transport files
-    bool transportFileExists = LittleFS.exists("/usb-transport.js");
+    bool transportFileExists = assetExists("/usb-transport.js");
     
     result.passed = true;
     result.details = String("CDC ") + (connected ? "connected" : "disconnected") + 
@@ -882,7 +892,7 @@ TestResult SelfTest::testTransport() {
     uint32_t start = millis();
     
     // Check transport files
-    bool usbTransportExists = LittleFS.exists("/usb-transport.js");
+    bool usbTransportExists = assetExists("/usb-transport.js");
     
     // Check WiFi status
     wifi_mode_t mode = WiFi.getMode();

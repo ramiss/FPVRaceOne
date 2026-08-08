@@ -1,4 +1,6 @@
 Import("env")
+import gzip
+import shutil
 import subprocess
 import os
 from pathlib import Path
@@ -52,6 +54,125 @@ if not _version_header.exists() or _version_header.read_text() != _new_version_c
     print(f"[Build] Firmware version written: {_fw_version}")
 else:
     print(f"[Build] Firmware version unchanged: {_fw_version}")
+
+# ── Web asset staging: gzip everything the browser fetches ────────────────────
+#
+# `data/` holds the web UI as plain, hand-editable, git-tracked source.  The
+# filesystem image is built from a GENERATED staging directory instead, in which
+# every compressible asset has been replaced by its `.gz` form.  `data_dir` in
+# platformio.ini points at that staging directory, so BOTH image builders
+# consume it:
+#
+#     data/  ──_stage_web_assets()─→  .pio/fsdata/  ──┬─→ pio run -t buildfs
+#     (source, plain)                (generated, gz)  └─→ build_littlefs_image()
+#
+# Why generated rather than committing .gz files next to the sources: a
+# committed .gz goes stale the moment someone edits the plain file and forgets
+# to recompress, and the device then serves last week's JavaScript with no
+# outward sign anything is wrong.  Regenerating every build makes that
+# impossible.
+#
+# Why staged rather than gzipping inside build_littlefs_image(): CI does not
+# call that function.  .github/workflows/release.yml runs `pio run -t buildfs`,
+# PlatformIO's own packer.  Compressing in only one of the two paths would ship
+# compressed assets to this bench and uncompressed ones to every published
+# release — the divergence would be invisible until a user hit it.
+#
+# ESPAsyncWebServer's serveStatic resolves `<path>.gz` automatically and sets
+# Content-Encoding (WebHandlers.cpp, _searchFile), so the four served assets
+# need no firmware change.  index.html DOES need one: webserver.cpp caches it in
+# a malloc'd RAM buffer rather than serving it from flash.
+#
+# Measured 2026-08-08 on the 7-node rig: that cache held 93,617 bytes for the
+# life of the boot, against a steady-state free heap of ~79 KB.  A browser
+# force-refresh re-requests every asset in parallel and costs a ~51 KB transient
+# (free 79444 -> min 3144 in one second).  Starting from 79 KB that survives;
+# the run that started at 60 KB hit the floor, dropped SSE, timed out all seven
+# nodes and was rebooted by the heap watchdog.  Caching the 19,402-byte gzip
+# instead returns ~74 KB permanently, which is what moves the floor out of
+# reach.  Compressing the rest (651 KB -> 165 KB served) shortens the parallel
+# connection window that produces the transient in the first place.
+
+# Text formats only.  Anything already compressed (mp3 in /sounds, png, woff2)
+# would grow, and gzipping it would also make it unreadable to any firmware path
+# that opens the file directly rather than serving it.
+GZIP_EXTENSIONS = {".html", ".htm", ".js", ".css", ".svg", ".json", ".xml", ".txt", ".map"}
+# Below this, the ~20-byte gzip header plus LittleFS's 4 KB block granularity
+# mean compression saves nothing.  Notably keeps buildinfo.json (35 bytes) plain.
+GZIP_MIN_BYTES = 1024
+
+def _stage_web_assets(env):
+    """Mirror data/ into .pio/fsdata/, gzipping compressible assets.
+
+    Lives in .pio/ (gitignored) but deliberately OUTSIDE .pio/build/: release.yml
+    documents that `pio run -t buildfs` has been observed to wipe the env build
+    directory, which would delete the staged files between staging and packing.
+
+    Incremental — a file is recompressed only when its source is newer than the
+    staged output, so the ~650 KB of assets are not re-gzipped on every build.
+    """
+    src = Path(env.subst("$PROJECT_DIR")) / "data"
+    dst = Path(env.subst("$PROJECT_DIR")) / ".pio" / "fsdata"
+
+    if not src.is_dir():
+        print(f"[Build] WARNING: no data/ directory at {src} — nothing staged")
+        return
+
+    dst.mkdir(parents=True, exist_ok=True)
+
+    staged = {}          # relative staged path -> source path, for orphan sweep
+    gz_count = raw_count = 0
+    total_in = total_out = 0
+
+    for item in sorted(src.rglob("*")):
+        if not item.is_file():
+            continue
+        rel = item.relative_to(src)
+        size = item.stat().st_size
+        compress = item.suffix.lower() in GZIP_EXTENSIONS and size >= GZIP_MIN_BYTES
+        out = dst / (rel.with_suffix(rel.suffix + ".gz") if compress else rel)
+
+        staged[out.relative_to(dst).as_posix()] = item
+        total_in += size
+
+        # Skip work when the staged copy is already current.
+        if out.exists() and out.stat().st_mtime >= item.stat().st_mtime:
+            total_out += out.stat().st_size
+            if compress:
+                gz_count += 1
+            else:
+                raw_count += 1
+            continue
+
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if compress:
+            # mtime=0 keeps the output byte-identical across builds of identical
+            # input, so an unchanged asset doesn't churn the flashed image.
+            with open(item, "rb") as fin, gzip.GzipFile(out, "wb", compresslevel=9, mtime=0) as fout:
+                shutil.copyfileobj(fin, fout)
+            gz_count += 1
+        else:
+            shutil.copyfile(item, out)
+            raw_count += 1
+        total_out += out.stat().st_size
+
+    # Sweep files left behind by a renamed or deleted source.  Without this a
+    # stale asset would keep being flashed and served indefinitely.
+    removed = 0
+    for old in sorted(dst.rglob("*"), reverse=True):
+        if old.is_file() and old.relative_to(dst).as_posix() not in staged:
+            old.unlink()
+            removed += 1
+        elif old.is_dir() and not any(old.iterdir()):
+            old.rmdir()
+
+    pct = (100 * total_out // total_in) if total_in else 100
+    print(f"[Build] Web assets staged -> {dst}")
+    print(f"[Build]   {gz_count} gzipped, {raw_count} copied verbatim"
+          + (f", {removed} stale removed" if removed else ""))
+    print(f"[Build]   {total_in} -> {total_out} bytes ({pct}%)")
+
+_stage_web_assets(env)
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 

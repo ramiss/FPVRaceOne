@@ -70,22 +70,46 @@ static AsyncEventSource events("/events");
 #  define BUILD_TIMESTAMP_STR "00000000-000000"
 #endif
 static const String _buildTimestamp = BUILD_TIMESTAMP_STR;
-// index.html pre-built with %BUILD_TIME% substituted.
+// index.html held in RAM for the life of the boot.
 // malloc'd explicitly so we get a hard failure (not silent String truncation)
 // if the heap can't provide the contiguous block we need.
+//
+// PREFER THE GZIPPED FORM.  The build stages data/ through gzip into
+// .pio/fsdata (see _stage_web_assets in scripts/extra_script.py), so a normally
+// built image carries /index.html.gz and no plain /index.html at all.  That
+// takes this buffer from 93,617 bytes to 19,402 — ~74 KB of permanent heap
+// returned, against a steady-state free heap that was measured at only ~79 KB.
+//
+// Why that mattered (2026-08-08, 7-node rig): a browser force-refresh bypasses
+// the immutable cache headers and re-requests every asset at once, costing a
+// ~51 KB transient in AsyncTCP/LwIP connection buffers.  Sampled at 1 Hz, free
+// heap went 79444 -> 27448 with a floor of 3144 and fully recovered a second
+// later.  It is a spike, not a leak — but an identical spike on a run that
+// happened to start at 60488 hit the floor instead, at which point SSE dropped,
+// all seven nodes timed out, and the heap watchdog rebooted the device.
+// Nothing distinguished the two runs except starting headroom.
+//
+// The plain-file path is kept as a fallback so a hand-uploaded or older
+// filesystem image still boots and serves.
 static uint8_t* _htmlBuf = nullptr;
 static size_t   _htmlLen = 0;
+static bool     _htmlGz  = false;   // _htmlBuf holds gzip bytes; needs Content-Encoding
 
-// Read /index.html from LittleFS into the module-static _htmlBuf.  Called from
+// Read index.html from LittleFS into the module-static _htmlBuf.  Called from
 // init() with a clean heap AND from startServices() as a fallback if init()
 // couldn't run (e.g. LittleFS not yet mounted).  Idempotent — no-op if the
 // cache is already built.  Chunked reads via a stack buffer avoid the silent
 // truncation that f.readString() suffers on large files.
 static void _buildHtmlCache(const char* callerTag) {
     if (_htmlBuf) return;
-    File f = LittleFS.open("/index.html", "r");
+    // Gzip first: that is what a normally built image contains.
+    File f = LittleFS.open("/index.html.gz", "r");
+    _htmlGz = (bool)f;
     if (!f) {
-        DEBUG("HTML cache (%s): /index.html not found\n", callerTag);
+        f = LittleFS.open("/index.html", "r");
+    }
+    if (!f) {
+        DEBUG("HTML cache (%s): neither /index.html.gz nor /index.html found\n", callerTag);
         return;
     }
     size_t fileSize = f.size();
@@ -105,8 +129,8 @@ static void _buildHtmlCache(const char* callerTag) {
     }
     _htmlBuf[totalRead] = 0;
     _htmlLen = totalRead;
-    DEBUG("HTML cache (%s): %u bytes (heap free: %u)\n",
-          callerTag, _htmlLen, ESP.getFreeHeap());
+    DEBUG("HTML cache (%s): %u bytes%s (heap free: %u)\n",
+          callerTag, _htmlLen, _htmlGz ? " gzip" : " plain", ESP.getFreeHeap());
     f.close();
 }
 
@@ -978,10 +1002,12 @@ static void handleRoot(AsyncWebServerRequest *request) {
 #endif
 
     if (!_htmlBuf || _htmlLen == 0) {
-        // malloc failed at boot — serve the raw file from LittleFS.
-        // %BUILD_TIME% won't be substituted (query strings are ignored by
-        // serveStatic so assets still load; only cache-busting is affected).
-        if (LittleFS.exists("/index.html")) {
+        // malloc failed at boot, or LittleFS wasn't mounted when the cache was
+        // built — stream straight off flash instead.  send(LittleFS, ...) sets
+        // Content-Encoding itself when handed a .gz path.
+        if (LittleFS.exists("/index.html.gz")) {
+            request->send(LittleFS, "/index.html.gz", "text/html", false);
+        } else if (LittleFS.exists("/index.html")) {
             request->send(LittleFS, "/index.html", "text/html", false);
         } else {
             request->send(500, "text/plain",
@@ -1002,6 +1028,10 @@ static void handleRoot(AsyncWebServerRequest *request) {
             return toSend;
         }
     );
+    // The buffer holds raw gzip bytes; the browser inflates them.  Chunked
+    // transfer-encoding and gzip content-encoding are independent layers and
+    // compose fine — the chunking describes how the compressed stream is framed.
+    if (_htmlGz) response->addHeader("Content-Encoding", "gzip");
     response->addHeader("Cache-Control", "no-cache, no-store, must-revalidate");
     request->send(response);
 }
