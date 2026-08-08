@@ -123,6 +123,9 @@ class RunResult:
     interval_ms: int
     expected: int
     laps: list = field(default_factory=list)       # reported lap times (ms)
+    generated: int = -1                            # passes the EMULATOR reports
+                                                   # actually producing (-1 = it
+                                                   # never sent 'done')
     latencies: list = field(default_factory=list)  # marker latencies (us)
     dropped: int = 0                               # marker edges the rig lost
 
@@ -192,7 +195,7 @@ def _await_ack(dut, want_id, timeout_s=8.0):
 
 
 def run_once(emu, dut, width_ms, interval_ms, count, peak, baseline,
-             settle_s=1.0, verbose=False, on_armed=None):
+             settle_s=1.0, verbose=False, on_armed=None, stop_delay_s=0.0):
     """Run one profile and collect laps + latencies.
 
     on_armed, if given, is called once the race is CONFIRMED started.  The GUI
@@ -272,6 +275,11 @@ def run_once(emu, dut, width_ms, interval_ms, count, peak, baseline,
                     print(f"    pass {msg.get('n')}: latency {msg['latencyUs']} us")
             elif ev == "done":
                 result.dropped = int(msg.get("dropped", 0))
+                # The emulator reports how many passes it ACTUALLY played.  If
+                # it resets or loses USB mid-run this is short, and without
+                # checking it a stalled rig is indistinguishable from a device
+                # that detected nothing — the harness then blames thresholds.
+                result.generated = int(msg.get("count", -1))
                 done = True
         for msg in dut.poll():
             if msg.get("event") == "lap":
@@ -287,6 +295,14 @@ def run_once(emu, dut, width_ms, interval_ms, count, peak, baseline,
             break
         time.sleep(0.01)
 
+    # Optional quiet gap between the last lap and the race-stop broadcast.
+    # _broadcastRaceStop() POSTs to every client with a 500 ms timeout, all in
+    # one call, and a post-race WiFi hiccup has been observed a few seconds
+    # after each race.  Separating the two in time distinguishes "the stop
+    # broadcast causes it" from "trailing lap traffic causes it" — with no gap
+    # they overlap and cannot be told apart.
+    if stop_delay_s > 0:
+        time.sleep(stop_delay_s)
     dut.send({"cmd": "timer/stop", "id": 3})
     emu.send({"cmd": "stop"})
     time.sleep(0.2)

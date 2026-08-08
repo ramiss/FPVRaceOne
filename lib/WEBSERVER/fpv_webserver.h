@@ -58,6 +58,38 @@ class Webserver : public TransportInterface {
     bool wifiConnected = false;
 
    private:
+    // ── Director-state build coalescing ──────────────────────────────────
+    // pushMultiNodeState() used to BUILD the full payload inline, on whichever
+    // AsyncWebServer request thread called it.  During a realistic pack
+    // crossing seven lap POSTs arrive within ~10 ms, so seven request threads
+    // each built a payload concurrently.
+    //
+    // That payload is pre-sized to 400 + clients*400 + laps*40 bytes — about
+    // 7.7 KB with 7 clients and ~110 laps, and it GROWS as a race progresses.
+    // Each request then needed that block for the build, another for the SSE
+    // send, and another for the queueDirectorStateBroadcast copy: roughly
+    // 23 KB per request, ~160 KB across seven, against a largest-free-block
+    // that was measured at 16 KB.
+    //
+    // Measured consequence (2026-08-08 rig, 7 clients, burst load): free heap
+    // reached a minimum of 304 bytes, AsyncTCP stopped accepting connections
+    // (browser showed "disconnected" with WiFi up, 70-91% of injected lap
+    // POSTs timed out, clients dropped en masse), and when a dip lasted past
+    // HEAP_REBOOT_AFTER the heap watchdog restarted the device.
+    //
+    // Now callers only set a dirty flag; the payload is built ONCE per
+    // interval from handleWebUpdate(), i.e. on parallelTask.  Seven concurrent
+    // builds become one sequential build.  It also removes a cross-task race
+    // for free: _directorStatePayload is now written and read by the same
+    // task, where before it was written from request threads and read by
+    // parallelTask with no lock (String assignment does malloc/free).
+    volatile bool _mnStateDirty       = false;
+    uint32_t      _mnStateLastBuildMs = 0;
+    // 250 ms is imperceptible for a browser state view and collapses an entire
+    // pack crossing into a single build.
+    static constexpr uint32_t MN_STATE_BUILD_INTERVAL_MS = 250;
+    void _flushMultiNodeState(uint32_t currentTimeMs);
+
     void startServices();
 
     Config *conf;

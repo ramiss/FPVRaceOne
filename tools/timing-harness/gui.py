@@ -65,6 +65,24 @@ def interpret_interval(res, st, interval_ms, geo_floor_ms=None):
     """
     out = []
 
+    # Before blaming detection, check the RIG actually produced the stimulus.
+    # The emulator can reset or lose USB mid-run (a vanishing COM port is the
+    # tell), and a stalled rig looks exactly like a device detecting nothing.
+    if res.generated >= 0 and res.generated < res.expected:
+        out.append(
+            f"RIG FAULT — NOT A DEVICE PROBLEM: the emulator reports generating "
+            f"only {res.generated} of {res.expected} passes. The device cannot "
+            f"detect passes that were never played, so the miss count below is "
+            f"the rig's, not the timer's. Check the emulator's USB connection "
+            f"(a changing serial-port count is the tell) and re-run."
+        )
+    elif res.generated < 0:
+        out.append(
+            f"RIG WARNING: the emulator never sent its 'done' event, so the "
+            f"number of passes actually played is unknown. Treat a high miss "
+            f"count with suspicion until a clean run confirms the rig."
+        )
+
     missed = res.expected - res.detected
     if missed > 0:
         out.append(
@@ -379,6 +397,9 @@ class TimingRigGUI:
         ttk.Entry(fL, textvariable=self.burst_interval, width=6)\
             .grid(row=1, column=7, sticky="w")
 
+        ttk.Label(fL, text="Quiet before stop (s):").grid(row=2, column=4, sticky="e", padx=(8, 2))
+        self.stop_delay = tk.StringVar(value="0")
+        ttk.Entry(fL, textvariable=self.stop_delay, width=6)            .grid(row=2, column=5, sticky="w")
         ttk.Label(fL, text="Pack (ms):").grid(row=1, column=8, sticky="e", padx=(8, 2))
         self.burst_spread = tk.StringVar(value="50")
         ttk.Entry(fL, textvariable=self.burst_spread, width=6)\
@@ -533,7 +554,11 @@ class TimingRigGUI:
         from a device-side detection failure, which is exactly how a run of 30
         passes reported 0 laps.
         """
-        emu = JsonLink(emu_p, name="emu")
+        # keep_log=True: the emulator is an ESP32 and prints a panic message,
+        # backtrace and ROM boot banner to the same serial port it speaks JSON
+        # on.  Without capture those lines were discarded, so a crashing rig was
+        # invisible and its runs looked like device detection failures.
+        emu = JsonLink(emu_p, name="emu", keep_log=True)
         if emulator_handshake(emu) is None:
             emu.close()
             self.emit(
@@ -759,6 +784,56 @@ class TimingRigGUI:
                       f"only gets to {achievable:.0f}. Lower the target, or increase "
                       f"the divider ratio.\n", "bad")
         return b, p
+
+    def _report_emulator_health(self, emu, res=None):
+        """Say whether the RIG misbehaved, using its own serial output.
+
+        The emulator shares one port between JSON and panic/boot output, so its
+        crashes are visible — they were simply not being captured.  A rig that
+        resets or hangs mid-run produces exactly the same harness result as a
+        device that detected nothing, and that ambiguity has cost several runs.
+        """
+        log = getattr(emu, "log", None)
+        if not log:
+            return
+
+        resets  = [l for l in log if ("rst:" in l and "boot:" in l) or "ESP-ROM:" in l]
+        panics  = [l for l in log if ("Guru Meditation" in l or "panic" in l.lower()
+                                      or "abort()" in l or "Backtrace:" in l
+                                      or "assert failed" in l)]
+        wdt     = [l for l in log if "watchdog" in l.lower() or "WDT" in l]
+
+        # One reset is EXPECTED: opening the port asserts DTR/RTS, which
+        # auto-resets a bridge-chip board.  Only speak up for a genuine fault,
+        # or this fires on every healthy run and becomes noise to skip past.
+        if not (panics or wdt or len(resets) > 2):
+            return
+
+        self.emit("\n  RIG (emulator) DIAGNOSTICS\n", "head")
+        if panics:
+            self.emit("    EMULATOR CRASHED — its own output says so:\n", "bad")
+            for l in panics[:6]:
+                self.emit(f"      {l.strip()}\n", "bad")
+        if wdt:
+            self.emit(f"    Watchdog mentioned {len(wdt)}x — consistent with an "
+                      f"ISR or loop that stopped yielding:\n", "bad")
+            for l in wdt[:3]:
+                self.emit(f"      {l.strip()}\n", "dim")
+        if resets:
+            # One reset is normal: opening the port asserts DTR/RTS, which
+            # auto-resets a bridge-chip board.  More than one means it restarted
+            # while the test was running.
+            extra = len(resets) - 1
+            if extra > 0:
+                self.emit(f"    EMULATOR RESET {extra} time(s) DURING the run "
+                          f"(one reset at port-open is normal).\n", "bad")
+            else:
+                self.emit("    One reset seen — that is the expected port-open "
+                          "auto-reset, not a fault.\n", "dim")
+        if res is not None and getattr(res, "generated", -1) >= 0:
+            self.emit(f"    Emulator reported generating {res.generated} of "
+                      f"{res.expected} passes.\n",
+                      "bad" if res.generated < res.expected else "dim")
 
     def _check_for_reboot(self, dut):
         """Detect a mid-run restart and say so LOUDLY.
@@ -1037,16 +1112,16 @@ class TimingRigGUI:
         heaps = []
         for l in dut.log:
             m = re.search(r"\[HEAP\] free=(\d+) min=(\d+) maxBlk=(\d+)"
-                          r"(?: sta=(\d+))?(?: sse=(\d+))?", l)
+                          r"(?: sta=(\d+))?(?: sse=(\d+))?(?: sseQ=(\d+))?", l)
             if m:
                 heaps.append(tuple(int(g) if g else 0 for g in m.groups()))
         if heaps:
-            free, mn, blk, sta, sse = heaps[-1]
+            free, mn, blk, sta, sse, sseq = heaps[-1]
             headroom = min(free / 20000.0, blk / 8000.0)
             tag = ("bad" if headroom < 1.0 else
                    "warn" if headroom < 2.0 else "good")
             self.emit(f"    HEAP: free={free} min={mn} maxBlk={blk} "
-                      f"sta={sta} sse={sse}  "
+                      f"sta={sta} sse={sse} sseQ={sseq}  "
                       f"({headroom:.1f}x above the self-reboot floor)\n", tag)
             if len(heaps) >= 2:
                 d_free = heaps[-1][0] - heaps[0][0]
@@ -1062,6 +1137,22 @@ class TimingRigGUI:
                 self.emit(f"      sse={sse} — more than one SSE client is "
                           f"registered. Zombie SSE connections leak heap; this "
                           f"is the known suspect.\n", "bad")
+
+            # sseQ is the deciding evidence for whether a heap decline is the
+            # SSE backlog or something else.  Each queued message retains a copy
+            # of the multi-kilobyte director-state payload it was sent with.
+            q_first = heaps[0][5] if len(heaps) >= 2 else sseq
+            if sseq >= 3 or (sseq > q_first and sseq >= 2):
+                self.emit(f"      SSE BACKLOG CONFIRMED: sseQ={sseq} "
+                          f"(started {q_first}). The browser is not draining as "
+                          f"fast as the master pushes,\n      and every queued "
+                          f"message holds its own copy of the payload. THIS is "
+                          f"the leak.\n", "bad")
+            elif sseq <= 1 and len(heaps) >= 2 and heaps[-1][0] < heaps[0][0] - 3000:
+                self.emit(f"      NOT the SSE backlog: sseQ={sseq} stayed low "
+                          f"while heap fell. The leak is somewhere else — look "
+                          f"at the\n      multi-node fanout payload copy or "
+                          f"per-node lap storage.\n", "warn")
 
         if drops:
             self.emit(f"    {len(drops)} client timeout(s) logged — the fanout is "
@@ -1380,9 +1471,18 @@ class TimingRigGUI:
                               f"{self.master_ip.get()}\n\n", "warn")
 
             try:
+                try:
+                    stop_gap = float(self.stop_delay.get())
+                except ValueError:
+                    stop_gap = 0.0
+                if stop_gap > 0:
+                    self.emit(
+                        f"  Quiet gap of {stop_gap:.0f}s between the last lap and "
+                        f"race stop, to separate\n  the stop broadcast from "
+                        f"trailing lap traffic.\n", "dim")
                 res = run_once(emu, dut, cfg["width"], cfg["interval"],
                                cfg["count"], peak_dac, base_dac,
-                               on_armed=_arm_load)
+                               on_armed=_arm_load, stop_delay_s=stop_gap)
             finally:
                 if load and load.started:
                     load.stop()
@@ -1464,6 +1564,7 @@ class TimingRigGUI:
             # one happened, the log holds TWO clock epochs and mixing them
             # produces nonsense — e.g. reporting the post-reboot boot-time
             # webUpdate stall as this run's worst sampling gap.
+            self._report_emulator_health(emu, res)
             rebooted = self._check_for_reboot(dut)
             if not rebooted:
                 self._emit_load_evidence(

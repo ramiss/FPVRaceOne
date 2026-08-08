@@ -489,8 +489,34 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     return out;
 }
 
+// Mark director state as needing a push.  Deliberately does NO work: this is
+// called from AsyncWebServer request threads, and during a pack crossing seven
+// of them arrive within ~10 ms.  Building the (multi-kilobyte, race-length
+// dependent) payload on each of those concurrently is what exhausted the heap.
+// See the notes in fpv_webserver.h.  The build happens in
+// _flushMultiNodeState() on parallelTask instead.
 void Webserver::pushMultiNodeState() {
     if (!multiNode || !multiNode->isMasterMode()) return;
+    _mnStateDirty = true;
+}
+
+// Build and dispatch at most one director-state payload per interval.  Called
+// from handleWebUpdate(), so it runs on parallelTask and never concurrently
+// with itself.
+void Webserver::_flushMultiNodeState(uint32_t currentTimeMs) {
+    if (!_mnStateDirty) return;
+    if (!multiNode || !multiNode->isMasterMode()) {
+        _mnStateDirty = false;               // mode changed under us
+        return;
+    }
+    // Same clock as the caller's, so this cannot underflow the way a millis()
+    // mismatch would.
+    if ((uint32_t)(currentTimeMs - _mnStateLastBuildMs) < MN_STATE_BUILD_INTERVAL_MS) {
+        return;                              // stay dirty; flush on a later tick
+    }
+    _mnStateDirty       = false;
+    _mnStateLastBuildMs = currentTimeMs;
+
     String payload = _buildDirectorStatePayload(multiNode, timer, conf);
     if (servicesStarted) events.send(payload.c_str(), "multiNodeState");
     multiNode->queueDirectorStateBroadcast(payload);
@@ -576,6 +602,10 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         rssiSentMs = currentTimeMs;
     }
 
+    // Coalesced director-state push.  Request threads only set a flag; the
+    // multi-kilobyte payload is built here, once per interval, on one task.
+    _flushMultiNodeState(currentTimeMs);
+
     // ── Heap + connection-pool watermark every 5 s ──────────────────────────
     // The fields we log here are the prime suspects for a "master wedged
     // and won't accept new connections" failure mode:
@@ -616,9 +646,19 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         uint32_t maxBlk   = ESP.getMaxAllocHeap();
         uint8_t  sta      = WiFi.softAPgetStationNum();
         size_t   sseCnt   = events.count();
-        DEBUG("[HEAP] free=%u min=%u maxBlk=%u sta=%u sse=%u\n",
+        // sseQ — average messages still queued per SSE client.  Each queued
+        // message holds a COPY of the payload it was sent with, and the
+        // director-state payload is multi-kilobyte and grows with race length.
+        // So a browser that cannot drain as fast as we push does not just lag:
+        // it retains heap proportional to the backlog.  Measured 2026-08-08:
+        // free heap fell 34 KB across a 90 s run and never recovered, with the
+        // browser dropping immediately afterwards.  This field distinguishes an
+        // SSE backlog from any other leak — if sseQ stays at 0-1 while heap
+        // bleeds, the cause is elsewhere.
+        size_t   sseQ     = events.avgPacketsWaiting();
+        DEBUG("[HEAP] free=%u min=%u maxBlk=%u sta=%u sse=%u sseQ=%u\n",
               (unsigned)freeHeap, (unsigned)minHeap, (unsigned)maxBlk,
-              (unsigned)sta, (unsigned)sseCnt);
+              (unsigned)sta, (unsigned)sseCnt, (unsigned)sseQ);
 
         bool low = (freeHeap < HEAP_LOW_FREE) || (maxBlk < HEAP_LOW_MAXBLK);
         if (low) {

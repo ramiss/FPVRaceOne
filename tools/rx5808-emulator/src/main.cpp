@@ -185,12 +185,26 @@ static void IRAM_ATTR onEnvTick() {
 // any of its DEBUG() serial writes. Timestamping here on the same timer that
 // generated the stimulus is what makes absolute latency measurable without
 // any cross-device clock sync.
+// Ignore edges arriving closer together than any real detection could be.  The
+// device raises the marker once per lap, and lap intervals are >= MIN_LAP on the
+// product side — so anything in the microsecond range is electrical noise, not a
+// detection.  Rejecting it keeps a stuck or floating line from monopolising the
+// CPU even if the pulldown above is ever defeated by external wiring.
+#define MARKER_MIN_GAP_US 1000UL
+
 static void IRAM_ATTR onMarkerEdge() {
+    const uint32_t now = micros();
+    static volatile uint32_t lastEdgeUs = 0;
+    if ((uint32_t)(now - lastEdgeUs) < MARKER_MIN_GAP_US) {
+        return;                  // noise / ringing — not a detection
+    }
+    lastEdgeUs = now;
+
     if (markerPending) {         // previous edge not yet drained
         markerDropped++;
         return;
     }
-    markerUs      = micros();
+    markerUs      = now;
     markerStartUs = passStartUs; // latch t0 WITH the edge, not at drain time
     markerPending = true;
 }
@@ -289,7 +303,19 @@ static void processCommand(const char* line) {
 void setup() {
     Serial.begin(115200);
 
-    pinMode(PIN_MARKER, INPUT);
+    // INPUT_PULLDOWN, not INPUT.  This line is driven by FPVRaceOne's
+    // PIN_TIMING_MARKER, and an ESP32's GPIOs go high-impedance while it is in
+    // reset or rebooting.  With a bare INPUT the line then FLOATS, and a
+    // floating pin under a RISING-edge interrupt picks up noise as a continuous
+    // edge storm.  The ISR is short, but at noise frequencies it starves the
+    // main loop and the envelope timer, so the DAC stops playing and the
+    // emulator stops answering serial — indistinguishable from a hang, and it
+    // needed a physical reset to recover.
+    //
+    // That is why "the emulator stalled" kept coinciding with the C6 rebooting:
+    // the reboot was the CAUSE, via this pin.  The pulldown holds the line low
+    // whenever nothing drives it; the marker pulse still reads normally.
+    pinMode(PIN_MARKER, INPUT_PULLDOWN);
     attachInterrupt(digitalPinToInterrupt(PIN_MARKER), onMarkerEdge, RISING);
 
     // Populate the envelope before the timer ISR can ever index it.
