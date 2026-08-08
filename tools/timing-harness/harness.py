@@ -94,8 +94,13 @@ class JsonLink:
             if not line or not line.startswith("{"):
                 if self.keep_log and line:
                     self.log.append(line)
-                    if len(self.log) > 400:      # bounded; keep the tail
-                        del self.log[:100]
+                    # Generous cap: a 45 s run at ~1 kHz emits a lot of DEBUG,
+                    # and attributing a Core-0 stall means correlating it
+                    # against broadcast lines that may be 40 s older. At 400
+                    # lines the race-START trace was being evicted before the
+                    # run finished, which is exactly the evidence needed.
+                    if len(self.log) > 4000:
+                        del self.log[:1000]
                 continue          # DEBUG output — expected, not an error
             try:
                 out.append(json.loads(line))

@@ -48,6 +48,7 @@ from harness import (JsonLink, run_once, summarize,
 # Keep in step with lib/MULTINODE/multinode.h and multinode.cpp.
 FANOUT_THROTTLE_MS       = 2000.0   # MIN_DIRECTOR_BROADCAST_INTERVAL_MS
 FANOUT_CLIENT_TIMEOUT_MS = 300      # http.setTimeout() in _broadcastDirectorState
+FANOUT_RACE_TIMEOUT_MS   = 500      # http.setTimeout() in _broadcastRaceStart/Stop
 
 JITTER_GOOD_MS = 5.0     # stdev below this is inaudible in a lap time
 JITTER_WARN_MS = 15.0
@@ -628,6 +629,55 @@ class TimingRigGUI:
                              burst_interval_s=interval,
                              burst_spread_ms=spread)
 
+    def _attribute_peak_stall(self, dut, peak_ms):
+        """Say WHICH broadcast caused the largest Core-0 stall, not guess.
+
+        `CORE0_TIME("multinode", ...)` wraps the whole of process(), so a stall
+        may be the recurring director fanout, a one-shot race start/stop
+        broadcast, or recruitment.  The ratio to the median hints at which, but
+        the firmware timestamps every line, so the answer is available exactly:
+        the stall line is printed AFTER the block, so the block spans
+        [t - duration, t], and any broadcast logged in that window was inside it.
+        """
+        stall_t = None
+        for l in dut.log:
+            m = re.search(r"\[(\d+)\]\s+\[CORE0\] multinode blocked for (\d+) ms", l)
+            if m and int(m.group(2)) == peak_ms:
+                stall_t = int(m.group(1))
+                break
+        if stall_t is None:
+            return
+        lo, hi = stall_t - peak_ms, stall_t
+
+        kinds = {}
+        for l in dut.log:
+            m = re.search(r"\[(\d+)\]\s+\[(?:MULTINODE|RECRUIT)\]\s+(.*)", l)
+            if not m:
+                continue
+            t, text = int(m.group(1)), m.group(2)
+            if not (lo <= t <= hi):
+                continue
+            low = text.lower()
+            if   "race start"   in low: kinds["race START broadcast"]   = kinds.get("race START broadcast", 0) + 1
+            elif "race stop"    in low: kinds["race STOP broadcast"]    = kinds.get("race STOP broadcast", 0) + 1
+            elif "pre-arm"      in low: kinds["race PRE-ARM broadcast"] = kinds.get("race PRE-ARM broadcast", 0) + 1
+            elif "[RECRUIT]" in l or "recruit" in low:
+                kinds["RECRUIT job"] = kinds.get("RECRUIT job", 0) + 1
+
+        if kinds:
+            what = ", ".join(f"{n}x {k}" for k, n in
+                             sorted(kinds.items(), key=lambda kv: -kv[1]))
+            self.emit(f"      ATTRIBUTED: the {peak_ms} ms stall spans "
+                      f"[{lo}..{hi}] ms, which contains {what}.\n"
+                      f"      That is a ONE-SHOT event, not the recurring "
+                      f"director fanout — exclude it when judging fanout "
+                      f"headroom.\n", "good")
+        else:
+            self.emit(f"      NOT ATTRIBUTED: no broadcast lines fall inside "
+                      f"[{lo}..{hi}] ms. Either the trace was evicted or this "
+                      f"stall really is\n      the director fanout — worth a "
+                      f"second run before dismissing it.\n", "warn")
+
     def _emit_burst_stats(self, load):
         """How well the master absorbed simultaneous pack arrivals.
 
@@ -710,6 +760,93 @@ class TimingRigGUI:
                       f"the divider ratio.\n", "bad")
         return b, p
 
+    def _check_for_reboot(self, dut):
+        """Detect a mid-run restart and say so LOUDLY.
+
+        The firmware timestamps every DEBUG line with millis().  A line whose
+        timestamp is far BELOW one already seen means the device restarted and
+        its clock went back to zero.  Without this the run is reported as a
+        detection failure ("check the enter/exit thresholds"), which sends the
+        operator hunting a timing problem that does not exist — the device
+        simply was not running for part of the test.
+
+        Returns True if a restart was detected.
+        """
+        last, reboot_at = None, None
+        for l in dut.log:
+            m = re.match(r"\s*\[(\d+)\]", l)
+            if not m:
+                continue
+            t = int(m.group(1))
+            if last is not None and t < last - 10000:   # clock went backwards
+                reboot_at = (last, t)
+                break
+            last = t
+        if not reboot_at:
+            return False
+
+        before, after = reboot_at
+        self.emit(f"\n  *** DEVICE REBOOTED MID-RUN ***\n", "bad")
+        self.emit(f"    Log timestamps jump from {before} ms back to {after} ms. "
+                  f"The device restarted\n    during this test, so any missed "
+                  f"passes are explained by it not running — NOT by\n    "
+                  f"thresholds, sampling or detection. Treat every number below "
+                  f"as void.\n", "bad")
+
+        # The ROM prints the reset cause before the app starts; it is the single
+        # most useful line for telling a crash from a brownout from a watchdog.
+        for l in dut.log:
+            if "rst:" in l and "boot:" in l:
+                self.emit(f"    Reset cause: {l.strip()}\n", "bad")
+                break
+        else:
+            self.emit(f"    No 'rst:0x' line captured — reconnect the port and "
+                      f"reboot to see the reset cause.\n", "warn")
+
+        # Dump the RAW lines spanning the restart, unfiltered.  A panic message,
+        # "Guru Meditation", an assert or a backtrace appears here and nowhere
+        # else — the normal device-log view filters for PEAK/LAP/CORE0/etc and
+        # would drop precisely the lines that name the fault.
+        # The firmware reboots ITSELF when free heap or the largest contiguous
+        # block stays low for 10 s (webserver.cpp HEAP_REBOOT_AFTER).  That is a
+        # deliberate restart, not a crash — and it is indistinguishable from a
+        # crash by reset code alone, since both report SW_CPU.  The [HEAP] trail
+        # is what separates them, so report it whenever a restart is seen.
+        heaps = [l for l in dut.log if "[HEAP]" in l]
+        fatal = [l for l in heaps if "FATAL" in l]
+        warns = [l for l in heaps if "WARN" in l]
+        if fatal:
+            self.emit(f"    CAUSE FOUND — the firmware rebooted ITSELF on low "
+                      f"heap, this is not a crash:\n      {fatal[-1].strip()}\n",
+                      "bad")
+        elif warns:
+            self.emit(f"    Heap warnings seen before the restart "
+                      f"({len(warns)}x). Low heap is the likely cause:\n"
+                      f"      {warns[-1].strip()}\n", "bad")
+        if heaps:
+            self.emit(f"    Heap trail (last {min(4, len(heaps))} samples, "
+                      f"reboot triggers below 20000 free or 8000 maxBlk):\n",
+                      "dim")
+            for l in heaps[-4:]:
+                self.emit(f"      {l.strip()}\n", "dim")
+
+        idx = None
+        for i, l in enumerate(dut.log):
+            m = re.match(r"\s*\[(\d+)\]", l)
+            if m and int(m.group(1)) == after:
+                idx = i
+                break
+        if idx is not None:
+            # Wide window: the [HEAP] FATAL line that names the cause can sit a
+            # dozen lines above the AP-teardown burst, and a 14-line window
+            # missed it entirely on the first capture.
+            lo_i = max(0, idx - 40)
+            self.emit("    Raw trace across the restart (unfiltered — a panic, "
+                      "backtrace or [HEAP] FATAL would be here):\n", "bad")
+            for l in dut.log[lo_i:idx + 3]:
+                self.emit(f"      {l}\n", "dim")
+        return True
+
     def _emit_load_evidence(self, dut, loaded, missed=None, detected=None,
                             run_s=None):
         """Report Core-0 stalls and measured sample rate for the run.
@@ -749,24 +886,39 @@ class TimingRigGUI:
             times = [int(m.group(1)) for m in
                      (re.search(r"blocked for (\d+) ms", l) for l in blocked) if m]
             if times:
-                peak = max(times)
-                mean = sum(times) / len(times)
+                # Judge on the MEDIAN, not the peak.  CORE0_TIME wraps the whole
+                # of multiNodeManager::process(), so these stalls include
+                # one-shot race start/stop broadcasts (7 clients x 500 ms) as
+                # well as the repeating director fanout.  A single race-stop
+                # outlier would otherwise dominate the verdict and hide the fact
+                # that the recurring cost is fine.
+                times_sorted = sorted(times)
+                med  = times_sorted[len(times_sorted) // 2]
+                peak = times_sorted[-1]
+                md_duty = 100.0 * med / FANOUT_THROTTLE_MS
                 pk_duty = 100.0 * peak / FANOUT_THROTTLE_MS
-                av_duty = 100.0 * mean / FANOUT_THROTTLE_MS
-                tag = ("bad" if pk_duty >= 100 else
-                       "warn" if pk_duty >= 75 else "good")
-                self.emit(f"    FANOUT DUTY: peak {pk_duty:.0f}%  "
-                          f"(mean {av_duty:.0f}%)  — {peak} ms fanout against a "
-                          f"{FANOUT_THROTTLE_MS:.0f} ms throttle.\n", tag)
-                if pk_duty >= 100:
-                    self.emit(f"      AT/OVER CEILING: the fanout takes longer "
-                              f"than the interval that gates it, so it runs "
-                              f"back-to-back.\n", "bad")
-                elif pk_duty >= 75:
+                tag = ("bad" if md_duty >= 100 else
+                       "warn" if md_duty >= 75 else "good")
+                self.emit(f"    MULTINODE DUTY: median {md_duty:.0f}% "
+                          f"({med} ms), peak {pk_duty:.0f}% ({peak} ms) against "
+                          f"a {FANOUT_THROTTLE_MS:.0f} ms throttle.\n", tag)
+                if md_duty >= 100:
+                    self.emit(f"      AT/OVER CEILING: the recurring fanout "
+                              f"takes longer than the interval that gates it, "
+                              f"so it runs back-to-back.\n", "bad")
+                elif md_duty >= 75:
                     self.emit(f"      Headroom is thin. Every client that stops "
                               f"answering costs the full "
                               f"{FANOUT_CLIENT_TIMEOUT_MS} ms timeout instead of "
                               f"its normal reply time.\n", "warn")
+                # A peak far above the median is the signature of a one-shot
+                # broadcast rather than a fanout that is struggling.  Rather
+                # than infer it from the ratio, ATTRIBUTE it: both the stall
+                # line and the broadcast lines carry the firmware's millisecond
+                # timestamp, so the broadcasts that happened INSIDE the stall
+                # window can be identified exactly.
+                if peak > 3 * max(med, 1):
+                    self._attribute_peak_stall(dut, peak)
         elif loaded:
             self.emit("    No Core-0 stalls logged. The load was NOT stressing "
                       "the master — treat a clean result here as untested, not "
@@ -875,6 +1027,41 @@ class TimingRigGUI:
                 f"disconnected), so this is THE HARNESS PERTURBING ITS OWN\n"
                 f"      MEASUREMENT — it does not happen in the field and needs "
                 f"no firmware fix.\n", "dim")
+
+        # Heap telemetry on EVERY run, not only when a reboot already happened.
+        # The firmware self-reboots below 20000 free / 8000 maxBlk, so watching
+        # the trend across consecutive runs distinguishes a slow LEAK (declines
+        # with uptime, never recovers) from BURST PRESSURE (dips during packs,
+        # recovers between them).  Those need different fixes, and waiting for a
+        # crash to find out wastes a run each time.
+        heaps = []
+        for l in dut.log:
+            m = re.search(r"\[HEAP\] free=(\d+) min=(\d+) maxBlk=(\d+)"
+                          r"(?: sta=(\d+))?(?: sse=(\d+))?", l)
+            if m:
+                heaps.append(tuple(int(g) if g else 0 for g in m.groups()))
+        if heaps:
+            free, mn, blk, sta, sse = heaps[-1]
+            headroom = min(free / 20000.0, blk / 8000.0)
+            tag = ("bad" if headroom < 1.0 else
+                   "warn" if headroom < 2.0 else "good")
+            self.emit(f"    HEAP: free={free} min={mn} maxBlk={blk} "
+                      f"sta={sta} sse={sse}  "
+                      f"({headroom:.1f}x above the self-reboot floor)\n", tag)
+            if len(heaps) >= 2:
+                d_free = heaps[-1][0] - heaps[0][0]
+                d_blk  = heaps[-1][2] - heaps[0][2]
+                if d_free < -3000 or d_blk < -3000:
+                    self.emit(f"      DECLINING within this run: free "
+                              f"{heaps[0][0]} -> {free} ({d_free:+}), maxBlk "
+                              f"{heaps[0][2]} -> {blk} ({d_blk:+}).\n"
+                              f"      Note the value at the START of the next "
+                              f"run: if it does not recover, it is a LEAK.\n",
+                              "bad")
+            if sse > 1:
+                self.emit(f"      sse={sse} — more than one SSE client is "
+                          f"registered. Zombie SSE connections leak heap; this "
+                          f"is the known suspect.\n", "bad")
 
         if drops:
             self.emit(f"    {len(drops)} client timeout(s) logged — the fanout is "
@@ -1273,10 +1460,22 @@ class TimingRigGUI:
             # clean loaded run is only meaningful if the load was actually
             # biting; without this the operator cannot tell a robust result
             # from a run where nothing happened to be stressing the master.
-            self._emit_load_evidence(dut, loaded=bool(load and load.started),
-                                     missed=res.expected - res.detected,
-                                     detected=res.detected,
-                                     run_s=cfg["count"] * cfg["interval"] / 1000.0)
+            # A restart invalidates everything else, so check it FIRST.  When
+            # one happened, the log holds TWO clock epochs and mixing them
+            # produces nonsense — e.g. reporting the post-reboot boot-time
+            # webUpdate stall as this run's worst sampling gap.
+            rebooted = self._check_for_reboot(dut)
+            if not rebooted:
+                self._emit_load_evidence(
+                    dut, loaded=bool(load and load.started),
+                    missed=res.expected - res.detected,
+                    detected=res.detected,
+                    run_s=cfg["count"] * cfg["interval"] / 1000.0)
+            else:
+                self.emit(
+                    "    Load evidence SUPPRESSED — the log spans a restart, so\n"
+                    "    its Core-0 and sampling figures would mix two different\n"
+                    "    boots. Re-run once the device stays up.\n", "warn")
 
             self.emit("\n  What this means\n", "head")
             for line in interpret_interval(res, st, cfg["interval"], geo):

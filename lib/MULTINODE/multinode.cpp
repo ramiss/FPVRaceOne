@@ -427,6 +427,7 @@ bool MultiNodeManager::_postToMasterWithResponse(const String& endpoint, const S
     if (!http.begin(url)) return false;
     http.addHeader("Content-Type", "application/json");
     http.setTimeout(800);
+    http.setConnectTimeout(800);
     int code = http.POST(body);
     // Read the body for any HTTP code (positive — meaning the server actually
     // responded).  Heartbeat callers MUST see the "NOT_FOUND" body on a 404
@@ -732,6 +733,7 @@ bool MultiNodeManager::moveNode(uint8_t fromNodeId, uint8_t toSlot) {
         String url = "http://" + staIP + "/multinode/setSlot?slot=" + String(newSlot);
         if (!http.begin(url)) return false;
         http.setTimeout(800);
+        http.setConnectTimeout(800);
         int code = http.POST("");
         http.end();
         return code == 200;
@@ -803,6 +805,7 @@ void MultiNodeManager::_broadcastRacePreArm() {
         String url = "http://" + n.staIP + "/timer/masterPreArm";
         if (http.begin(url)) {
             http.setTimeout(500);
+            http.setConnectTimeout(500);
             int code = http.POST("");
             http.end();
             DEBUG("[MULTINODE] Race pre-arm → node %c (%s): HTTP %d\n", slotLetter(n.nodeId), n.staIP.c_str(), code);
@@ -830,6 +833,7 @@ void MultiNodeManager::_broadcastRaceStart() {
         String url = "http://" + n.staIP + "/timer/masterStart";
         if (http.begin(url)) {
             http.setTimeout(500);
+            http.setConnectTimeout(500);
             int code = http.POST("");
             http.end();
             DEBUG("[MULTINODE] Race start → node %c (%s): HTTP %d\n", slotLetter(n.nodeId), n.staIP.c_str(), code);
@@ -1040,7 +1044,16 @@ void MultiNodeManager::_broadcastDirectorState() {
         HTTPClient http;
         String url = "http://" + n.staIP + "/api/multinode/directorState";
         if (http.begin(url)) {
+            // BOTH are required.  setTimeout() bounds only the READ phase —
+            // HTTPClient keeps a separate _connectTimeout defaulting to
+            // HTTPCLIENT_DEFAULT_TCP_TIMEOUT (5000 ms), and connect() uses
+            // that one.  Against an UNREACHABLE client the connect alone
+            // blocked for 5 s regardless of the line above, turning a single
+            // dropped client into a 5 s Core-0 stall during which further
+            // clients missed their heartbeat window and dropped too.
+            // Measured 2026-08-07: stalls of 5004/5008 ms under 7-client load.
             http.setTimeout(300);
+            http.setConnectTimeout(300);
             http.addHeader("Content-Type", "application/json");
             http.POST(_directorStatePayload);
             http.end();
@@ -1063,6 +1076,7 @@ void MultiNodeManager::_broadcastRaceStop() {
         bool acked = false;
         if (http.begin(url)) {
             http.setTimeout(500);
+            http.setConnectTimeout(500);
             int code = http.POST("");
             http.end();
             acked = (code == 200);

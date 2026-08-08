@@ -173,7 +173,12 @@ void WebhookManager::sendWebhook(const char* ip, const char* endpoint) {
     char url[64];
     snprintf(url, sizeof(url), "http://%s%s", ip, endpoint);
     
+    // setTimeout() bounds only the READ phase; HTTPClient's _connectTimeout is
+    // separate and defaults to 5000 ms.  Without the second call a webhook
+    // target that goes offline costs 5 s inside parallelTask on EVERY lap,
+    // not the WEBHOOK_TIMEOUT_MS this line appears to promise.
     http.setTimeout(WEBHOOK_TIMEOUT_MS);
+    http.setConnectTimeout(WEBHOOK_TIMEOUT_MS);
     
     // Check WiFi is connected before attempting HTTP
     if (WiFi.status() != WL_CONNECTED) {
