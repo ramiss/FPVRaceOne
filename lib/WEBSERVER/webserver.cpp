@@ -654,8 +654,22 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     // build flags significantly.
     static uint32_t lastHeapLogMs    = 0;
     static uint32_t lowHeapSinceMs   = 0;     // 0 = not low; otherwise millis at first dip
+    // Normally 10 s.  But a browser force-refresh was measured taking free heap
+    // from 60488 to 9124 and maxBlk from 14324 to 1332 in UNDER TEN SECONDS —
+    // i.e. the entire collapse fits between two samples, so the trace showed a
+    // healthy plateau and then a fatal reading with nothing in between.
+    //
+    // HEAP_LOG_FAST samples at 1 Hz so the SHAPE of a collapse is visible: one
+    // cliff means a single large allocation, a staircase means many small ones
+    // never freed.  Those need completely different fixes, and at 10 s spacing
+    // they are indistinguishable.  Costs one DEBUG line per second.
+#define HEAP_LOG_FAST 1
+#if HEAP_LOG_FAST
+    const  uint32_t HEAP_LOG_PERIOD  = 1000;
+#else
     const  uint32_t HEAP_LOG_PERIOD  = 10000; // 10 s — quiet enough for normal monitoring,
                                               //   still inside the watchdog window.
+#endif
     const  uint32_t HEAP_LOW_FREE    = 20000; // 20 KB free triggers concern
     const  uint32_t HEAP_LOW_MAXBLK  = 8000;  // <8 KB contiguous == AsyncTCP can't accept
     const  uint32_t HEAP_REBOOT_AFTER = 10000; // sustained low for 10 s => reboot
