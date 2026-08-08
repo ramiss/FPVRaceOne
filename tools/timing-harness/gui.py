@@ -296,6 +296,10 @@ class TimingRigGUI:
         # comboboxes and the drain loop are live first.
         if self.monitor_on.get():
             self.root.after(300, self._autostart_monitor)
+        # Deferred: winfo_* returns 1x1+0+0 until the window manager has mapped
+        # the window, so docking computed any earlier lands in the corner.
+        if self.log_panel_auto.get():
+            self.root.after(120, self._autodock_log_panel)
         self._update_sweep_estimate()   # traces only fire on edit, so seed it
         self.root.after(100, self._drain)
 
@@ -328,13 +332,18 @@ class TimingRigGUI:
         # heap, clients cycling between timeout and re-registration.  Watching
         # continuously, outside a test run, is how those get seen at all.
         self.monitor_on = tk.BooleanVar(value=True)
+        # Panel opens docked on launch.  Untick to keep it closed; the choice
+        # is saved with the other settings.
+        self.log_panel_auto = tk.BooleanVar(value=True)
         ttk.Checkbutton(f, text="Live monitor", variable=self.monitor_on,
                         command=self._toggle_monitor)\
             .grid(row=0, column=4, padx=(12, 2), sticky="w")
         ttk.Button(f, text="Save Logs", command=self.save_logs)\
             .grid(row=1, column=4, padx=(12, 2), sticky="w")
         ttk.Button(f, text="Log Panel \u2197", command=self.open_log_panel)\
-            .grid(row=0, column=5, rowspan=2, padx=(6, 2))
+            .grid(row=0, column=5, padx=(6, 2))
+        ttk.Checkbutton(f, text="auto-dock", variable=self.log_panel_auto)\
+            .grid(row=1, column=5, padx=(6, 2), sticky="w")
 
     def _build_settings(self, root):
         # Settings are grouped by WHICH TEST USES THEM.  A single flat panel
@@ -490,6 +499,176 @@ class TimingRigGUI:
                         variable=self.target_rssi)\
             .grid(row=4, column=0, columnspan=8, sticky="w", padx=(8, 0), pady=(2, 0))
 
+    def run_soak(self):
+        self._start(self._soak_worker)
+
+    def _soak_worker(self):
+        """Hold the device under load and watch heap over TIME, not passes.
+
+        The other tests are bounded by pass count, so they end long before a
+        slow allocation problem shows itself — a 90 s run finished with heap
+        still above the floor and looked survivable, while a 180 s run at the
+        same settings crossed it and the firmware rebooted itself.  What
+        matters is the TREND: heap that plateaus is churn being reclaimed,
+        heap that declines monotonically will eventually hit the floor no
+        matter how healthy any single run looks.
+
+        No emulator or detection involved.  This measures the master under
+        multi-node traffic only.
+        """
+        dut = None
+        load = None
+        try:
+            ports = self._links()
+            if not ports:
+                return
+            emu_p, dut_p = ports
+            try:
+                mins = float(self.soak_mins.get())
+            except ValueError:
+                mins = 5.0
+            secs = max(30.0, mins * 60.0)
+
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("HEAP SOAK\n", "head")
+            self.emit(f"Holds the master under multi-node load for {mins:g} "
+                      f"minute(s) and tracks heap.\n"
+                      f"The firmware reboots ITSELF below 20000 free or 8000 "
+                      f"maxBlk sustained 10 s,\nso the question is whether "
+                      f"either trends toward those floors.\n\n", "dim")
+
+            dut = JsonLink(dut_p, name="dut", keep_log=True,
+                           on_line=self._mon_sink("DUT"))
+
+            load = self._make_load()
+            if load:
+                load.start()
+                self.emit(f"  Load ACTIVE — {self._load_desc()}\n"
+                          f"  to node(s) {self.load_nodes.get()} on "
+                          f"{self.master_ip.get()}\n\n", "warn")
+            else:
+                self.emit("  No load configured — this measures IDLE heap "
+                          "behaviour only.\n\n", "warn")
+
+            import re as _re
+            samples = []          # (t_s, free, maxBlk)
+            t0 = time.time()
+            last_report = 0.0
+            rebooted = False
+            while time.time() - t0 < secs and not self.cancel.is_set():
+                for _ in dut.poll():
+                    pass                       # JSON not needed; drives on_line
+                for line in dut.log[-40:]:
+                    m = _re.search(r"\[HEAP\] free=(\d+) min=(\d+) maxBlk=(\d+)", line)
+                    if not m:
+                        continue
+                    rec = (int(m.group(1)), int(m.group(2)), int(m.group(3)))
+                    if not samples or samples[-1][1:] != (rec[0], rec[2]):
+                        samples.append((time.time() - t0, rec[0], rec[2]))
+                if any("Initializing storage" in l for l in dut.log[-40:]):
+                    rebooted = True
+                    break
+                el = time.time() - t0
+                if el - last_report >= 30.0:
+                    last_report = el
+                    if samples:
+                        _, f, b = samples[-1]
+                        self.emit(f"    t+{el:4.0f}s   free={f:<7} maxBlk={b:<7}"
+                                  f"  ({len(samples)} samples)\n", "dim")
+                time.sleep(0.2)
+
+            if load and load.started:
+                load.stop()
+                self.emit(f"\n  Load stopped: {load.sent} POST(s) accepted, "
+                          f"{load.failed} failed\n", "dim")
+
+            self.emit("\n  What this means\n", "head")
+            if rebooted:
+                self.emit("  - THE DEVICE REBOOTED during the soak. That is the "
+                          "answer: it cannot sustain this load.\n", "bad")
+                self._check_for_reboot(dut)
+                return
+            if len(samples) < 3:
+                self.emit("  - Too few [HEAP] samples to judge. They are logged "
+                          "every 5 s; run longer.\n", "warn")
+                return
+
+            # Judge the SECOND HALF only.  Heap settles sharply in the first
+            # minute as caches fill and clients register, and an
+            # endpoint-to-endpoint slope is dominated by that settling — it
+            # reported "DECLINING, 1 minute to the floor" for a run whose maxBlk
+            # had been dead flat at 14324 for the previous two minutes.  What
+            # matters is whether it is STILL falling once steady state is
+            # reached, not how far it fell getting there.
+            half = samples[len(samples) // 2:]
+            if len(half) < 3:
+                half = samples
+            t_span = (half[-1][0] - half[0][0]) or 1e-9
+            d_free = half[-1][1] - half[0][1]
+            d_blk  = half[-1][2] - half[0][2]
+            min_free = min(x[1] for x in samples)
+            min_blk  = min(x[2] for x in samples)
+            free_rate = (d_free / t_span) * 60.0
+            blk_rate  = (d_blk  / t_span) * 60.0
+
+            self.emit(f"  - SETTLING (first half): free {samples[0][1]} -> "
+                      f"{half[0][1]}, maxBlk {samples[0][2]} -> {half[0][2]}. "
+                      f"Expected as caches fill.\n", "dim")
+            self.emit(f"  - STEADY STATE (last {t_span:.0f}s): free {half[0][1]} "
+                      f"-> {half[-1][1]} ({d_free:+}), maxBlk {half[0][2]} -> "
+                      f"{half[-1][2]} ({d_blk:+}).\n"
+                      f"    Lowest seen overall: free {min_free}, "
+                      f"maxBlk {min_blk}.\n", "dim")
+            self.emit(f"  - RATE (steady state): free {free_rate:+.0f} "
+                      f"bytes/min, maxBlk {blk_rate:+.0f} bytes/min.\n", "dim")
+
+            # maxBlk is what actually trips the watchdog, so project on it too.
+            worst = None
+            if free_rate < -200:
+                worst = ("free", (half[-1][1] - 20000) / (-free_rate))
+            if blk_rate < -200:
+                t_blk = (half[-1][2] - 8000) / (-blk_rate)
+                if worst is None or t_blk < worst[1]:
+                    worst = ("maxBlk", t_blk)
+
+            # A flat second half is the success condition and deserves saying
+            # plainly, rather than being left to infer from a small slope.
+            if abs(d_blk) < 1500 and abs(d_free) < 8000:
+                worst = None
+                self.emit(f"  - PLATEAU: maxBlk held at ~{half[-1][2]} and free "
+                          f"at ~{half[-1][1]} across the last {t_span:.0f}s.\n"
+                          f"    Allocation churn is being reclaimed — this is "
+                          f"what a fixed heap looks like.\n", "good")
+
+            if worst and worst[1] > 0:
+                self.emit(f"  - DECLINING: at this rate {worst[0]} reaches its "
+                          f"floor in about {worst[1]:.0f} more minute(s), and "
+                          f"the firmware\n    will reboot itself. This is a "
+                          f"real problem, not test noise.\n", "bad")
+            elif worst:
+                self.emit(f"  - ALREADY BELOW the {worst[0]} floor — a reboot is "
+                          f"imminent.\n", "bad")
+            else:
+                self.emit(f"  - STABLE: neither figure is trending down "
+                          f"meaningfully. Allocation churn is being reclaimed, "
+                          f"so\n    heap is not the limiting factor at this "
+                          f"load.\n", "good")
+                if min_blk < 12000:
+                    self.emit(f"    Note: maxBlk dipped to {min_blk}, within "
+                              f"1.5x of the 8000 floor. Stable but not roomy.\n",
+                              "warn")
+        except Exception as e:
+            self.emit(f"\nERROR: {e}\n", "bad")
+        finally:
+            try:
+                if load and load.started:
+                    load.stop()
+            except Exception:
+                pass
+            if dut:
+                dut.close()
+            self.q.put(("done", None))
+
     def _build_buttons(self, root):
         f = ttk.Frame(root, padding=(10, 4))
         f.pack(fill="x")
@@ -509,6 +688,14 @@ class TimingRigGUI:
         self.btn_sweep = ttk.Button(f, text="4. Min Pass Width (Sweep)",
                                     command=self.run_sweep)
         self.btn_sweep.pack(side="left", padx=6)
+
+        self.btn_soak = ttk.Button(f, text="5. Heap Soak",
+                                   command=self.run_soak)
+        self.btn_soak.pack(side="left", padx=6)
+
+        ttk.Label(f, text="mins:").pack(side="left", padx=(8, 2))
+        self.soak_mins = tk.StringVar(value="5")
+        ttk.Entry(f, textvariable=self.soak_mins, width=5).pack(side="left")
 
         self.btn_stop = ttk.Button(f, text="Stop", command=self.stop_run,
                                    state="disabled")
@@ -919,7 +1106,8 @@ class TimingRigGUI:
 
     def _busy(self, busy):
         state = "disabled" if busy else "normal"
-        for b in (self.btn_level, self.btn_thresh, self.btn_interval, self.btn_sweep):
+        for b in (self.btn_level, self.btn_thresh, self.btn_interval,
+                  self.btn_sweep, self.btn_soak):
             b.config(state=state)
         self.btn_stop.config(state="normal" if busy else "disabled")
         self.status.config(text="Running…" if busy else "Ready")
@@ -1054,7 +1242,33 @@ class TimingRigGUI:
         """Queue a raw serial line for the log panel (thread-safe)."""
         self.q.put(("mon", (name, text, tag)))
 
-    def open_log_panel(self):
+    def _autodock_log_panel(self):
+        if self.log_panel_auto.get():
+            self.open_log_panel(dock=True)
+
+    def _dock_geometry(self, panel_w=760):
+        """Geometry string placing the panel flush right of the main window.
+
+        Falls back to the left side when there is not enough room, rather than
+        pushing the panel off-screen where it cannot be reached.
+        """
+        self.root.update_idletasks()
+        mx, my = self.root.winfo_x(), self.root.winfo_y()
+        mw, mh = self.root.winfo_width(), self.root.winfo_height()
+        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
+
+        h = max(400, min(mh, sh - my - 40))
+        right_edge = mx + mw
+        if right_edge + panel_w <= sw:
+            x = right_edge                     # flush right, no gap
+        elif mx - panel_w >= 0:
+            x = mx - panel_w                   # no room right: dock left
+        else:
+            panel_w = max(480, sw - right_edge)  # squeeze into what is left
+            x = max(0, sw - panel_w)
+        return f"{panel_w}x{h}+{x}+{my}"
+
+    def open_log_panel(self, dock=False):
         """Two stacked raw-serial panes in a separate window.
 
         Separate from the results pane because the monitor runs for hours and
@@ -1063,13 +1277,18 @@ class TimingRigGUI:
         lines stay readable without wrapping.
         """
         if self._log_win is not None and tk.Toplevel.winfo_exists(self._log_win):
+            if dock:
+                self._log_win.geometry(self._dock_geometry())
             self._log_win.lift()
             self._log_win.focus_force()
             return
 
         win = tk.Toplevel(self.root)
         win.title("Raw serial — FPVRaceOne / emulator")
-        win.geometry("980x760")
+        win.geometry(self._dock_geometry() if dock else "980x760")
+        # Docked, but not always-on-top: it must be possible to put another
+        # window over it without the panel fighting back.
+        win.transient(self.root)
         self._log_win = win
         self._log_text = {}
         self._log_follow = {}
@@ -1106,6 +1325,9 @@ class TimingRigGUI:
         win.protocol("WM_DELETE_WINDOW", self._close_log_panel)
 
     def _close_log_panel(self):
+        # Closing it is an explicit choice; remember it so the next launch
+        # honours the same decision.
+        self.log_panel_auto.set(False)
         # Buffers survive in _mon_lines, so closing loses nothing and Save Logs
         # still works.
         if self._log_win is not None:

@@ -88,6 +88,31 @@ class Webserver : public TransportInterface {
     // 250 ms is imperceptible for a browser state view and collapses an entire
     // pack crossing into a single build.
     static constexpr uint32_t MN_STATE_BUILD_INTERVAL_MS = 250;
+
+    // ── Reused payload buffer ────────────────────────────────────────────
+    // Coalescing cut how OFTEN the payload is built; this cuts what each build
+    // COSTS.  The builder used to return a local String, so every push malloc'd
+    // a multi-kilobyte block and freed it on return.  That block is pre-sized
+    // 400 + clients*400 + laps*40 and grows as a race progresses — toward
+    // ~17 KB with 7 clients at the 50-lap cap.  Allocating and releasing
+    // something that large, hundreds of times, is a textbook heap fragmenter.
+    //
+    // Measured 2026-08-08 (7-node burst soak, baseline): maxBlk fell
+    // 24052 -> 2356 while free heap was still 21792, and the watchdog rebooted
+    // the device after ~111 s.  Note WHICH floor tripped — free heap was fine,
+    // there simply was no contiguous block left.  Total usage was never the
+    // problem, so reducing usage would not have helped.
+    //
+    // Reusing one buffer claims the capacity once, early, while the heap is
+    // still unfragmented, and never hands it back.  Peak usage is unchanged;
+    // the churn is what disappears.
+    //
+    // Only _flushMultiNodeState() may touch this — it runs on parallelTask.
+    // The /api/multinode/state endpoint runs on an AsyncWebServer thread and
+    // keeps its own local String, because sharing one buffer across tasks is
+    // exactly the cross-task String race that broke the incremental fanout.
+    String _mnPayloadBuf;
+
     void _flushMultiNodeState(uint32_t currentTimeMs);
 
     void startServices();

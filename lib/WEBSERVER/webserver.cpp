@@ -385,7 +385,12 @@ static void _jsonEscapeAppend(String& dst, const String& s) {
 // realistic upper bound based on actual node + lap counts.  Underestimating
 // causes a single reallocation; overestimating wastes a few KB briefly.
 // Either way, the heap pressure is dramatically reduced.
-static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *timer, Config *conf) {
+// Writes into `out` rather than returning a String, so a caller that pushes
+// repeatedly can reuse one buffer and stop churning the heap.  See the notes on
+// _mnPayloadBuf in fpv_webserver.h.
+static void _buildDirectorStatePayloadInto(String& out,
+                                           MultiNodeManager *multiNode,
+                                           LapTimer *timer, Config *conf) {
     bool     masterRunning = timer && timer->isRunning();
     uint8_t  masterCnt     = timer ? timer->getLapCount() : 0;
     String   pilotName     = conf && conf->getPilotName() ? String(conf->getPilotName()) : String();
@@ -411,7 +416,10 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
         clientCount = nodes.size();
         for (const auto& n : nodes) lapEstimate += n.laps.size();
     }
-    String out;
+    // Length to 0 but KEEP the capacity: Arduino's String::copy() calls
+    // reserve(0), which returns early when a buffer already exists.  Assigning
+    // "" therefore empties without freeing — which is the entire point.
+    out = "";
     out.reserve(400 + clientCount * 400 + lapEstimate * 40);
 
     // ── Header + master entry ─────────────────────────────────────────────
@@ -486,6 +494,15 @@ static String _buildDirectorStatePayload(MultiNodeManager *multiNode, LapTimer *
     out += ",\"elapsedMs\":";          out += (uint32_t)elapsedMs;
     out += ",\"prearmActive\":";       out += prearmActive ? "true" : "false";
     out += "}}";
+}
+
+// Convenience wrapper for one-shot callers (the HTTP endpoint).  Allocates a
+// fresh String, which is fine for a rare user-initiated request — it is the
+// PERIODIC path that must not churn.
+static String _buildDirectorStatePayload(MultiNodeManager *multiNode,
+                                         LapTimer *timer, Config *conf) {
+    String out;
+    _buildDirectorStatePayloadInto(out, multiNode, timer, conf);
     return out;
 }
 
@@ -517,7 +534,11 @@ void Webserver::_flushMultiNodeState(uint32_t currentTimeMs) {
     _mnStateDirty       = false;
     _mnStateLastBuildMs = currentTimeMs;
 
-    String payload = _buildDirectorStatePayload(multiNode, timer, conf);
+    // Reuse the persistent buffer — no allocation once it has reached its
+    // high-water mark.  Safe to hold across calls: this runs only on
+    // parallelTask.
+    _buildDirectorStatePayloadInto(_mnPayloadBuf, multiNode, timer, conf);
+    String& payload = _mnPayloadBuf;
     if (servicesStarted) events.send(payload.c_str(), "multiNodeState");
     multiNode->queueDirectorStateBroadcast(payload);
 }
