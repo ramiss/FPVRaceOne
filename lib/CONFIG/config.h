@@ -73,6 +73,25 @@
 // handler risks the TCP slot exhaustion this project is sensitive to.
 #define CPU_MONITOR_WINDOW_MS           5000
 
+// ── Bench timing marker ─────────────────────────────────────────────────────
+//
+// Drives PIN_TIMING_MARKER high the instant a lap is confirmed, so the RX5808
+// emulator test rig can timestamp stimulus → detection on its own hardware
+// timer and measure absolute detection latency.  See tools/rx5808-emulator/.
+//
+// Requires the board block to define PIN_TIMING_MARKER; only XIAO C6 does.
+// RX5808 pin assignments are untouched — this is a spare pin, broken out on a
+// breadboard for the rig, and the whole thing compiles away when disabled.
+//
+// The pulse MUST be emitted before the DEBUG() calls that follow a lap: each
+// of those is a USB CDC write that can block for milliseconds depending on
+// whether the host is draining the port, which would land squarely inside the
+// quantity being measured.
+//
+// Bench equipment, not a product feature — ship as 0, set to 1 when the
+// emulator rig is wired up.
+#define TIMING_MARKER_ENABLED 1
+
 //ESP23-C3
 #if defined(ESP32C3)
 
@@ -122,6 +141,11 @@
 #define PIN_RX5808_DATA D10  // CH1
 #define PIN_RX5808_SELECT A1  // CH2
 #define PIN_RX5808_CLOCK D8  // CH3
+// Bench timing marker (see TIMING_MARKER_ENABLED).  D3 = GPIO21, free on this
+// board — no buzzer is fitted, and PIN_BUZZER is not defined here, so there is
+// no pad to borrow.  Output only, idle low, driven for one sample period when
+// a lap is confirmed.
+#define PIN_TIMING_MARKER D3
 //#define PIN_BUZZER 27
 //#define BUZZER_INVERTED false
 //#define PIN_MODE_SWITCH 33   // Mode selection: LOW=WiFi, HIGH=RotorHazard
@@ -155,7 +179,7 @@
 #define EEPROM_RESERVED_SIZE 512
 #define CONFIG_MAGIC_MASK (0b11U << 30)
 #define CONFIG_MAGIC (0b01U << 30)
-#define CONFIG_VERSION 28
+#define CONFIG_VERSION 30
 
 #define EEPROM_CHECK_TIME_MS 1000
 
@@ -208,7 +232,8 @@ typedef struct {
     uint8_t otaIncludePrereleases;  // 0=stable only (default), 1=also offer beta / pre-release builds in Check for Updates
     uint8_t mnClientRaceAudio;  // client mode: 1=play master's race-start countdown + beep locally, 0=silent (default)
     uint8_t mnPreferredSlot;    // client mode: last slot assigned by a master (1-7). 0=none. Sent as nodeId in registration so the master can honour it.
-    uint8_t adcMode;            // RSSI acquisition: 0=polled analogRead (default), 1=DMA continuous with peak-hold. Applied at boot — change requires reboot.
+    uint8_t adcMode;            // RSSI acquisition: 1=DMA continuous with peak-hold (default), 0=polled analogRead. Applied at boot — change requires reboot.
+    uint8_t announcerDecimals;  // Spoken lap-time precision: 1=x.1s, 2=x.01s (default), 3=x.001s (millisecond callouts, useful for bench testing)
 } laptimer_config_t;
 
 class Storage;  // Forward declaration

@@ -64,13 +64,38 @@ ESP32_VIDS = {
     0x2341,  # Arduino
 }
 
-def find_esp32_ports():
+# The XIAO ESP32-C6 speaks USB natively (0x303A).  Anything reached through a
+# UART bridge chip is NOT a product unit — on this bench it is the RX5808
+# emulator, a WROOM-32.  Since run_esptool() hardcodes "--chip esp32c6", trying
+# to flash one fails, and because do_upload_fs() returns False on ANY port
+# failing, deploy_all() then aborts BEFORE the firmware step.  That leaves the
+# real unit with a freshly-written filesystem and stale firmware — a mismatch
+# that presents as bizarre runtime behaviour rather than an obvious flash error.
+ESP32_NATIVE_USB_VID = 0x303A
+
+
+def find_esp32_ports(native_only=True):
+    """Ports to flash.
+
+    native_only=True (the default for every deploy target) restricts to
+    Espressif native USB, so bridge-chip boards sharing the bench — emulators,
+    dev boards, anything else — are skipped rather than aborting the deploy.
+    """
     try:
         import serial.tools.list_ports
-        ports = [p.device for p in serial.tools.list_ports.comports() if p.vid in ESP32_VIDS]
+        all_dev = list(serial.tools.list_ports.comports())
+        if native_only:
+            ports   = [p.device for p in all_dev if p.vid == ESP32_NATIVE_USB_VID]
+            skipped = [p for p in all_dev
+                       if p.vid in ESP32_VIDS and p.vid != ESP32_NATIVE_USB_VID]
+            for p in skipped:
+                print(f"  Skipping {p.device} (VID 0x{p.vid:04X}) - not a native-USB "
+                      f"ESP32-C6, so not a FPVRaceOne unit.")
+        else:
+            ports = [p.device for p in all_dev if p.vid in ESP32_VIDS]
         if not ports:
-            all_ports = [p.device for p in serial.tools.list_ports.comports()]
-            print(f"  No known ESP32 USB devices found. All ports: {all_ports or 'none'}")
+            print(f"  No FPVRaceOne units found. All ports: "
+                  f"{[p.device for p in all_dev] or 'none'}")
         return ports
     except ImportError:
         print("  ERROR: pyserial not available - cannot auto-detect ports")
@@ -250,9 +275,40 @@ env.AddCustomTarget(
     description="Flash firmware.bin to every connected ESP32"
 )
 
-# ── Deploy all (FS → Firmware → WiFi) ────────────────────────────────────────
+# ── Deploy all (FS → Firmware) ────────────────────────────────────────
 
 def deploy_all(source, target, env):
+    print("\n" + "="*50)
+    print("STEP 1/2: Upload Filesystem")
+    print("="*50)
+    if not do_upload_fs(env):
+        print("\n[STOPPED] Filesystem upload failed.")
+        return
+
+    print("\n" + "="*50)
+    print("STEP 2/2: Upload Firmware")
+    print("="*50)
+    if not do_upload_firmware(env):
+        print("\n[STOPPED] Firmware upload failed.")
+        return
+
+    print("\n" + "="*50)
+    print(f"Deploy complete.")
+    print(f"  FW: {_ts}  (baked into firmware)")
+    print(f"  FS: {_ts}  (written to buildinfo.json)")
+    print("="*50 + "\n")
+
+env.AddCustomTarget(
+    name="deploy_all",
+    dependencies=["$BUILD_DIR/firmware.bin"],
+    actions=deploy_all,
+    title="Deploy All (FS + Firmware)",
+    description="Upload filesystem & upload firmware — stops on any error"
+)
+
+# ── Deploy all (FS → Firmware → WiFi) ────────────────────────────────────────
+
+def deploy_all_wifi(source, target, env):
     print("\n" + "="*50)
     print("STEP 1/3: Upload Filesystem")
     print("="*50)
@@ -281,9 +337,9 @@ def deploy_all(source, target, env):
     print("="*50 + "\n")
 
 env.AddCustomTarget(
-    name="deploy_all",
+    name="deploy_all_wifi",
     dependencies=["$BUILD_DIR/firmware.bin"],
-    actions=deploy_all,
+    actions=deploy_all_wifi,
     title="Deploy All (FS + Firmware + WiFi)",
     description="Upload filesystem, upload firmware, connect WiFi — stops on any error"
 )
@@ -364,4 +420,33 @@ env.AddCustomTarget(
     actions=flash_published_release,
     title="Erase + Flash Published Release (All Devices)",
     description="Fully erase every connected ESP32 and re-image it from the latest GitHub Release (merged.bin + littlefs.bin) — WIPES NVS CONFIG"
+)
+
+# ── Bench test rig: RX5808 emulator ─────────────────────────────────────────
+#
+# Builds and uploads tools/rx5808-emulator/ to the attached WROOM-32.  Kept as
+# a separate PlatformIO project so it can never be swept into a product build,
+# but exposed here so it is one click from the same task list as everything
+# else.
+#
+# Port selection is by USB vendor ID: the WROOM-32 devkit presents a CP210x /
+# CH340 / FTDI bridge, while the XIAO C6 running FPVRaceOne presents Espressif
+# native USB (0x303A).  The script refuses to upload to a native-USB port so
+# the emulator sketch cannot land on a timer by accident.  EMULATOR_PORT
+# overrides if the heuristic is wrong for your hardware.
+
+def upload_emulator(source, target, env):
+    script = os.path.join(env.subst("$PROJECT_DIR"), "scripts", "upload_emulator.py")
+    python = env.subst("$PYTHONEXE")
+    result = subprocess.run([python, "-u", script])
+    if result.returncode != 0:
+        import sys as _sys
+        _sys.exit(result.returncode)
+
+env.AddCustomTarget(
+    name="upload_emulator",
+    dependencies=None,
+    actions=upload_emulator,
+    title="Upload RX5808 Emulator (Test Rig)",
+    description="Build + upload the bench RX5808 emulator to the attached WROOM-32 — refuses to target a FPVRaceOne unit"
 )

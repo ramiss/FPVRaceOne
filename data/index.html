@@ -742,7 +742,22 @@
                 </select>
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
-                Examples: "Louis Lap 5, 12.34" / "Lap 5, 12.34" / "12.34"
+                Examples: "Richard Lap 5, 12.34" / "Lap 5, 12.34" / "12.34"
+              </div>
+
+              <div class="config-item">
+                <label for="announcerDecimalsSelect">Lap Time Precision:</label>
+                <select id="announcerDecimalsSelect" onchange="saveAnnouncerDecimals()">
+                  <option value="1">Tenths &mdash; 12.3</option>
+                  <option value="2" selected>Hundredths &mdash; 12.34</option>
+                  <option value="3">Thousandths &mdash; 12.345</option>
+                </select>
+              </div>
+              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px;">
+                How many decimal places lap times use &mdash; <strong>both spoken and displayed</strong>. Applies to the lap table, statistics, race history, the multi-node leaderboard and the announcer, so what you see always matches what you hear.
+                <strong>Thousandths</strong> gives millisecond resolution, useful for bench testing; spoken digits are read individually ("twelve point zero four five") so they can't be misheard as a different time.
+                <br><br>
+                This changes <em>display only</em> &mdash; full millisecond precision is always recorded, so raising it later reveals detail rather than recovering lost data. The running race clock keeps hundredths regardless, so it stays readable while counting.
               </div>
 
               <div class="config-item" style="display:none">
@@ -1210,15 +1225,17 @@
               <div class="config-item">
                 <label for="adcModeSelect">Sampling mode:</label>
                 <select id="adcModeSelect" onchange="stagedConfig['adcMode']=parseInt(this.value,10); stagedDirty=true; updateSaveButton()">
-                  <option value="0">Polled (default)</option>
-                  <option value="1">DMA continuous</option>
+                  <option value="1">DMA continuous (default)</option>
+                  <option value="0">Polled (legacy)</option>
                 </select>
               </div>
               <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 16px;">
-                <strong>Polled</strong> (default): one ADC read per main-loop pass, roughly 200–500&nbsp;Hz. Well proven.
-                <strong>DMA continuous</strong>: the ADC samples at 20&nbsp;kHz on its own into a hardware buffer, and each read returns the highest value seen since the previous one — so a fast gate pass can't slip between samples even if the loop is briefly busy.
+                <strong>DMA continuous</strong> (default): the ADC samples at 20&nbsp;kHz on its own into a hardware buffer, and each read returns the highest value seen since the previous one — so a fast gate pass can't slip between samples even if the loop is briefly busy.
+                <strong>Polled</strong>: one ADC read per main-loop pass. Kept for comparison.
                 <br><br>
-                <strong>Requires a reboot to take effect</strong>, and changes what the RSSI numbers mean, so <strong>re-run the Calibration wizard after switching</strong> — your existing enter/exit thresholds won't carry over. Check Diagnostics → RSSI Sample Timing to compare the two.
+                Measured on a signal generator, 30 passes 1.5&nbsp;s apart: DMA reported <strong>every lap exactly</strong> (0.00&nbsp;ms variation) and detected passes as short as <strong>4&nbsp;ms</strong>; polled varied by ±3&nbsp;ms and needed <strong>9&nbsp;ms</strong>. DMA adds ~3&nbsp;ms of detection delay, which does not affect lap times — the same delay applies to both ends of a lap and cancels out.
+                <br><br>
+                <strong>Requires a reboot to take effect.</strong> Your enter/exit thresholds <em>do</em> carry over — both modes report RSSI on the same 0–255 scale — but re-running the Calibration wizard after switching is still worth doing if detection looks marginal.
               </div>
 
               <!-- Disabled until tested

@@ -124,7 +124,7 @@ Because the audio comes from the browser, **the device that's logged in to the w
 | **Band & Channel** | Must match your drone's VTx exactly |
 | **Pilot Name** | Full name for voice announcements and race records |
 | **Callsign** | Short display name (max 10 chars) |
-| **Phonetic Name** | How TTS pronounces your name (e.g. "Louie" for "Louis") |
+| **Phonetic Name** | How TTS pronounces your name |
 | **Pilot Color** | Used in race history and display |
 
 Band and channel changes are **auto-saved** immediately on selection.

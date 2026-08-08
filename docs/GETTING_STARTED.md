@@ -86,7 +86,7 @@ In the **Pilot Info** section:
 |-------|-------------|
 | **Pilot Name** | Full name — used in voice announcements and race records |
 | **Callsign** | Short display name (max 10 chars) — shown in the UI |
-| **Phonetic Name** | How TTS pronounces your name (e.g. "Louie" for "Louis") |
+| **Phonetic Name** | How TTS pronounces your name |
 | **Pilot Color** | Your racing color, used in race history and display |
 
 In the **TTS Settings** section, choose your **Announcer Type** and **Lap Announcement Format**. Lap announcements are spoken by the browser's built-in voice, so the actual voice depends on the device you have the web UI open on — no audio files live on the device itself.

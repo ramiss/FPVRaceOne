@@ -175,6 +175,12 @@ class LapTimer {
     TimingStats _tsPublished;  // last completed window, safe for readers
 #endif
 
+#if TIMING_MARKER_ENABLED
+    // True while a marker pulse is asserted; cleared on the next sample tick
+    // so the pulse lasts one sample period without blocking the detect path.
+    bool _markerHigh = false;
+#endif
+
     uint8_t rssiPeak;
     uint32_t rssiPeakTimeMs;
     uint8_t lastLapPeakRssi = 0;  // peak RSSI of the most recently completed lap

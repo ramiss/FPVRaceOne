@@ -165,8 +165,8 @@ Implication: whichever device has the web UI open with "Enable Voice" turned on 
 
 | Format | Example |
 |--------|---------|
-| Pilot + Lap + Time | "Louis Lap 5, 12.34" |
-| Pilot + Time | "Louis, 12.34" |
+| Pilot + Lap + Time | "Richard Lap 5, 12.34" |
+| Pilot + Time | "Richard, 12.34" |
 | Lap + Time | "Lap 5, 12.34" |
 | Time Only | "12.34" |
 
@@ -182,7 +182,7 @@ Implication: whichever device has the web UI open with "Enable Voice" turned on 
 
 ### Phonetic Name
 
-If the Phonetic Name field is populated, it is used in place of the Pilot Name for the announcement. This lets you get correct pronunciation of non-phonetic spellings ("Louie" for "Louis", "Ree-shar" for "Richard") without changing the display name shown elsewhere.
+If the Phonetic Name field is populated, it is used in place of the Pilot Name for the announcement. This lets you get correct pronunciation of non-phonetic spellings ("Ree-shar" for "Richard") without changing the display name shown elsewhere.
 
 ---
 

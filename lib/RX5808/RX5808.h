@@ -81,6 +81,10 @@ class RX5808 {
     // Running peak written by the DMA ISR, drained by readRssi().  uint32_t
     // rather than uint8_t so __atomic_exchange_n operates on a native word.
     volatile uint32_t dmaPeakRaw = 0;
+    // Last non-zero DMA sample, held when a read finds the peak empty.  Keeps
+    // the DMA path on its own scale rather than falling back to a oneshot
+    // read, which reports ~1.9x lower counts for the same voltage.
+    uint16_t lastDmaRaw = 0;
 
     bool startDmaSampling();
     void stopDmaSampling();

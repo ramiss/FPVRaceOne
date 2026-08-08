@@ -1,0 +1,1439 @@
+#!/usr/bin/env python3
+"""
+FPVRaceOne Timing Rig — GUI
+
+Point-and-click front end for harness.py.  Runs the same measurements and adds
+plain-language interpretation, because the raw numbers are easy to misread:
+bias and jitter mean very different things, and only one of them actually costs
+you a lap.
+
+Tkinter deliberately: it ships with Python, so this runs on a clean Windows box
+with nothing installed but pyserial (already needed for the harness itself).
+
+    python gui.py
+
+Measurement logic is imported from harness.py rather than duplicated, so the
+CLI and GUI can never drift apart.
+"""
+
+import queue
+import re
+import sys
+import threading
+import time
+import tkinter as tk
+from tkinter import ttk, scrolledtext
+
+try:
+    from serial.tools import list_ports
+except ImportError:
+    sys.exit("pyserial not found. Install with:  pip install pyserial")
+
+from harness import (JsonLink, run_once, summarize,
+                     measure_transfer, diagnose_transfer, EXPECTED_GAIN,
+                     read_device_config, check_interval_vs_minlap, set_min_lap,
+                     check_maxlaps_vs_count, emulator_handshake,
+                     compute_thresholds, set_thresholds, _fit_line,
+                     geometric_detect_ms, plan_envelope,
+                     find_min_detectable_width, estimate_search_runs,
+                     MultiNodeLoad, probe_master, set_voice_enabled)
+
+
+# ── Interpretation ──────────────────────────────────────────────────────────
+#
+# Thresholds are judgement calls, chosen so a "GOOD" verdict means the effect
+# is well below anything that could matter in a race, not merely measurable.
+
+# Mirrored from firmware so measured stalls can be expressed as a duty cycle.
+# Keep in step with lib/MULTINODE/multinode.h and multinode.cpp.
+FANOUT_THROTTLE_MS       = 2000.0   # MIN_DIRECTOR_BROADCAST_INTERVAL_MS
+FANOUT_CLIENT_TIMEOUT_MS = 300      # http.setTimeout() in _broadcastDirectorState
+
+JITTER_GOOD_MS = 5.0     # stdev below this is inaudible in a lap time
+JITTER_WARN_MS = 15.0
+BIAS_NOTE_MS   = 20.0    # bias worth mentioning for cross-device comparison
+LAT_GOOD_MS    = 30.0
+
+
+def interpret_interval(res, st, interval_ms, geo_floor_ms=None):
+    """Turn interval-test statistics into sentences that say what they mean.
+
+    geo_floor_ms is the earliest a lap could possibly be confirmed for this
+    pass width, from envelope geometry alone. Passing it lets the latency
+    verdict judge pipeline lag rather than raw latency.
+    """
+    out = []
+
+    missed = res.expected - res.detected
+    if missed > 0:
+        out.append(
+            f"MISSED PASSES: {missed} of {res.expected} generated passes produced "
+            f"no lap. That is a detection failure, not a timing one — check the "
+            f"enter/exit thresholds and the peak level before reading anything "
+            f"below."
+        )
+
+    if not st:
+        out.append("Not enough laps to compute statistics.")
+        return out
+
+    j = st["stdev_ms"]
+    if j <= JITTER_GOOD_MS:
+        out.append(
+            f"CONSISTENCY: GOOD — {j:.2f} ms standard deviation. This is the "
+            f"number that actually costs you a lap: lap-time error is the "
+            f"difference in jitter between the two crossings, so low jitter "
+            f"means repeatable lap times."
+        )
+    elif j <= JITTER_WARN_MS:
+        out.append(
+            f"CONSISTENCY: MARGINAL — {j:.2f} ms standard deviation. Visible in "
+            f"a lap time but small against typical lap lengths. Worth checking "
+            f"whether it grows under multi-node load."
+        )
+    else:
+        out.append(
+            f"CONSISTENCY: POOR — {j:.2f} ms standard deviation. Lap times will "
+            f"vary noticeably run to run. Check Diagnostics -> RSSI Sample "
+            f"Timing for a large worst-gap, which would point at a scheduling "
+            f"stall."
+        )
+
+    b = st["bias_ms"]
+    if abs(b) <= BIAS_NOTE_MS:
+        out.append(
+            f"BIAS: {b:+.2f} ms. Largely harmless on its own — the same delay "
+            f"applies to both crossings of a lap and subtracts out. It matters "
+            f"only when comparing two DIFFERENT devices head to head."
+        )
+    else:
+        out.append(
+            f"BIAS: {b:+.2f} ms — large. Still mostly cancels within a single "
+            f"device's lap times, but two units with different bias would "
+            f"disagree by roughly the difference in head-to-head racing."
+        )
+
+    if "lat_mean_us" in st:
+        lm = st["lat_mean_us"] / 1000.0
+        lj = st["lat_stdev_us"] / 1000.0
+
+        # Judge the PIPELINE contribution, not raw latency.  A lap is confirmed
+        # on gate exit, so most of the measured figure is simply "the pass had
+        # to finish first" — a floor no firmware can beat.  An earlier version
+        # compared raw latency against a flat 30 ms and called a perfectly
+        # healthy 42 ms "HIGH", which was wrong and alarming.
+        floor = geo_floor_ms
+        if floor is not None:
+            pipe = lm - floor
+            if pipe <= 15.0:
+                tag = "LATENCY GOOD"
+            elif pipe <= 30.0:
+                tag = "LATENCY MARGINAL"
+            else:
+                tag = "LATENCY HIGH"
+            out.append(
+                f"{tag}: {lm:.2f} ms total, of which {floor:.1f} ms is the pass "
+                f"itself and only {pipe:.1f} ms is pipeline lag. A lap is "
+                f"confirmed on gate EXIT, not at the peak, so a {res.width_ms} ms "
+                f"pass cannot be detected sooner than {floor:.1f} ms no matter "
+                f"what the firmware does. The {pipe:.1f} ms is median-filter "
+                f"group delay plus the enter debounce."
+            )
+        else:
+            out.append(
+                f"LATENCY: {lm:.2f} ms mean, {lj:.2f} ms stdev, stimulus to "
+                f"detection. Most of this is the pass width — a lap is confirmed "
+                f"on gate exit, not at the peak."
+            )
+
+        # Separate real spread from outliers before drawing conclusions.
+        if "lat_iqr_us" in st:
+            iqr = st["lat_iqr_us"] / 1000.0
+            med = st["lat_median_us"] / 1000.0
+            outl = st.get("lat_outliers", 0)
+            if lj > 2.0 * max(iqr, 0.01) and outl:
+                out.append(
+                    f"NOTE ON LATENCY SPREAD: stdev is {lj:.2f} ms but the "
+                    f"inter-quartile range is only {iqr:.2f} ms, with {outl} "
+                    f"outlier(s). The typical pass is tight — the stdev is being "
+                    f"inflated by a few stray samples, not by genuine jitter. "
+                    f"Median latency is {med:.2f} ms."
+                )
+            else:
+                out.append(
+                    f"LATENCY SPREAD: stdev {lj:.2f} ms, IQR {iqr:.2f} ms, "
+                    f"median {med:.2f} ms. The two agree, so this is real "
+                    f"spread rather than a few outliers."
+                )
+
+        if res.dropped:
+            out.append(
+                f"RIG NOTE: the emulator dropped {res.dropped} marker edge(s) "
+                f"because a previous one had not been read yet. Those are lost "
+                f"MEASUREMENTS, not missed detections — the device found the "
+                f"laps. It only reduces the latency sample count."
+            )
+
+        out.append(
+            f"IMPORTANTLY, THIS DOES NOT AFFECT LAP TIMES. Lap timing is "
+            f"anchored to the recorded PEAK timestamp, not to when detection "
+            f"finished, which is why bias is {st['bias_ms']:+.2f} ms despite "
+            f"{lm:.0f} ms of detection latency. Latency jitter is {lj:.2f} ms "
+            f"yet lap-time jitter is only {st['stdev_ms']:.2f} ms — the "
+            f"peak-anchoring is measurably doing its job."
+        )
+    else:
+        out.append(
+            "ABSOLUTE LATENCY: not measured — no marker edges seen. Set "
+            "TIMING_MARKER_ENABLED to 1 in lib/CONFIG/config.h, reflash, and "
+            "confirm D3/GPIO21 is wired to the emulator's GPIO4."
+        )
+
+    return out
+
+
+def interpret_sweep(rows):
+    """rows: list of (width_ms, rate, stats-or-None)."""
+    out = []
+    reliable = [w for w, r, _ in rows if r >= 0.99]
+    partial  = [w for w, r, _ in rows if 0.0 < r < 0.99]
+
+    if reliable:
+        best = min(reliable)
+        out.append(
+            f"MINIMUM RELIABLE PASS: {best} ms at >=99% detection. Shorter "
+            f"passes than this start to be missed."
+        )
+        out.append(
+            f"For context, a pass whose RSSI envelope is {best} ms wide is a "
+            f"very fast gate transit. The narrower this number, the faster the "
+            f"drone the pipeline can catch."
+        )
+    else:
+        out.append(
+            "NO WIDTH REACHED 99% DETECTION. Either the peak level is too close "
+            "to the enter threshold, or calibration does not match the emulated "
+            "envelope. Re-run the calibration wizard with the emulator "
+            "connected, then retry."
+        )
+
+    if partial:
+        out.append(
+            f"PARTIAL DETECTION between {min(partial)} and {max(partial)} ms — "
+            f"this is the roll-off band where the filter starts losing peaks."
+        )
+
+    out.append(
+        "Compare this figure between polled and DMA modes. If they land in the "
+        "same place, DMA peak-hold is not earning its complexity and polled is "
+        "the simpler choice."
+    )
+    return out
+
+
+# ── GUI ─────────────────────────────────────────────────────────────────────
+
+class TimingRigGUI:
+    def __init__(self, root):
+        self.root = root
+        root.title("FPVRaceOne Timing Rig")
+        root.geometry("880x720")
+
+        self.q = queue.Queue()
+        self.worker = None
+        self.cancel = threading.Event()
+
+        self._build_ports(root)
+        self._build_settings(root)
+        self._build_buttons(root)
+        self._build_output(root)
+
+        self.refresh_ports()
+        self._update_sweep_estimate()   # traces only fire on edit, so seed it
+        self.root.after(100, self._drain)
+
+    # -- widgets ------------------------------------------------------------
+
+    def _build_ports(self, root):
+        f = ttk.LabelFrame(root, text="Serial ports", padding=8)
+        f.pack(fill="x", padx=10, pady=(10, 4))
+
+        ttk.Label(f, text="Emulator (WROOM-32):").grid(row=0, column=0, sticky="w")
+        self.emu_cb = ttk.Combobox(f, width=46, state="readonly")
+        self.emu_cb.grid(row=0, column=1, padx=6, pady=2)
+
+        ttk.Label(f, text="FPVRaceOne (XIAO C6):").grid(row=1, column=0, sticky="w")
+        self.dut_cb = ttk.Combobox(f, width=46, state="readonly")
+        self.dut_cb.grid(row=1, column=1, padx=6, pady=2)
+
+        ttk.Button(f, text="Refresh", command=self.refresh_ports)\
+            .grid(row=0, column=2, rowspan=2, padx=6)
+
+    def _build_settings(self, root):
+        # Settings are grouped by WHICH TEST USES THEM.  A single flat panel
+        # put "Width" and "Sweep widths" side by side with no indication that
+        # each is read by a different button and ignored by the other, which
+        # is a fair way to confuse someone.
+        self.vars = {}
+
+        # ── Shared: the envelope every test drives the emulator with ────────
+        f = ttk.LabelFrame(root, text="Signal — used by all tests", padding=8)
+        f.pack(fill="x", padx=10, pady=(4, 2))
+
+        def spin(parent, col, label, key, default, lo, hi, tip="", row=0):
+            ttk.Label(parent, text=label).grid(row=row, column=col * 2,
+                                               sticky="e", padx=(8, 2))
+            v = tk.StringVar(value=str(default))
+            ttk.Spinbox(parent, from_=lo, to=hi, textvariable=v, width=8)\
+                .grid(row=row, column=col * 2 + 1, sticky="w")
+            self.vars[key] = v
+            if tip:
+                ttk.Label(parent, text=tip, foreground="#666", font=("", 8))\
+                    .grid(row=row + 1, column=col * 2, columnspan=2,
+                          sticky="w", padx=(8, 2))
+
+        spin(f, 0, "Baseline:", "baseline", 40, 0, 255, "at rest")
+        spin(f, 1, "Peak:", "peak", 200, 0, 255, "at apex")
+        spin(f, 2, "Interval (ms):", "interval", 6000, 100, 60000, "pass to pass")
+        spin(f, 3, "Count:", "count", 30, 2, 500, "passes per run")
+
+        # Min Lap discards any crossing sooner than its threshold (default
+        # 5000 ms).  Zeroing it lets the rig use short intervals, which turns a
+        # 16-minute sweep into about 4.  Restored afterwards.
+        self.zero_minlap = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="Force device Min Lap = 0 during run (restored after)",
+                        variable=self.zero_minlap)\
+            .grid(row=2, column=0, columnspan=8, sticky="w", padx=(8, 0), pady=(6, 0))
+
+        # Announcements are rendered in the browser, never on the device, so
+        # muting them cannot affect the measurement — it just spares a long
+        # TTS backlog after a 30-lap run.
+        self.mute_voice = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="Mute device announcements during run "
+                                "(restored after; refresh the browser tab to apply)",
+                        variable=self.mute_voice)\
+            .grid(row=3, column=0, columnspan=8, sticky="w", padx=(8, 0), pady=(2, 0))
+
+        # ── Test 3 only ────────────────────────────────────────────────────
+        f3 = ttk.LabelFrame(root, text="Test 3 only — Accuracy + Consistency",
+                            padding=8)
+        f3.pack(fill="x", padx=10, pady=2)
+        spin(f3, 0, "Pass width (ms):", "width", 40, 1, 1000,
+             "one fixed width; measures jitter at that width")
+
+        # ── Test 4 only ────────────────────────────────────────────────────
+        # Binary search rather than a hand-written list of widths: a list
+        # spends most of its runs far from the boundary while still only
+        # resolving to whatever spacing was typed.  The search halves until
+        # detection fails, then bisects — same answer, fewer runs, and to a
+        # stated precision.
+        f4 = ttk.LabelFrame(root, text="Test 4 only — Min Pass Width "
+                                       "(automatic search)", padding=8)
+        f4.pack(fill="x", padx=10, pady=2)
+
+        spin(f4, 0, "Start width (ms):", "sweep_start", 100, 5, 1000,
+             "must detect reliably")
+        spin(f4, 1, "Resolution (ms):", "sweep_res", 2, 1, 50,
+             "how precisely to find it")
+        spin(f4, 2, "Passes per step:", "sweep_count", 10, 3, 100,
+             "more = slower, surer")
+        spin(f4, 3, "Require (%):", "sweep_require", 90, 50, 100,
+             "counts as 'detects'")
+
+        # ── Multi-node load (optional, applies to tests 3 and 4) ───────────
+        # Drives the master's expensive path — inbound lap -> blocking
+        # directorState fanout to every registered client — at a known rate,
+        # while the timing test runs underneath.  Real clients must be
+        # registered: handleLap rejects unknown nodeIds and the fanout needs
+        # somewhere to go.
+        fL = ttk.LabelFrame(root, text="Multi-node load (optional) — applies to "
+                                       "tests 3 and 4", padding=8)
+        fL.pack(fill="x", padx=10, pady=2)
+
+        self.load_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(fL, text="Generate master load during the run",
+                        variable=self.load_on)\
+            .grid(row=0, column=0, columnspan=6, sticky="w", padx=(8, 0))
+
+        # A master serves its AP on 192.168.5.1 (MULTINODE_MASTER_IP); a
+        # single/standalone unit uses 192.168.4.1.  Default to the master
+        # address, since load testing only applies in multi-node mode.
+        ttk.Label(fL, text="Master IP:").grid(row=1, column=0, sticky="e", padx=(8, 2))
+        self.master_ip = tk.StringVar(value="192.168.5.1")
+        ttk.Entry(fL, textvariable=self.master_ip, width=16)\
+            .grid(row=1, column=1, sticky="w")
+
+        ttk.Label(fL, text="Node IDs:").grid(row=1, column=2, sticky="e", padx=(8, 2))
+        self.load_nodes = tk.StringVar(value="1,2")
+        ttk.Entry(fL, textvariable=self.load_nodes, width=12)\
+            .grid(row=1, column=3, sticky="w")
+
+        ttk.Label(fL, text="Pattern:").grid(row=1, column=4, sticky="e", padx=(8, 2))
+        self.load_mode = tk.StringVar(value="burst")
+        ttk.Combobox(fL, textvariable=self.load_mode, width=7, state="readonly",
+                     values=("burst", "spread")).grid(row=1, column=5, sticky="w")
+
+        ttk.Label(fL, text="Lap (s):").grid(row=1, column=6, sticky="e", padx=(8, 2))
+        self.burst_interval = tk.StringVar(value="3.0")
+        ttk.Entry(fL, textvariable=self.burst_interval, width=6)\
+            .grid(row=1, column=7, sticky="w")
+
+        ttk.Label(fL, text="Pack (ms):").grid(row=1, column=8, sticky="e", padx=(8, 2))
+        self.burst_spread = tk.StringVar(value="50")
+        ttk.Entry(fL, textvariable=self.burst_spread, width=6)\
+            .grid(row=1, column=9, sticky="w")
+
+        # Kept for 'spread' mode and for comparison against earlier results.
+        self.load_rate = tk.StringVar(value="2.0")
+
+        ttk.Label(fL, text="Source IPs:").grid(row=2, column=0, sticky="e", padx=(8, 2))
+        self.load_srcs = tk.StringVar(value="")
+        ttk.Entry(fL, textvariable=self.load_srcs, width=30)\
+            .grid(row=2, column=1, columnspan=3, sticky="w", pady=(2, 0))
+        ttk.Label(fL, text="blank = let the OS choose. Two comma-separated local "
+                           "IPs splits the load across both WiFi adapters as "
+                           "independent stations.",
+                  foreground="#666", font=("", 8))\
+            .grid(row=3, column=0, columnspan=6, sticky="w", padx=(8, 2))
+
+        ttk.Button(fL, text="Check master", command=self.check_master)\
+            .grid(row=1, column=6, padx=(10, 0))
+
+        self.sweep_est = ttk.Label(f4, text="", foreground="#666", font=("", 8))
+        self.sweep_est.grid(row=2, column=0, columnspan=8, sticky="w",
+                            padx=(8, 2), pady=(6, 0))
+        for k in ("sweep_start", "sweep_res", "sweep_count", "interval"):
+            self.vars[k].trace_add("write", lambda *_: self._update_sweep_estimate())
+
+        # Was needed when the polled and DMA paths had ~1.9x different ADC
+        # gain: identical DAC values gave each mode a different RSSI envelope.
+        # The firmware now scales the DMA path to match, so raw DAC values are
+        # directly comparable again and this is OFF by default — leaving it on
+        # would actually MASK a residual gain mismatch by silently correcting
+        # for it, which is the opposite of what you want while verifying.
+        #
+        # Turn it on when the envelope must be pinned regardless of gain, e.g.
+        # on a chip whose RSSI_DMA_GAIN_NUM has not been re-derived.
+        self.target_rssi = tk.BooleanVar(value=False)
+        ttk.Checkbutton(f, text="Baseline/Peak are RSSI targets (off = raw DAC; "
+                                "on = pin the envelope regardless of gain)",
+                        variable=self.target_rssi)\
+            .grid(row=4, column=0, columnspan=8, sticky="w", padx=(8, 0), pady=(2, 0))
+
+    def _build_buttons(self, root):
+        f = ttk.Frame(root, padding=(10, 4))
+        f.pack(fill="x")
+
+        self.btn_level = ttk.Button(f, text="1. Check Analog Path",
+                                    command=self.run_level)
+        self.btn_level.pack(side="left", padx=(0, 6))
+
+        self.btn_thresh = ttk.Button(f, text="2. Set Thresholds",
+                                     command=self.run_thresholds)
+        self.btn_thresh.pack(side="left", padx=6)
+
+        self.btn_interval = ttk.Button(f, text="3. Accuracy + Consistency",
+                                       command=self.run_interval)
+        self.btn_interval.pack(side="left", padx=6)
+
+        self.btn_sweep = ttk.Button(f, text="4. Min Pass Width (Sweep)",
+                                    command=self.run_sweep)
+        self.btn_sweep.pack(side="left", padx=6)
+
+        self.btn_stop = ttk.Button(f, text="Stop", command=self.stop_run,
+                                   state="disabled")
+        self.btn_stop.pack(side="left", padx=6)
+
+        ttk.Button(f, text="Clear", command=self.clear).pack(side="right")
+
+    def _build_output(self, root):
+        f = ttk.LabelFrame(root, text="Results", padding=6)
+        f.pack(fill="both", expand=True, padx=10, pady=(4, 10))
+
+        self.out = scrolledtext.ScrolledText(f, wrap="word", height=24,
+                                             font=("Consolas", 9))
+        self.out.pack(fill="both", expand=True)
+        self.out.tag_config("head", font=("Consolas", 10, "bold"))
+        self.out.tag_config("good", foreground="#0a7d33")
+        self.out.tag_config("warn", foreground="#b06f00")
+        self.out.tag_config("bad", foreground="#b00020")
+        self.out.tag_config("dim", foreground="#666666")
+
+        self.status = ttk.Label(root, text="Ready", relief="sunken", anchor="w")
+        self.status.pack(fill="x", side="bottom")
+
+    # -- helpers ------------------------------------------------------------
+
+    def refresh_ports(self):
+        ports = list(list_ports.comports())
+        labels, emu_guess, dut_guess = [], None, None
+        for p in ports:
+            vid = f"{p.vid:04X}" if p.vid else "????"
+            label = f"{p.device}  [{vid}]  {p.description[:40]}"
+            labels.append(label)
+            # Same discriminator the upload task uses: Espressif native USB
+            # (0x303A) is the XIAO C6; a bridge chip is the WROOM-32 devkit.
+            if p.vid == 0x303A and dut_guess is None:
+                dut_guess = label
+            elif p.vid in (0x10C4, 0x1A86, 0x0403) and emu_guess is None:
+                emu_guess = label
+
+        self.emu_cb["values"] = labels
+        self.dut_cb["values"] = labels
+        if emu_guess:
+            self.emu_cb.set(emu_guess)
+        if dut_guess:
+            self.dut_cb.set(dut_guess)
+        self.log(f"Found {len(ports)} serial port(s).\n", "dim")
+
+    @staticmethod
+    def _port_of(label):
+        return label.split()[0] if label else None
+
+    def log(self, text, tag=None):
+        self.out.insert("end", text, tag or "")
+        self.out.see("end")
+
+    def clear(self):
+        self.out.delete("1.0", "end")
+
+    def _busy(self, busy):
+        state = "disabled" if busy else "normal"
+        for b in (self.btn_level, self.btn_thresh, self.btn_interval, self.btn_sweep):
+            b.config(state=state)
+        self.btn_stop.config(state="normal" if busy else "disabled")
+        self.status.config(text="Running…" if busy else "Ready")
+
+    def _ints(self):
+        try:
+            return {k: int(v.get()) for k, v in self.vars.items()}
+        except ValueError:
+            self.log("Settings must be whole numbers.\n", "bad")
+            return None
+
+    def _links(self):
+        emu_p = self._port_of(self.emu_cb.get())
+        dut_p = self._port_of(self.dut_cb.get())
+        if not emu_p or not dut_p:
+            self.log("Select both serial ports first.\n", "bad")
+            return None
+        if emu_p == dut_p:
+            self.log("Emulator and FPVRaceOne cannot be the same port.\n", "bad")
+            return None
+        return emu_p, dut_p
+
+    def _open_emu(self, emu_p):
+        """Open the emulator port and CONFIRM it booted before using it.
+
+        Opening the port asserts DTR/RTS, which hardware-resets the WROOM-32.
+        The fixed settle in JsonLink is a guess; if the board is slow the
+        commands that follow land in the bootloader and vanish.  The emulator
+        then sits at baseline and every pass reads as missed — indistinguishable
+        from a device-side detection failure, which is exactly how a run of 30
+        passes reported 0 laps.
+        """
+        emu = JsonLink(emu_p, name="emu")
+        if emulator_handshake(emu) is None:
+            emu.close()
+            self.emit(
+                "  Emulator did not respond to 'ping' after opening the port.\n"
+                "  It resets when the port opens; if it is slow to boot the run\n"
+                "  would silently generate nothing. Re-run, or check the cable\n"
+                "  and port selection.\n", "bad")
+            return None
+        return emu
+
+    def stop_run(self):
+        self.cancel.set()
+        self.status.config(text="Stopping…")
+
+    def _start(self, fn, *a):
+        if self.worker and self.worker.is_alive():
+            return
+        self.cancel.clear()
+        self._busy(True)
+        self.worker = threading.Thread(target=fn, args=a, daemon=True)
+        self.worker.start()
+
+    def _drain(self):
+        """Pump worker messages onto the Tk thread."""
+        try:
+            while True:
+                kind, payload = self.q.get_nowait()
+                if kind == "log":
+                    text, tag = payload
+                    self.log(text, tag)
+                elif kind == "done":
+                    self._busy(False)
+        except queue.Empty:
+            pass
+        self.root.after(100, self._drain)
+
+    def emit(self, text, tag=None):
+        self.q.put(("log", (text, tag)))
+
+    def check_master(self):
+        """Confirm the master is reachable and report which nodes are
+        registered — POSTing to an unregistered nodeId is rejected with 404,
+        which would produce a load run that silently does nothing."""
+        ip = self.master_ip.get().strip()
+        self.log(f"\nProbing master at {ip} ...\n", "dim")
+        data = probe_master(ip)
+        if not data:
+            self.log(f"  No response. Is this PC associated with the master's "
+                     f"AP, and is {ip} correct?\n", "bad")
+            return
+        nodes = data.get("nodes", []) if isinstance(data, dict) else []
+        clients = [n for n in nodes if not n.get("isMaster")]
+        online = [n for n in clients if n.get("online")]
+        self.log(f"  Master reachable. {len(clients)} client(s) registered, "
+                 f"{len(online)} online.\n", "good" if online else "warn")
+        for n in clients:
+            self.log(f"    node {n.get('nodeId')}  "
+                     f"{'online ' if n.get('online') else 'OFFLINE'}  "
+                     f"{n.get('pilotName','')}\n", "dim")
+        if online:
+            ids = ",".join(str(n.get("nodeId")) for n in online)
+            self.load_nodes.set(ids)
+            self.log(f"  Node IDs set to: {ids}\n", "dim")
+        else:
+            self.log("  No online clients — load POSTs would be rejected (404) "
+                     "and the fanout would have no targets.\n", "bad")
+
+    def _make_load(self):
+        """Build a MultiNodeLoad from the UI, or None if disabled/invalid."""
+        if not self.load_on.get():
+            return None
+        try:
+            ids = [int(x) for x in self.load_nodes.get().split(",") if x.strip()]
+            rate = float(self.load_rate.get())
+        except ValueError:
+            self.emit("  Load settings invalid — node IDs must be numbers and "
+                      "laps/sec a number. Running WITHOUT load.\n", "bad")
+            return None
+        if not ids:
+            self.emit("  No node IDs given — running WITHOUT load.\n", "warn")
+            return None
+        srcs = [s.strip() for s in self.load_srcs.get().split(",") if s.strip()]
+        try:
+            interval = float(self.burst_interval.get())
+            spread   = int(float(self.burst_spread.get()))
+        except ValueError:
+            self.emit("  Burst settings invalid — using 3.0 s lap, 50 ms pack.\n",
+                      "warn")
+            interval, spread = 3.0, 50
+        return MultiNodeLoad(self.master_ip.get().strip(), ids, rate,
+                             source_ips=srcs or None,
+                             mode=self.load_mode.get().strip() or "burst",
+                             burst_interval_s=interval,
+                             burst_spread_ms=spread)
+
+    def _emit_burst_stats(self, load):
+        """How well the master absorbed simultaneous pack arrivals.
+
+        The POST tallies alone hide this: every POST can succeed while each one
+        takes far longer than it should, which is what a saturated master
+        actually looks like from outside.
+        """
+        if getattr(load, "mode", "") != "burst" or not getattr(load, "bursts", 0):
+            return
+        worst = load.worst_burst_ms
+        budget = load.burst_interval_s * 1000.0
+        pct = 100.0 * worst / budget if budget else 0.0
+        tag = "bad" if load.bursts_overrun else ("warn" if pct >= 50 else "good")
+        self.emit(f"  BURST ABSORPTION: {load.bursts} pack(s), worst took "
+                  f"{worst:.0f} ms of the {budget:.0f} ms lap ({pct:.0f}%).\n", tag)
+        if load.bursts_overrun:
+            self.emit(f"    {load.bursts_overrun} pack(s) took LONGER than one "
+                      f"lap to clear — the master could not absorb a "
+                      f"simultaneous crossing\n    within the time before the "
+                      f"next one. This is the multi-node limit, not a timing "
+                      f"fault.\n", "bad")
+
+    def _load_desc(self):
+        """One-line description of the load actually being applied."""
+        if self.load_mode.get() == "burst":
+            n = len([x for x in self.load_nodes.get().split(",") if x.strip()])
+            return (f"BURST: all {n} node(s) together within "
+                    f"{self.burst_spread.get()} ms, every "
+                    f"{self.burst_interval.get()} s")
+        return f"SPREAD: {self.load_rate.get()} laps/sec, sequential"
+
+    def _update_sweep_estimate(self):
+        """Show how long the search will take, since it varies with settings."""
+        try:
+            start = int(self.vars["sweep_start"].get())
+            res = int(self.vars["sweep_res"].get())
+            cnt = int(self.vars["sweep_count"].get())
+            itv = int(self.vars["interval"].get())
+        except (ValueError, KeyError):
+            return
+        runs = estimate_search_runs(start, 2, res)
+        secs = runs * cnt * itv / 1000.0
+        self.sweep_est.config(
+            text=f"~{runs} runs, about {secs/60.0:.1f} min. "
+                 f"Tick 'Force Min Lap = 0' and drop the interval to shorten it.")
+
+    def _resolve_envelope(self, emu, dut, cfg):
+        """Turn the baseline/peak settings into DAC values for THIS mode.
+
+        With 'RSSI targets' on, the fields are the envelope the DEVICE should
+        see, and the DAC values needed to produce it are back-solved from a
+        freshly measured transfer. That keeps the two acquisition modes
+        comparable despite their ~1.9x gain difference, and avoids clipping.
+
+        Returns (baseline_dac, peak_dac) or (None, None) on failure.
+        """
+        if not self.target_rssi.get():
+            return cfg["baseline"], cfg["peak"]
+
+        points = measure_transfer(emu, dut, levels=(0, 64, 128, 192, 255),
+                                  dwell_s=0.6)
+        usable = [(d, v) for d, v in points if v is not None]
+        if len(usable) < 3:
+            self.emit("  Could not measure the transfer to resolve the RSSI "
+                      "targets — run Check Analog Path first.\n", "bad")
+            return None, None
+
+        sl, ic, _ = _fit_line(usable)
+        b, p, achievable, clipped = plan_envelope(sl, ic, cfg["baseline"], cfg["peak"])
+        if b is None:
+            self.emit("  Transfer looks degenerate — cannot resolve RSSI targets.\n",
+                      "bad")
+            return None, None
+
+        self.emit(f"  Envelope: RSSI {cfg['baseline']} to {cfg['peak']} "
+                  f"-> DAC {b} to {p}  (transfer {sl:.3f} x dac + {ic:.1f})\n", "dim")
+        if clipped:
+            self.emit(f"  WARNING: peak RSSI {cfg['peak']} is not reachable — DAC 255 "
+                      f"only gets to {achievable:.0f}. Lower the target, or increase "
+                      f"the divider ratio.\n", "bad")
+        return b, p
+
+    def _emit_load_evidence(self, dut, loaded, missed=None, detected=None,
+                            run_s=None):
+        """Report Core-0 stalls and measured sample rate for the run.
+
+        Two independent facts, and it matters that they are reported together:
+        parallelTask stalling is NOT the same as the sampler stalling.  The
+        fanout blocks on socket I/O, and a task blocked on a socket yields, so
+        loop() keeps sampling straight through a 1 s multinode stall.  Reading
+        a CORE0 stall as a sampling failure is the mistake this block exists to
+        prevent.
+        """
+        blocked = [l for l in dut.log if "CORE0" in l and "blocked" in l]
+        timing = [l for l in dut.log if "TIMING" in l and "Hz" in l]
+        drops  = [l for l in dut.log if "timed out" in l]
+        worst_gap_ms = 0.0
+        late_total = 0
+        window_s = 10.0   # TIMING_STATS_WINDOW_MS
+        if not (blocked or timing):
+            return
+
+        self.emit("\n  Load evidence\n", "head")
+
+        if blocked:
+            worst = 0
+            for l in blocked:
+                m = re.search(r"blocked for (\d+) ms", l)
+                if m:
+                    worst = max(worst, int(m.group(1)))
+            self.emit(f"    {len(blocked)} Core-0 stall(s), worst {worst} ms — "
+                      f"parallelTask blocked by the multi-node fanout.\n", "warn")
+
+            # Fanout DUTY CYCLE.  The director broadcast is gated by
+            # MIN_DIRECTOR_BROADCAST_INTERVAL_MS, so a fanout that takes longer
+            # than that interval runs effectively back-to-back and never lets
+            # parallelTask do anything else.  Duty is the headroom figure that
+            # actually matters, and it is measurable straight from the stalls.
+            times = [int(m.group(1)) for m in
+                     (re.search(r"blocked for (\d+) ms", l) for l in blocked) if m]
+            if times:
+                peak = max(times)
+                mean = sum(times) / len(times)
+                pk_duty = 100.0 * peak / FANOUT_THROTTLE_MS
+                av_duty = 100.0 * mean / FANOUT_THROTTLE_MS
+                tag = ("bad" if pk_duty >= 100 else
+                       "warn" if pk_duty >= 75 else "good")
+                self.emit(f"    FANOUT DUTY: peak {pk_duty:.0f}%  "
+                          f"(mean {av_duty:.0f}%)  — {peak} ms fanout against a "
+                          f"{FANOUT_THROTTLE_MS:.0f} ms throttle.\n", tag)
+                if pk_duty >= 100:
+                    self.emit(f"      AT/OVER CEILING: the fanout takes longer "
+                              f"than the interval that gates it, so it runs "
+                              f"back-to-back.\n", "bad")
+                elif pk_duty >= 75:
+                    self.emit(f"      Headroom is thin. Every client that stops "
+                              f"answering costs the full "
+                              f"{FANOUT_CLIENT_TIMEOUT_MS} ms timeout instead of "
+                              f"its normal reply time.\n", "warn")
+        elif loaded:
+            self.emit("    No Core-0 stalls logged. The load was NOT stressing "
+                      "the master — treat a clean result here as untested, not "
+                      "as proof of robustness.\n", "warn")
+
+        for l in timing[-1:]:
+            self.emit(f"    {l.strip()}\n", "dim")
+            m = re.search(r"late\(>10ms\)=(\d+) of (\d+)", l)
+            mx = re.search(r"min/mean/max = \d+/\d+/(\d+) us", l)
+            if m and mx:
+                late, total = int(m.group(1)), int(m.group(2))
+                worst_ms = int(mx.group(1)) / 1000.0
+                worst_gap_ms = max(worst_gap_ms, worst_ms)
+                late_total = max(late_total, late)
+                if late == 0 and blocked:
+                    self.emit(f"    SAMPLING HEALTHY: worst gap {worst_ms:.1f} ms, "
+                              f"0 late samples of {total}. The Core-0 stalls above "
+                              f"did NOT starve the sampler — the fanout blocks on "
+                              f"socket I/O, which yields to loop().\n", "good")
+                elif late == 0:
+                    self.emit(f"    SAMPLING HEALTHY: worst gap {worst_ms:.1f} ms, "
+                              f"0 late samples of {total}.\n", "good")
+                else:
+                    # Judge against what actually happened, not the raw count.
+                    # A handful of late samples with every pass still detected
+                    # is a note; calling it a threat cries wolf and buries the
+                    # case where it genuinely matters.
+                    pct = 100.0 * late / max(1, total)
+                    if missed:
+                        self.emit(f"    SAMPLING DEGRADED: {late} of {total} "
+                                  f"({pct:.2f}%) samples arrived >10 ms late, "
+                                  f"worst gap {worst_ms:.1f} ms — and {missed} "
+                                  f"pass(es) went undetected. These are very "
+                                  f"likely the same event.\n", "bad")
+                    else:
+                        self.emit(f"    SAMPLING GAPS: {late} of {total} "
+                                  f"({pct:.2f}%) samples arrived >10 ms late, "
+                                  f"worst gap {worst_ms:.1f} ms. Every pass was "
+                                  f"still detected, so this cost nothing at this "
+                                  f"pass width — but a gap of {worst_ms:.0f} ms "
+                                  f"drops ~{worst_ms / 7.0:.0f} samples from a "
+                                  f"7-sample median window, which would matter "
+                                  f"on a much narrower pass.\n", "warn")
+
+        # Name the sub-call responsible.  The firmware already attributes each
+        # window's worst blocker; without surfacing it the operator is left
+        # guessing which subsystem caused a gap.
+        worst_call, worst_call_ms = None, 0
+        for l in dut.log:
+            m = re.search(r"longest sub-call (\w+)=(\d+) ms", l)
+            if m and int(m.group(2)) > worst_call_ms:
+                worst_call, worst_call_ms = m.group(1), int(m.group(2))
+        if worst_call:
+            note = ""
+            if worst_call == "eeprom":
+                note = ("  This is a config WRITE — if the harness muted "
+                        "announcements\n      for you, that write is the "
+                        "harness's own doing.")
+            self.emit(f"    Worst blocker attributed by firmware: "
+                      f"{worst_call}={worst_call_ms} ms.{note}\n", "dim")
+
+            # If the sample gap is far larger than anything parallelTask was
+            # doing, the cause is NOT parallelTask.  CORE0_TIME only wraps that
+            # task's sub-calls, while sampling runs in loop() — so an
+            # unexplained gap means something at HIGHER priority than loop()
+            # preempted it, and the current instrumentation cannot see it.
+            # Only worth raising when samples were ACTUALLY late.  A worst gap
+            # of ~6 ms with zero late samples is normal scheduling and firing
+            # "UNATTRIBUTED" on it contradicts the SAMPLING HEALTHY verdict
+            # printed two lines above.
+            if late_total and worst_gap_ms > worst_call_ms + 3:
+                self.emit(
+                    f"    UNATTRIBUTED: the {worst_gap_ms:.0f} ms sample gap is "
+                    f"much larger than the {worst_call_ms} ms worst sub-call, so "
+                    f"parallelTask\n      did NOT cause it — CORE0_TIME only "
+                    f"wraps that task, while sampling runs in loop().\n", "warn")
+
+                # Measured 2026-08-07: late-sample count tracks the number of
+                # DETECTIONS, not elapsed time.  A 45 s run detecting 30 passes
+                # logged 6 late samples; an identical 45 s run detecting none
+                # logged zero.  DEBUG() ends in a synchronous Serial.printf and
+                # is called from handleLapTimerUpdate() — i.e. from loop(), the
+                # very function that samples.
+        # The DEBUG correlation is reported INDEPENDENTLY of the UNATTRIBUTED
+        # check above.  Nesting it there meant it went silent as soon as a large
+        # parallelTask sub-call (e.g. multinode=935 ms) became the biggest
+        # attributed blocker — but parallelTask blocks on socket I/O and yields,
+        # so it cannot be causing sample gaps at all.  Suppressing the true
+        # explanation because a louder-but-irrelevant one appeared is exactly
+        # the wrong behaviour.
+        #
+        # 'late' is counted over one TIMING window; 'detected' is over the whole
+        # run.  Scale to the same basis before comparing, or the ratio means
+        # nothing.
+        per_window = None
+        if detected and run_s and run_s > 0:
+            per_window = detected * (window_s / run_s)
+        if per_window and late_total and 0.5 <= late_total / per_window <= 2.0:
+            self.emit(
+                f"    SAMPLE GAPS EXPLAINED: {late_total} late sample(s) per "
+                f"{window_s:.0f}s window against ~{per_window:.1f} "
+                f"detection(s) — near 1:1.\n"
+                f"      DEBUG() ends in a synchronous Serial.printf called from "
+                f"loop() on every lap. HWCDC only BLOCKS when a USB host is\n"
+                f"      attached (HWCDC.cpp:432 no-ops via flushTXBuffer when "
+                f"disconnected), so this is THE HARNESS PERTURBING ITS OWN\n"
+                f"      MEASUREMENT — it does not happen in the field and needs "
+                f"no firmware fix.\n", "dim")
+
+        if drops:
+            self.emit(f"    {len(drops)} client timeout(s) logged — the fanout is "
+                      f"losing clients even though timing held.\n", "bad")
+
+    def _preflight(self, dut, interval_ms, count=None):
+        """Check device settings that silently corrupt a run, before running.
+
+        Two traps, both of which produce output that reads as a detection
+        result rather than a misconfiguration:
+          - Min Lap above the pass interval  -> exactly one lap reported
+          - Max Laps below the pass count    -> race ends itself part-way
+
+        Returns (ok, restore_minlap_value_or_None).
+        """
+        # Decide whether the run can proceed BEFORE changing anything on the
+        # device.  Muting first would leave announcements off when the Min Lap
+        # check aborts the run, since the caller returns early and never
+        # reaches the restore.
+        cfg = read_device_config(dut)
+        restore = None
+
+        if cfg is None:
+            self.emit("  Could not read device config — continuing without the "
+                      "Min Lap check.\n", "warn")
+        elif self.zero_minlap.get():
+            original = int(cfg.get("minLap", 50))
+            if original != 0:
+                if set_min_lap(dut, 0):
+                    self.emit(f"  Min Lap temporarily set to 0 "
+                              f"(was {original * 100} ms); will restore after.\n", "dim")
+                    restore = original
+                else:
+                    self.emit("  Could not set Min Lap to 0 — falling back to "
+                              "the interval check.\n", "warn")
+                    warn = check_interval_vs_minlap(cfg, interval_ms)
+                    if warn:
+                        self.emit(f"  {warn}\n\n", "bad")
+                        return False, None
+        else:
+            warn = check_interval_vs_minlap(cfg, interval_ms)
+            if warn:
+                self.emit(f"  {warn}\n\n", "bad")
+                return False, None
+
+        if count:
+            warn = check_maxlaps_vs_count(cfg, count)
+            if warn:
+                self.emit(f"  {warn}\n\n", "bad")
+                self._restore_minlap(dut, restore)
+                return False, None
+
+        # Committed to running — safe to mute now.
+        if self.mute_voice.get():
+            if set_voice_enabled(dut, False):
+                self._voice_was_muted = True
+                self.emit("  Announcements muted for this run.\n", "dim")
+
+        self.emit("\n")
+        return True, restore
+
+    def _restore_minlap(self, dut, original):
+        """Undo anything the preflight changed on the device."""
+        if original is not None:
+            if set_min_lap(dut, original):
+                self.emit(f"\n  Min Lap restored to {original * 100} ms.\n", "dim")
+            else:
+                self.emit(f"\n  WARNING: could not restore Min Lap — set it back "
+                          f"to {original * 100} ms manually in Settings.\n", "bad")
+
+        if getattr(self, "_voice_was_muted", False):
+            self._voice_was_muted = False
+            if set_voice_enabled(dut, True):
+                self.emit("  Announcements re-enabled.\n", "dim")
+            else:
+                self.emit("  WARNING: could not re-enable announcements — turn "
+                          "Voice back on in Settings.\n", "bad")
+
+    # -- test runners (worker thread) ---------------------------------------
+
+    def run_level(self):
+        cfg = self._ints()
+        links = self._links()
+        if not cfg or not links:
+            return
+        self._start(self._level_worker, links, cfg)
+
+    def _level_worker(self, links, cfg):
+        emu_p, dut_p = links
+        emu = dut = None
+        try:
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("ANALOG PATH CHECK\n", "head")
+            self.emit("Measures the DAC-to-RSSI transfer, then judges it on\n"
+                      "LINEARITY (is the path clean?) and HEADROOM (can it drive\n"
+                      "the signal far enough above the Enter threshold?).\n"
+                      "Run this FIRST — low amplitude presents as a detection\n"
+                      "failure that looks like a timing bug.\n\n", "dim")
+
+            emu = self._open_emu(emu_p)
+            if emu is None:
+                return
+            dut = JsonLink(dut_p, name="dut")
+
+            dcfg = read_device_config(dut)
+            enter = dcfg.get("enterRssi") if dcfg else None
+            amode = None
+            if dcfg is not None:
+                amode = int(dcfg.get("adcActive", dcfg.get("adcMode", 0)))
+            if enter is not None:
+                self.emit(f"  Device Enter threshold: {enter}"
+                          f"{'   Mode: ' + ('DMA' if amode == 1 else 'polled') if amode is not None else ''}\n\n",
+                          "dim")
+
+            self.emit(f"  {'DAC':>5} {'measured':>10}\n")
+            self.emit(f"  {'-'*5} {'-'*10}\n")
+
+            def show(d, v):
+                if v is None:
+                    self.emit(f"  {d:>5} {'--':>10}\n", "warn")
+                else:
+                    self.emit(f"  {d:>5} {int(v):>10}\n")
+
+            points = measure_transfer(emu, dut, progress=show)
+            verdicts, _gain = diagnose_transfer(points, enter_rssi=enter,
+                                                adc_mode=amode)
+
+            self.emit("\n  What this means\n", "head")
+            for tag, line in verdicts:
+                self.emit(f"  {line}\n\n", tag)
+        except Exception as e:
+            self.emit(f"\nERROR: {e}\n", "bad")
+        finally:
+            if emu:
+                emu.close()
+            if dut:
+                dut.close()
+            self.q.put(("done", None))
+
+    def run_thresholds(self):
+        cfg = self._ints()
+        links = self._links()
+        if not cfg or not links:
+            return
+        self._start(self._thresholds_worker, links, cfg)
+
+    def _thresholds_worker(self, links, cfg):
+        """Compute Enter/Exit from the measured transfer and apply them.
+
+        This replaces running the Calibration wizard for rig work. The wizard
+        exists to infer thresholds from an unknown real signal by finding peaks
+        in a hand-timed recording; here the signal is synthetic and the transfer
+        has just been measured, so the thresholds can be derived exactly. That
+        is repeatable run to run, and avoids having to coordinate a browser
+        recording window against a pass run.
+        """
+        emu_p, dut_p = links
+        emu = dut = None
+        try:
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("SET THRESHOLDS FROM MEASURED TRANSFER\n", "head")
+            self.emit("Re-measures the DAC-to-RSSI transfer, then computes Enter/Exit\n"
+                      "for the current baseline/peak and writes them to the device.\n"
+                      "Deterministic — no Calibration wizard needed for rig work.\n\n",
+                      "dim")
+
+            emu = self._open_emu(emu_p)
+            if emu is None:
+                return
+            dut = JsonLink(dut_p, name="dut")
+
+            points = measure_transfer(emu, dut)
+            usable = [(d, v) for d, v in points if v is not None]
+            if len(usable) < 3:
+                self.emit("  Could not measure the transfer — run Check Analog "
+                          "Path first.\n", "bad")
+                return
+
+            slope, intercept, _ = _fit_line(usable)
+            # Thresholds must be derived from the SAME envelope the run will
+            # use, so resolve RSSI targets to DAC values first when that mode
+            # is active.
+            if self.target_rssi.get():
+                b_dac, p_dac, _ach, _clip = plan_envelope(
+                    slope, intercept, cfg["baseline"], cfg["peak"])
+                if b_dac is None:
+                    b_dac, p_dac = cfg["baseline"], cfg["peak"]
+            else:
+                b_dac, p_dac = cfg["baseline"], cfg["peak"]
+
+            en, ex, base_r, peak_r = compute_thresholds(
+                slope, intercept, b_dac, p_dac)
+
+            # Sanity-gate before writing anything to the device.  A degenerate
+            # transfer (flat, or barely sloping) yields Enter == Exit, which
+            # would destroy a working calibration and produce a device that
+            # detects nothing.  Refuse rather than apply.
+            swing = peak_r - base_r
+            if slope < 0.1 or swing < 40 or (en - ex) < 5:
+                self.emit(f"  Transfer      : rssi = {slope:.3f} x dac + "
+                          f"{intercept:.1f}\n")
+                self.emit(f"  Envelope      : RSSI {base_r:.0f} to {peak_r:.0f} "
+                          f"(swing {swing:.0f})\n")
+                self.emit(f"  Computed      : Enter {en}, Exit {ex}\n\n")
+                self.emit("  REFUSED TO APPLY — this transfer is degenerate.\n", "bad")
+                self.emit("  A healthy sweep on this hardware slopes about 0.89 "
+                          "with a swing near 140. A flat or shallow one means the "
+                          "RSSI stream was not tracking the DAC, which happens "
+                          "when the device is too busy to service USB promptly.\n\n",
+                          "dim")
+                self.emit("  Set thresholds with the device IDLE (no multi-node "
+                          "load, clients disconnected if need be), then re-enable "
+                          "load for the timing runs. Thresholds are a property of "
+                          "the analog path, not of the load, so measuring them "
+                          "unloaded is correct.\n\n", "dim")
+                return
+
+            self.emit(f"  Transfer      : rssi = {slope:.3f} x dac + {intercept:.1f}\n")
+            self.emit(f"  Envelope      : baseline DAC {cfg['baseline']} -> RSSI "
+                      f"{base_r:.0f}, peak DAC {cfg['peak']} -> RSSI {peak_r:.0f}\n")
+            self.emit(f"  Computed      : Enter {en}, Exit {ex}\n\n")
+
+            if set_thresholds(dut, en, ex):
+                self.emit(f"  Applied — Enter {en}, Exit {ex} written to the device.\n",
+                          "good")
+            else:
+                self.emit("  FAILED to apply — set them manually in Settings.\n", "bad")
+
+            self.emit("\n  Why these values\n", "head")
+            self.emit("  - Enter sits at 60% of the baseline-to-peak swing, Exit at "
+                      "40%, giving hysteresis so the gate cleanly enters and exits.\n\n")
+            self.emit("  - Enter is deliberately NOT set low. A low threshold makes "
+                      "every pass width detect, which would make the sweep test "
+                      "meaningless — the point of that test is to find where "
+                      "detection actually breaks down.\n\n")
+            self.emit("  - Exit stays above the baseline RSSI so the signal reliably "
+                      "drops out of the gate between passes.\n\n")
+        except Exception as e:
+            self.emit(f"\nERROR: {e}\n", "bad")
+        finally:
+            if emu:
+                emu.close()
+            if dut:
+                dut.close()
+            self.q.put(("done", None))
+
+    def run_interval(self):
+        cfg = self._ints()
+        links = self._links()
+        if not cfg or not links:
+            return
+        self._start(self._interval_worker, links, cfg)
+
+    def _interval_worker(self, links, cfg):
+        emu_p, dut_p = links
+        emu = dut = None
+        restore = None          # bound before the try so finally can always use it
+        try:
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("ACCURACY + CONSISTENCY\n", "head")
+            self.emit(f"{cfg['count']} passes, {cfg['interval']} ms apart, "
+                      f"{cfg['width']} ms wide.\n"
+                      f"Estimated run time: "
+                      f"{cfg['count'] * cfg['interval'] / 1000.0:.0f} s\n\n", "dim")
+
+            emu = self._open_emu(emu_p)
+            if emu is None:
+                return
+            # Capture the device's DEBUG output for this run.  When detection
+            # under-performs, the JSON stream shows only an absence of laps —
+            # the firmware's own trace is what says WHY.
+            dut = JsonLink(dut_p, name="dut", keep_log=True)
+
+            ok, restore = self._preflight(dut, cfg["interval"], cfg.get("count"))
+            if not ok:
+                return
+
+            # Record the conditions this run happened under.  Comparing two
+            # runs is only meaningful if adcMode is the ONLY thing that
+            # differed — a config reset or an un-re-run Set Thresholds will
+            # otherwise silently confound the comparison.
+            rcfg = read_device_config(dut)
+            if rcfg:
+                req = int(rcfg.get("adcMode", 0))
+                act = int(rcfg.get("adcActive", req))
+                mode = "DMA" if act == 1 else "polled"
+                self.emit(f"  Conditions: adcMode={mode}, "
+                          f"Enter={rcfg.get('enterRssi','?')}, "
+                          f"Exit={rcfg.get('exitRssi','?')}, "
+                          f"MinLap={int(rcfg.get('minLap', 0)) * 100}ms, "
+                          f"baseline={cfg['baseline']}, peak={cfg['peak']}\n",
+                          "dim")
+                if req != act:
+                    self.emit("  WARNING: DMA was requested but the device is "
+                              "running POLLED — adc_continuous init failed and "
+                              "fell back. Any A/B against this run is invalid.\n",
+                              "bad")
+                self.emit("  Compare runs ONLY when every field above matches "
+                          "except adcMode.\n\n", "dim")
+
+            base_dac, peak_dac = self._resolve_envelope(emu, dut, cfg)
+            if base_dac is None:
+                return
+
+            # Load starts only once run_once() has CONFIRMED the race is armed.
+            # Starting it earlier delays the 'timer/start' ack itself, because
+            # USB commands and the multi-node fanout share parallelTask — the
+            # run then samples happily while detecting nothing.
+            load = self._make_load()
+
+            def _arm_load():
+                if load:
+                    load.start()
+                    self.emit(f"  Load ACTIVE — {self._load_desc()}\n"
+                              f"  to node(s) {self.load_nodes.get()} on "
+                              f"{self.master_ip.get()}\n\n", "warn")
+
+            try:
+                res = run_once(emu, dut, cfg["width"], cfg["interval"],
+                               cfg["count"], peak_dac, base_dac,
+                               on_armed=_arm_load)
+            finally:
+                if load and load.started:
+                    load.stop()
+                    self.emit(f"\n  Load stopped: {load.sent} POST(s) accepted, "
+                              f"{load.failed} failed"
+                              f"{' — ' + load.last_error if load.last_error else ''}\n",
+                              "bad" if load.failed > load.sent * 0.1 else "dim")
+                    self._emit_burst_stats(load)
+                    if load.sent == 0:
+                        self.emit("  NO LOAD WAS APPLIED — results are "
+                                  "equivalent to an unloaded run. Use 'Check "
+                                  "master' to confirm reachability and node "
+                                  "IDs.\n", "bad")
+
+            st = summarize(res)
+
+            self.emit(f"  Passes generated : {res.expected}\n")
+            self.emit(f"  Laps reported    : {res.detected}\n")
+            if st:
+                self.emit(f"\n  Lap-time error (reported - {cfg['interval']} ms), "
+                          f"n={st['n']}\n")
+                self.emit(f"    bias   : {st['bias_ms']:+.2f} ms\n")
+                self.emit(f"    stdev  : {st['stdev_ms']:.2f} ms\n")
+                self.emit(f"    range  : {st['min_ms']:+d} .. {st['max_ms']:+d} ms\n")
+                if "lat_mean_us" in st:
+                    self.emit(f"\n  Detection latency, n={len(res.latencies)}\n")
+                    self.emit(f"    mean   : {st['lat_mean_us']/1000.0:.2f} ms\n")
+                    self.emit(f"    stdev  : {st['lat_stdev_us']/1000.0:.2f} ms\n")
+                    self.emit(f"    range  : {st['lat_min_us']/1000.0:.2f} .. "
+                              f"{st['lat_max_us']/1000.0:.2f} ms\n")
+
+            # Work out the geometric floor so the latency verdict can separate
+            # "the pass had to finish" from "the pipeline added lag".
+            geo = None
+            try:
+                dcfg = read_device_config(dut)
+                if dcfg and "exitRssi" in dcfg:
+                    pts = measure_transfer(emu, dut, levels=(0, 128, 255),
+                                           dwell_s=0.6)
+                    up = [(d, v) for d, v in pts if v is not None]
+                    if len(up) >= 2:
+                        sl, ic, _ = _fit_line(up)
+                        geo = geometric_detect_ms(
+                            cfg["width"],
+                            sl * cfg["baseline"] + ic,
+                            sl * cfg["peak"] + ic,
+                            float(dcfg["exitRssi"]))
+            except Exception:
+                geo = None
+
+            # Dump the device trace when a meaningful share of passes went
+            # undetected — the interesting lines are PEAK CAPTURED (enter
+            # threshold reached) and LAP DETECTED (exit reached).  Seeing
+            # neither means the median never reached Enter; seeing PEAK
+            # without LAP means it never dropped below Exit.
+            if res.detected < res.expected * 0.8 and dut.log:
+                self.emit("\n  Device log (why detection failed)\n", "head")
+                # [CORE0] lines are the important ones when detection fails
+                # under load: they name the sub-call that blocked Core 0 and
+                # for how long, which is exactly the mechanism that starves
+                # loop() and stops RSSI sampling.  An earlier version of this
+                # filter omitted them, which hid the very evidence needed.
+                keep = [l for l in dut.log
+                        if any(k in l for k in ("PEAK", "LAP", "Ceiling", "RSSI",
+                                                "Lap ", "CORE0", "TIMING",
+                                                "MULTINODE"))]
+                for line in (keep or dut.log)[-40:]:
+                    tag = "bad" if ("CORE0" in line and "blocked" in line) else "dim"
+                    self.emit(f"    {line}\n", tag)
+                if not keep:
+                    self.emit("    (no trace — the firmware's DEBUG output may "
+                              "be disabled)\n", "dim")
+
+            # Load evidence, printed whether or not detection succeeded.  A
+            # clean loaded run is only meaningful if the load was actually
+            # biting; without this the operator cannot tell a robust result
+            # from a run where nothing happened to be stressing the master.
+            self._emit_load_evidence(dut, loaded=bool(load and load.started),
+                                     missed=res.expected - res.detected,
+                                     detected=res.detected,
+                                     run_s=cfg["count"] * cfg["interval"] / 1000.0)
+
+            self.emit("\n  What this means\n", "head")
+            for line in interpret_interval(res, st, cfg["interval"], geo):
+                tag = ("good" if line.startswith(("CONSISTENCY: GOOD",
+                                                  "LATENCY GOOD"))
+                       else "bad" if line.startswith(("MISSED", "CONSISTENCY: POOR",
+                                                      "LATENCY HIGH"))
+                       else "warn" if line.startswith(("CONSISTENCY: MARGINAL",
+                                                       "LATENCY MARGINAL"))
+                       else None)
+                self.emit(f"  - {line}\n\n", tag)
+        except Exception as e:
+            self.emit(f"\nERROR: {e}\n", "bad")
+        finally:
+            # Restore device state HERE, not in the try body: an exception
+            # mid-run would otherwise leave Min Lap at 0 and announcements
+            # muted, for the operator to discover and undo by hand.
+            try:
+                if dut is not None:
+                    self._restore_minlap(dut, restore)
+            except Exception:
+                pass
+            if emu:
+                emu.close()
+            if dut:
+                dut.close()
+            self.q.put(("done", None))
+
+    def run_sweep(self):
+        cfg = self._ints()
+        links = self._links()
+        if not cfg or not links:
+            return
+        self._start(self._sweep_worker, links, cfg)
+
+    def _sweep_worker(self, links, cfg):
+        emu_p, dut_p = links
+        emu = dut = None
+        restore = None          # bound before the try so finally can always use it
+        try:
+            start = cfg["sweep_start"]
+            resol = cfg["sweep_res"]
+            cnt   = cfg["sweep_count"]
+            req   = cfg["sweep_require"] / 100.0
+            runs  = estimate_search_runs(start, 2, resol)
+
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("MINIMUM DETECTABLE PASS WIDTH — automatic search\n", "head")
+            self.emit(f"Halves the pass width until detection fails, then bisects\n"
+                      f"to +/-{resol} ms. Starting at {start} ms, {cnt} passes per\n"
+                      f"step, counting >={cfg['sweep_require']}% as detected.\n"
+                      f"About {runs} runs, roughly "
+                      f"{runs * cnt * cfg['interval'] / 60000.0:.1f} min.\n\n", "dim")
+
+            emu = self._open_emu(emu_p)
+            if emu is None:
+                return
+            dut = JsonLink(dut_p, name="dut", keep_log=True)
+
+            ok, restore = self._preflight(dut, cfg["interval"], cfg.get("count"))
+            if not ok:
+                return
+
+            base_dac, peak_dac = self._resolve_envelope(emu, dut, cfg)
+            if base_dac is None:
+                return
+
+            self.emit(f"  {'width':>8} {'detected':>10} {'rate':>7}   verdict\n")
+            self.emit(f"  {'-'*8} {'-'*10} {'-'*7}   {'-'*7}\n")
+
+            def progress(width, detected, expected, passed):
+                rate = (detected / expected * 100.0) if expected else 0.0
+                self.emit(f"  {width:>6}ms {detected:>4}/{expected:<5} "
+                          f"{rate:>6.0f}%   {'detects' if passed else 'FAILS'}\n",
+                          "good" if passed else "warn")
+
+            # The sweep calls run_once() many times; load arms on the first
+            # confirmed race start and stays up for the rest (start() is
+            # idempotent once the poster thread is alive).
+            load = self._make_load()
+
+            def _arm_load():
+                if load and not load.started:
+                    load.start()
+                    self.emit(f"  Load ACTIVE — {self._load_desc()}\n"
+                              f"  to node(s) {self.load_nodes.get()}\n\n", "warn")
+
+            try:
+                result = find_min_detectable_width(
+                    emu, dut,
+                    interval_ms=cfg["interval"], peak=peak_dac, baseline=base_dac,
+                    start_ms=start, resolution_ms=resol, count=cnt, require=req,
+                    progress=progress, cancelled=self.cancel.is_set,
+                    on_armed=_arm_load)
+            finally:
+                if load and load.started:
+                    load.stop()
+                    self.emit(f"\n  Load stopped: {load.sent} accepted, "
+                              f"{load.failed} failed\n",
+                              "bad" if load.sent == 0 else "dim")
+                    self._emit_burst_stats(load)
+
+            self.emit("\n  What this means\n", "head")
+            limit, reason = result["limit_ms"], result["reason"]
+
+            if reason == "start_failed":
+                self.emit(f"  - The starting width of {start} ms did not detect "
+                          f"reliably, so there is nothing to search downward for. "
+                          f"Fix that first: raise the start width, check Enter/Exit "
+                          f"via Set Thresholds, or confirm the envelope reaches "
+                          f"well above Enter.\n\n", "bad")
+            elif reason == "cancelled":
+                self.emit(f"  - Search stopped early. Best confirmed width so far: "
+                          f"{limit} ms.\n\n", "warn")
+            elif reason == "below_floor":
+                self.emit(f"  - Detects reliably even at {limit} ms, the shortest "
+                          f"width tested. The real limit is below that — lower the "
+                          f"floor if you need to find it.\n\n", "good")
+            else:
+                self.emit(f"  - MINIMUM RELIABLE PASS: {limit} ms "
+                          f"(+/-{resol} ms), at >={cfg['sweep_require']}% detection.\n\n",
+                          "good")
+                self.emit(f"  - Shorter passes than this start being missed. The "
+                          f"narrower this number, the faster the gate transit the "
+                          f"pipeline can catch.\n\n")
+
+            self.emit(f"  - Record this alongside adcMode. Comparing the figure "
+                      f"between polled and DMA is the real test of whether "
+                      f"peak-hold buys capability rather than just precision — "
+                      f"if they land in the same place, DMA is not earning its "
+                      f"complexity.\n\n")
+        except Exception as e:
+            self.emit(f"\nERROR: {e}\n", "bad")
+        finally:
+            # Same reasoning as the interval worker — never leave the device
+            # with Min Lap 0 or announcements muted after a failure.
+            try:
+                if dut is not None:
+                    self._restore_minlap(dut, restore)
+            except Exception:
+                pass
+            if emu:
+                emu.close()
+            if dut:
+                dut.close()
+            self.q.put(("done", None))
+
+
+def main():
+    root = tk.Tk()
+    try:
+        ttk.Style().theme_use("vista")   # native-ish on Windows
+    except tk.TclError:
+        pass
+    TimingRigGUI(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

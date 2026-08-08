@@ -281,7 +281,7 @@ class AudioAnnouncer {
                 return;
             }
             // Check for different lap announcement formats
-            // Format 1: "Pilot Lap X, time" (e.g., "Louis Lap 5, 12.34")
+            // Format 1: "Pilot Lap X, time" (e.g., "Richard Lap 5, 12.34")
             const fullFormatMatch = cleanText.match(/^(.+?)\s+lap\s+(\d+)\s*,\s*([\d.]+)$/i);
             if (fullFormatMatch) {
                 const pilot = fullFormatMatch[1].trim();
@@ -410,7 +410,7 @@ class AudioAnnouncer {
     }
 
     /**
-     * Speak complex announcement with pilot name (e.g., "Louis Lap 5, 12.34")
+     * Speak complex announcement with pilot name (e.g., "Richard Lap 5, 12.34")
      * Breaks it into pre-recorded chunks when possible
      */
     async speakComplexWithPilot(pilot, lapNumber, lapTime) {
@@ -546,17 +546,23 @@ class AudioAnnouncer {
      * announcement.
      */
     async speakTime(seconds) {
-        const totalCs = Math.round(seconds * 100);
-        if (totalCs < 6000) {
+        // Work in milliseconds, not centiseconds.  The old cs arithmetic
+        // silently rounded away a third decimal place, so a lap of 72.345 s
+        // would be announced as "1 minute 12.34" — fine when callouts were
+        // always 2 dp, wrong now that millisecond precision is selectable.
+        const totalMs = Math.round(seconds * 1000);
+        if (totalMs < 60000) {
+            // Pass the ORIGINAL value through so whatever precision the caller
+            // formatted with survives into speakNumber().
             await this.speakNumber(seconds);
             return;
         }
-        const minutes = Math.floor(totalCs / 6000);
-        const remCs   = totalCs - (minutes * 6000);
+        const minutes = Math.floor(totalMs / 60000);
+        const remMs   = totalMs - (minutes * 60000);
         const word    = (minutes === 1) ? 'minute' : 'minutes';
         await this.useTtsFallback(`${minutes} ${word}`);
-        if (remCs === 0) return;
-        await this.speakNumber(remCs / 100);
+        if (remMs === 0) return;
+        await this.speakNumber(remMs / 1000);
     }
 
     /**
@@ -632,11 +638,20 @@ class AudioAnnouncer {
             // Speak decimal part if exists
             if (decimalPart) {
                 await this.playPrerecorded(`${voiceDir}/point.mp3`);
-                
+
                 // Parse decimal as a number (e.g., "44" -> 44, "04" -> 4)
                 const decimalNum = parseInt(decimalPart);
-                
-                if (decimalNum >= 0 && decimalNum <= 99) {
+
+                // Three or more decimal digits: always spell them out.
+                // Reading them as a number would be actively misleading —
+                // "12.045" would come out "twelve point forty-five", which is
+                // a different time.  Digit-by-digit gives "point zero four
+                // five", which is unambiguous at millisecond precision.
+                if (decimalPart.length >= 3) {
+                    for (const char of decimalPart) {
+                        await this.playPrerecorded(`${voiceDir}/num_${char}.mp3`);
+                    }
+                } else if (decimalNum >= 0 && decimalNum <= 99) {
                     await this.playPrerecorded(`${voiceDir}/num_${decimalNum}.mp3`);
                 } else {
                     // Fallback: spell out digit by digit

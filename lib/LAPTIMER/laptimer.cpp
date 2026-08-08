@@ -94,6 +94,14 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     medianFilter.reset();
     medianFilter.setWindow(medianNFromSlider(conf ? conf->getV1Smoothing() : 5));
 
+#if TIMING_MARKER_ENABLED && defined(PIN_TIMING_MARKER)
+    // Bench timing marker — idle low so the emulator sees a clean rising edge
+    // on the first confirmed lap.
+    pinMode(PIN_TIMING_MARKER, OUTPUT);
+    digitalWrite(PIN_TIMING_MARKER, LOW);
+    _markerHigh = false;
+#endif
+
     // Debug/state init
     lastRawRssi          = 0;
     lastFilteredRssi     = 0;
@@ -244,6 +252,16 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
 
     // Store final value used by lap logic
     rssi[rssiCount] = out;
+
+#if TIMING_MARKER_ENABLED && defined(PIN_TIMING_MARKER)
+    // Retire a marker pulse raised on the previous tick.  Doing it here rather
+    // than with a delayMicroseconds() at the raise site keeps all blocking out
+    // of the detection path; the resulting pulse is one sample period wide.
+    if (_markerHigh) {
+        digitalWrite(PIN_TIMING_MARKER, LOW);
+        _markerHigh = false;
+    }
+#endif
 
 #if TIMING_STATS_ENABLED
     // ── Continuous sample-interval statistics ────────────────────────────
@@ -440,6 +458,25 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             if (canCapture) {
                 lapPeakCapture();
                 if (lapPeakCaptured()) {
+#if TIMING_MARKER_ENABLED && defined(PIN_TIMING_MARKER)
+                    // FIRST statement in this block, deliberately.  Everything
+                    // below — the DEBUG here, and more inside finishLap() and
+                    // startLap() — writes to USB CDC and can block for
+                    // milliseconds if the host is not draining the port.  Any
+                    // of that between the decision and the marker would be
+                    // measured as detection latency that does not exist.
+                    //
+                    // digitalWrite (~1-2 us) rather than a raw register write:
+                    // this file builds for C3/C6/S3/ESP32 whose GPIO register
+                    // structs differ, and 2 us is 500x finer than the
+                    // millisecond effects being measured.
+                    //
+                    // Cleared on the next sample tick, giving a pulse one
+                    // sample period wide (~2-5 ms) — far more than the
+                    // emulator's edge ISR needs, and no blocking delay here.
+                    digitalWrite(PIN_TIMING_MARKER, HIGH);
+                    _markerHigh = true;
+#endif
                     DEBUG("Lap triggered! Time: %u ms (Gate 1: %s)\n",
                           currentTimeMs - startTimeMs, isGate1 ? "YES" : "NO");
                     finishLap();
@@ -589,6 +626,9 @@ void LapTimer::startLap() {
     enterHoldSamples = 0;
     enterHoldStartMs = 0;
 
+    // No-op on XIAO C6: PIN_BUZZER is undefined there, so Buzzer::beep()
+    // returns immediately.  The timing marker uses its own pin and does not
+    // interact with this.
     buz->beep(200);
     led->on(200);
 }

@@ -68,6 +68,15 @@ void Config::load(void) {
         modified = true;
     }
 
+    // Sanity: spoken decimal places must be 1-3.  Stale flash or a config from
+    // before this field existed will read as 0, which would produce integer-only
+    // callouts ("lap 1, 12") — repair it to the historical 2-decimal behaviour.
+    if (conf.announcerDecimals < 1 || conf.announcerDecimals > 3) {
+        DEBUG("Invalid announcerDecimals=%u; resetting to default 2\n", conf.announcerDecimals);
+        conf.announcerDecimals = 2;
+        modified = true;
+    }
+
     // Clamp values that are later used as array indices / loop bounds. The config
     // "magic" is only a 2-bit mask, so corrupt or stale flash can pass the version
     // check with garbage. The most dangerous case is webhookCount: toJson() and
@@ -126,6 +135,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     config["alarm"] = conf.alarm;
     config["anType"] = conf.announcerType;
     config["anRate"] = conf.announcerRate;
+    config["anDecimals"] = conf.announcerDecimals;
     config["enterRssi"] = conf.enterRssi;
     config["exitRssi"] = conf.exitRssi;
     config["rssiSens"] = conf.rssiSens;
@@ -195,6 +205,7 @@ void Config::toJsonString(char* buf) {
     config["alarm"] = conf.alarm;
     config["anType"] = conf.announcerType;
     config["anRate"] = conf.announcerRate;
+    config["anDecimals"] = conf.announcerDecimals;
     config["enterRssi"] = conf.enterRssi;
     config["exitRssi"] = conf.exitRssi;
     config["rssiSens"] = conf.rssiSens;
@@ -424,6 +435,7 @@ void Config::fromJson(JsonObject source) {
     if (source.containsKey("gate1Bootstrap"))   setU8("gate1Bootstrap",   conf.gate1Bootstrap,    0, 1);
     if (source.containsKey("v1Smoothing"))      setU8("v1Smoothing",      conf.v1Smoothing,       0, 10);
     if (source.containsKey("adcMode"))          setU8("adcMode",          conf.adcMode,           0, 1);
+    if (source.containsKey("anDecimals"))       setU8("anDecimals",       conf.announcerDecimals, 1, 3);
 
     // ===== Multi-node =====
     if (source.containsKey("nodeMode"))           setU8("nodeMode", conf.nodeMode, 0, 2);
@@ -862,6 +874,7 @@ void Config::setDefaults(void) {
     conf.alarm = 0;  // Alarm disabled
     conf.announcerType = 2;
     conf.announcerRate = 10;
+    conf.announcerDecimals = 2;  // x.01 s — matches the historical hard-coded toFixed(2)
     conf.enterRssi = 72;
     conf.exitRssi = 68;
     conf.rssiSens = 0;  // Normal sensitivity (Legacy)
@@ -894,7 +907,19 @@ void Config::setDefaults(void) {
     conf.wifiTxPower = 21;    // Maximum TX power by default
     conf.gate1Bootstrap = 0;      // Gate-1 bootstrap, off by default
     conf.v1Smoothing = 5;         // Pipeline smoothing — 5 maps to N=7 median window (default)
-    conf.adcMode = 0;             // Polled analogRead by default; 1 = DMA continuous (A/B experiment)
+    // DMA continuous with peak-hold is the default.  Measured on the RX5808
+    // emulator rig (2026-08-07), browser closed, 30 passes 1500 ms apart:
+    //     polled : lap-time stdev 1.21 ms, error range -3..+3 ms, min pass  9 ms
+    //     DMA    : lap-time stdev 0.00 ms, error range  +0..+0 ms, min pass  4 ms
+    // DMA reported all 29 lap intervals EXACTLY. Lap time anchors to
+    // rssiPeakTimeMs, and the ISR's peak-hold captures the true peak within
+    // each frame regardless of when loop() reads — so the anchor stops moving.
+    // It costs ~3 ms more pipeline lag, which is irrelevant: latency cancels
+    // between the two crossings of a lap.
+    // Thresholds do NOT need re-tuning per mode — readRssi() divides by the
+    // mode's own scaleMax (see RSSI_SCALE_MAX_DMA), so the 0-255 output is
+    // normalised. Measured Enter/Exit agreed within one count across modes.
+    conf.adcMode = 1;             // 1 = DMA continuous with peak-hold; 0 = polled analogRead
     conf.nodeMode = 0;            // Single node (standalone) by default
     memset(conf.masterSSID, 0, sizeof(conf.masterSSID));
     strlcpy(conf.masterPassword, "fpvraceone", sizeof(conf.masterPassword));

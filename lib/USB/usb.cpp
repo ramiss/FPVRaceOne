@@ -387,6 +387,13 @@ void USBTransport::sendConfigResponse(uint32_t id) {
     data["enterRssi"] = conf->getEnterRssi();
     data["exitRssi"] = conf->getExitRssi();
     data["maxLaps"] = conf->getMaxLaps();
+    // RSSI acquisition mode, for the bench rig's audit trail.  Two fields
+    // deliberately: adcMode is what the config ASKED for, adcActive is what
+    // RX5808::init() actually brought up.  They differ when DMA init fails
+    // and silently falls back to polled — which would otherwise make an A/B
+    // comparison of the two modes quietly meaningless.
+    data["adcMode"]   = conf->getAdcMode();
+    data["adcActive"] = rx ? rx->getAdcMode() : 0;
     data["ledMode"] = conf->getLedMode();
     data["ledBrightness"] = conf->getLedBrightness();
     data["ledColor"] = conf->getLedColor();

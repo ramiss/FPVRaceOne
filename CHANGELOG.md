@@ -913,7 +913,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **Best 3 Laps**: Sum of 3 fastest individual laps (non-consecutive)
   - **Median Lap**: Statistical middle lap time
 - **Configurable Lap Announcement Formats**:
-  - Full: "Louis Lap 5, 12.34"
+  - Full: "Richard Lap 5, 12.34"
   - Lap + Time: "Lap 5, 12.34"
   - Time Only: "12.34"
   - Saved to localStorage for persistence

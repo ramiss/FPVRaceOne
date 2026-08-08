@@ -314,10 +314,40 @@ bool RX5808::isSettingFrequency() {
 // 2400 adds a small headroom margin above the expected peak.
 #define RSSI_SCALE_MAX 2400UL
 
+// ── DMA path scale correction ───────────────────────────────────────────────
+//
+// The oneshot driver (analogRead) and the continuous/DMA driver do NOT return
+// the same raw counts for the same input voltage on ESP32-C6, despite both
+// being configured for 12-bit at ADC_ATTEN_DB_6.  Measured with a DC sweep
+// through a fixed divider on real hardware:
+//
+//     polled : rssi = 0.888 * dac + 4.6      (RSSI_SCALE_MAX = 2400)
+//     DMA    : rssi = 1.706 * dac + 10.4     (same scale)   → 1.92x higher
+//
+// Left uncorrected this has two consequences, both bad:
+//
+//   1. readRssi() saturates at 255 once raw passes 2400 — which the DMA path
+//      reaches at only ~60% of the input range, while the ADC itself still has
+//      most of its 12-bit span left.  That is the "clipping" seen on the bench.
+//   2. More seriously, enterRssi/exitRssi calibrated in one mode are wrong by
+//      ~2x in the other, so toggling adcMode silently invalidates a user's
+//      calibration.
+//
+// Scaling the DMA path by the measured ratio makes both modes report the same
+// RSSI for the same voltage, so thresholds transfer between them.
+//
+// TO RE-DERIVE (if a future chip or IDF version shifts this): run
+// tools/timing-harness "Check Analog Path" in each mode and take the ratio of
+// the reported slopes; that is exactly what this constant is.
+#define RSSI_DMA_GAIN_NUM  1921UL   // measured DMA/polled slope ratio x1000
+#define RSSI_DMA_GAIN_DEN  1000UL
+#define RSSI_SCALE_MAX_DMA (RSSI_SCALE_MAX * RSSI_DMA_GAIN_NUM / RSSI_DMA_GAIN_DEN)
+
 uint8_t RX5808::readRssi() {
     if (recentSetFreqFlag) return 0; // RSSI unstable immediately after tune
 
     uint16_t raw;
+    uint32_t scaleMax;
 
     if (adcMode == ADC_MODE_DMA) {
         // Read-and-clear the running peak in one atomic operation.  A plain
@@ -325,18 +355,28 @@ uint8_t RX5808::readRssi() {
         // two would have its peak discarded.  __atomic_exchange_n is a single
         // instruction on RISC-V and needs no critical section.
         raw = (uint16_t)__atomic_exchange_n(&dmaPeakRaw, 0, __ATOMIC_RELAXED);
-        // A zero here means no frame completed since the last read — possible
-        // if loop() runs faster than the ~625 Hz frame rate.  Reporting 0
-        // would inject a false trough into the median, so fall back to a
-        // direct read for this tick instead.
-        if (raw == 0) raw = (uint16_t)analogRead(rssiInputPin);
+
+        // Zero means no frame completed since the last read — possible when
+        // loop() runs faster than the ~625 Hz frame rate.
+        //
+        // This must NOT fall back to analogRead(): the oneshot driver returns
+        // counts on a different scale (see RSSI_SCALE_MAX_DMA above), so
+        // mixing one in would inject a value ~1.9x too low — a false trough,
+        // arriving precisely when the median filter is least able to reject
+        // it.  Hold the previous DMA sample instead; at worst that repeats a
+        // value for one tick, which the median absorbs harmlessly.
+        if (raw == 0) raw = lastDmaRaw;
+        else          lastDmaRaw = raw;
+
+        scaleMax = RSSI_SCALE_MAX_DMA;
     } else {
         raw = (uint16_t)analogRead(rssiInputPin);
+        scaleMax = RSSI_SCALE_MAX;
     }
 
-    return (raw >= RSSI_SCALE_MAX)
+    return (raw >= scaleMax)
            ? 255
-           : (uint8_t)((raw * 255UL) / RSSI_SCALE_MAX);
+           : (uint8_t)((raw * 255UL) / scaleMax);
 }
 
 

@@ -231,6 +231,38 @@ var minRssiValue = exitRssi - 10;
 var audioEnabled = false;
 var speakObjsQueue = [];
 var lapFormat = 'pilottime'; // 'full', 'pilottime', 'laptime', 'timeonly'
+// Decimal places for lap times — SPOKEN AND DISPLAYED.  1 = x.1s, 2 = x.01s
+// (default, matches the historical hard-coded toFixed(2)), 3 = x.001s for
+// millisecond work, which makes bench timing runs readable and audible.
+//
+// Everything that renders a lap time routes through lapFracStr() below, so the
+// table, statistics, race history, multi-node leaderboard and the announcer all
+// agree.  A displayed time that disagreed with the spoken one would be worse
+// than either — pilots cross-check the two.
+var announcerDecimals = 2;
+
+function lapDecimals() {
+  return (announcerDecimals >= 1 && announcerDecimals <= 3) ? announcerDecimals : 2;
+}
+
+// Sub-second remainder of a lap time, zero-padded to the configured precision.
+// 1234 ms -> "2" (tenths) / "23" (hundredths) / "234" (thousandths).
+// Padding matters: 45 ms at 3 dp must render "045", not "45".
+function lapFracStr(ms) {
+  const d = lapDecimals();
+  return Math.floor((ms % 1000) / Math.pow(10, 3 - d)).toString().padStart(d, '0');
+}
+
+// Format a lap time in ms for the announcer at the configured precision.
+//
+// Built from lapFracStr() rather than toFixed() so speech TRUNCATES exactly as
+// the display does.  toFixed() rounds, which made 1999 ms show as "1.99" but
+// speak as "2.00" — the same lap reported two different ways. Truncation is
+// also the right convention for race timing: a lap is never rounded up.
+function formatLapForSpeech(ms) {
+  if (!ms || ms <= 0) return `0.${'0'.repeat(lapDecimals())}`;
+  return `${Math.floor(ms / 1000)}.${lapFracStr(ms)}`;
+}
 var selectedVoice = 'default';
 
 // Initialize hybrid audio announcer
@@ -551,7 +583,7 @@ function setupWiFiEvents() {
     const parts   = e.data.split(',');
     const lapMs   = parseFloat(parts[0]);
     const peakRssi = parts.length > 1 ? parseInt(parts[1], 10) : 0;
-    var lap = (lapMs / 1000).toFixed(2);
+    var lap = formatLapForSpeech(lapMs);
     addLap(lap);
     console.log("lap:", lap + "s", "peakRssi:", peakRssi);
     // Paint a brief marker spike on the live RSSI chart at the exact peak RSSI
@@ -781,7 +813,7 @@ function setupUSBEvents() {
   });
 
   transportManager.on('lap', (data) => {
-    var lap = (parseFloat(data) / 1000).toFixed(2);
+    var lap = formatLapForSpeech(parseFloat(data));
     addLap(lap);
     console.log("USB lap:", lap + "s");
   });
@@ -1157,6 +1189,9 @@ onload = async function (e) {
 
     // Load lap format and voice selection from device config
     lapFormat = configData.lapFormat || 'full';
+    if (configData.anDecimals !== undefined) {
+      announcerDecimals = parseInt(configData.anDecimals, 10) || 2;
+    }
     selectedVoice = configData.selectedVoice || 'default';
 
     const lapFormatSelect = document.getElementById('lapFormatSelect');
@@ -2407,7 +2442,13 @@ function buildConfigSnapshotFromUI() {
 
     // RSSI acquisition: 0 = polled analogRead, 1 = DMA continuous peak-hold.
     // Latched by the firmware at boot, so a change needs a reboot to apply.
-    adcMode: parseInt(document.getElementById('adcModeSelect')?.value || '0', 10) || 0,
+    // Fallback is '1' (DMA) to match the firmware default, so a missing
+    // selector cannot silently downgrade a unit to the polled path on save.
+    // The trailing || 0 is a NaN guard only — a legitimate "0" stays 0.
+    adcMode: parseInt(document.getElementById('adcModeSelect')?.value || '1', 10) || 0,
+
+    // Spoken lap-time precision: 1=tenths, 2=hundredths, 3=thousandths.
+    anDecimals: parseInt(document.getElementById('announcerDecimalsSelect')?.value || '2', 10) || 2,
 
   };
 
@@ -3514,6 +3555,39 @@ function saveLapFormat() {
     console.log('Lap format saved:', lapFormat);
     autoSaveConfig(); // Save to device
   }
+}
+
+function saveAnnouncerDecimals() {
+  const sel = document.getElementById('announcerDecimalsSelect');
+  if (sel) {
+    announcerDecimals = parseInt(sel.value, 10) || 2;
+    console.log('Lap time precision saved:', announcerDecimals);
+    refreshLapTimeDisplays();
+    autoSaveConfig(); // Save to device
+  }
+}
+
+// Re-render everything that shows a lap time, so changing the precision takes
+// effect on rows ALREADY on screen.  Without this the table keeps a mix of old
+// and new formatting until the next lap or a page reload, which reads as a bug.
+// Each block is guarded independently — the settings page can be open while the
+// race view or multi-node tab has never been initialised.
+function refreshLapTimeDisplays() {
+  try {
+    // Rebuild from the in-memory lap times. Values are stored in seconds, and
+    // _restoreInProgressLaps() wants {lapTimeMs}, so convert back.
+    if (Array.isArray(lapTimes) && lapTimes.length > 0 &&
+        typeof _restoreInProgressLaps === 'function') {
+      _restoreInProgressLaps(lapTimes.map(sec => ({ lapTimeMs: Math.round(sec * 1000) })));
+    }
+  } catch (_) {}
+  try { if (typeof updateStatsBoxes === 'function') updateStatsBoxes(); } catch (_) {}
+  try {
+    if (typeof mnRenderRaceTab === 'function' && Array.isArray(mnCurrentNodes)) {
+      mnRenderRaceTab(mnCurrentNodes);
+    }
+  } catch (_) {}
+  try { if (typeof rvRender === 'function') rvRender(); } catch (_) {}
 }
 
 function hideRaceDownloadReminder() {
@@ -7285,6 +7359,11 @@ function openSettingsModal() {
           lapFormatSelect.value = config.lapFormat;
           lapFormat = config.lapFormat;
         }
+        const anDecSelect = document.getElementById('announcerDecimalsSelect');
+        if (config.anDecimals !== undefined) {
+          announcerDecimals = parseInt(config.anDecimals, 10) || 2;
+          if (anDecSelect) anDecSelect.value = String(announcerDecimals);
+        }
         // Sync voice enabled state from device so it's never out of date
         if (config.voiceEnabled !== undefined) {
           audioEnabled = !!config.voiceEnabled;
@@ -7841,37 +7920,43 @@ async function mnRefreshNodes() {
 // Format milliseconds as a TTS-friendly string ("3 minutes 49 point 4 6" or "49 point 5 0").
 function formatMsSpeak(ms) {
   if (!ms || ms <= 0) return '0';
+  const d   = lapDecimals();
   const m   = Math.floor(ms / 60000);
   const s   = Math.floor((ms % 60000) / 1000);
-  const cs  = Math.floor((ms % 1000) / 10);
-  const dec = cs.toString().padStart(2, '0').split('').join(' ');
+  // Sub-second remainder at the configured precision: tenths, hundredths or
+  // thousandths.  Digits are spoken individually (space-separated) so that
+  // e.g. 045 reads "zero four five" rather than "forty-five", which would be
+  // a different time.
+  const sub = Math.floor((ms % 1000) / Math.pow(10, 3 - d));
+  const dec = sub.toString().padStart(d, '0').split('').join(' ');
   if (m > 0) return `${m} minute${m !== 1 ? 's' : ''} ${s} point ${dec}`;
   return `${s} point ${dec}`;
 }
 
-// Format milliseconds as M:SS.cs (e.g. 1:23.45) for the race view.
-// Always 2-digit seconds and centiseconds so times don't jitter visually
-// (e.g. "5.05" → "05.05"); minutes are only shown when non-zero.
+// Format milliseconds as M:SS.frac (e.g. 1:23.45) for the race view.
+// Always 2-digit seconds so times don't jitter visually ("5.05" → "05.05");
+// minutes are only shown when non-zero.  Fractional precision follows the
+// Spoken Precision setting so the leaderboard matches the callouts.
 function formatMsRace(ms) {
   if (!ms || ms <= 0) return '—';
   const m  = Math.floor(ms / 60000);
   const s  = Math.floor((ms % 60000) / 1000);
-  const cs = Math.floor((ms % 1000) / 10);
   const ss = s.toString().padStart(2, '0');
-  const cc = cs.toString().padStart(2, '0');
+  const cc = lapFracStr(ms);
   return m > 0 ? `${m}:${ss}.${cc}` : `${ss}.${cc}`;
 }
 
-// Format milliseconds as MM:SS:CSs (e.g. 01:23:45s). Switches to HH:MM:SS:CSs at 1 hour.
+// Format milliseconds as MM:SS:FRACs (e.g. 01:23:45s). Switches to
+// HH:MM:SS:FRACs at 1 hour.  Fractional precision follows the Spoken Precision
+// setting, so every lap time on screen matches what the announcer says.
 function formatMsDisplay(ms) {
-  if (!ms || ms <= 0) return '00:00:00s';
+  if (!ms || ms <= 0) return `00:00:${'0'.repeat(lapDecimals())}s`;
   const h  = Math.floor(ms / 3600000);
   const m  = Math.floor((ms % 3600000) / 60000);
   const s  = Math.floor((ms % 60000) / 1000);
-  const cs = Math.floor((ms % 1000) / 10);
   const mm = m.toString().padStart(2, '0');
   const ss = s.toString().padStart(2, '0');
-  const cc = cs.toString().padStart(2, '0');
+  const cc = lapFracStr(ms);
   if (h > 0) return `${h.toString().padStart(2, '0')}:${mm}:${ss}:${cc}s`;
   return `${mm}:${ss}:${cc}s`;
 }
@@ -8009,7 +8094,11 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
   if (nodeId === 0) {
     // Update local state immediately for instant display.
     const lapSec = lapMs / 1000;
-    if (typeof addLap === 'function') addLap(lapSec.toFixed(2));
+    // toFixed(3), not (2): addLap() parseFloat()s this into the STORED lap
+    // time, so rounding here would permanently quantise multi-node laps to
+    // 10 ms and make 3-decimal display and announcements impossible. Display
+    // precision is applied at render time by formatMsDisplay/formatMsRace.
+    if (typeof addLap === 'function') addLap(lapSec.toFixed(3));
     mnRenderRaceTab(mnCurrentNodes);
     // Persist server-side without SSE broadcast (avoids double-adding via the 'lap' event).
     fetch('/timer/persistLap', {
