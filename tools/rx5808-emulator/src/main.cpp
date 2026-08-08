@@ -48,6 +48,9 @@
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <esp_system.h>
+#include <soc/dac_channel.h>
+#include <hal/dac_ll.h>
 
 // ── Pins ────────────────────────────────────────────────────────────────────
 static const uint8_t PIN_DAC_RSSI = 25;  // DAC1 on WROOM-32 (header pin 9)
@@ -142,10 +145,68 @@ static inline uint8_t IRAM_ATTR envelopeAt(uint32_t tick, uint32_t total) {
     return envTable[idx];
 }
 
+// ── Liveness counters ───────────────────────────────────────────────────────
+// The ONLY additions inside the 10 kHz ISR are two stores: an increment and a
+// byte copy.  That is a handful of cycles against a 100 us budget, so envelope
+// timing is unaffected — which is the whole point of the emulator existing.
+//
+// Everything expensive (formatting, Serial) happens in loop(), which cannot
+// disturb the ISR: the timer interrupt preempts it.
+static volatile uint32_t envTicks    = 0;   // ++ per timer tick; proves the ISR runs
+static volatile uint8_t  lastDacVal  = 0;   // last value actually written to the DAC
+
+// Min/max commanded DAC since the last heartbeat.
+//
+// A single instantaneous sample is nearly useless for confirming the envelope
+// is playing: a 40 ms pass every 3000 ms is a 1.3% duty cycle, so a once-per-
+// second sample sits at baseline ~99% of the time and dacCmd looks frozen at
+// 40 even while passes are firing correctly.  The RANGE over the window shows
+// the swing, so baseline-to-peak is visible in every heartbeat during a run.
+//
+// Two compares and two conditional stores in the ISR — negligible at 10 kHz.
+static volatile uint8_t  dacWinMin   = 255;
+static volatile uint8_t  dacWinMax   = 0;
+
+// Highest DAC value actually commanded during the CURRENT pass, latched when
+// the pass ends.  This is what makes the per-pass report meaningful: it proves
+// the envelope really swung to peak for that specific pass, rather than the
+// profile merely claiming it should have.
+static volatile uint8_t  passObsMax     = 0;
+static volatile uint8_t  lastPassObsMax = 0;
+
+// Every DAC write goes through here so the reported value can never disagree
+// with what we asked the hardware for.
+//
+// CRITICAL: this must NOT call Arduino's dacWrite().  On this core dacWrite()
+// is not a register write at all — it does a peripheral-manager lookup
+// (perimanGetPinBus), and on the first call for a pin it calls
+// dac_oneshot_new_channel(), which ALLOCATES.  All of it is flash-resident and
+// takes locks.  Calling that 10,000 times a second from an IRAM ISR is unsafe
+// on every count, and in practice it eventually left the peripheral-manager
+// state broken: the DAC pin stopped driving while the firmware carried on
+// "writing" to it, so the heartbeat still reported the commanded value.  Only
+// a hardware reset recovered it.  That is the emulator "stalling" — the output
+// went dead while everything else looked healthy.
+//
+// dac_ll_update_output_value() is always_inline and compiles to two register
+// writes.  No locks, no allocation, no flash access — genuinely ISR-safe, and
+// what the previous comment here wrongly claimed dacWrite() already was.
+//
+// The channel must still be created once, from task context, before this is
+// used; setup() does that with a single dacWrite() call.
+static inline void IRAM_ATTR dacSet(uint8_t v) {
+    lastDacVal = v;
+    if (v < dacWinMin) dacWinMin = v;
+    if (v > dacWinMax) dacWinMax = v;
+    dac_ll_update_output_value(DAC_CHAN_0, v);   // DAC_CHAN_0 == GPIO25
+}
+
 // ── Envelope timer ISR ──────────────────────────────────────────────────────
 // Kept short and allocation-free. dacWrite() on the original ESP32 is a direct
 // register write to the DAC and is safe from an ISR.
 static void IRAM_ATTR onEnvTick() {
+    envTicks++;                 // counted even when idle, so a stalled timer
+                                // is distinguishable from a stopped run
     if (!running) return;
 
     portENTER_CRITICAL_ISR(&mux);
@@ -156,10 +217,11 @@ static void IRAM_ATTR onEnvTick() {
         if (tickInPass >= ticksPerCycle) {
             tickInPass  = 0;
             inPass      = true;
+            passObsMax  = 0;          // start a fresh peak observation
             passStartUs = micros();   // t0 for this pass's latency measurement
         }
         portEXIT_CRITICAL_ISR(&mux);
-        if (!inPass) dacWrite(PIN_DAC_RSSI, profile.baseline);
+        if (!inPass) dacSet(profile.baseline);
         return;
     }
 
@@ -169,6 +231,7 @@ static void IRAM_ATTR onEnvTick() {
     const bool passEnded = (t >= ticksPerPass);
     if (passEnded) {
         inPass = false;
+        lastPassObsMax = passObsMax;   // latch for loop() to report
         // tickInPass keeps counting; the gap is (ticksPerCycle - ticksPerPass)
         passesDone++;
         if (passesDone >= profile.count) running = false;
@@ -176,8 +239,10 @@ static void IRAM_ATTR onEnvTick() {
 
     portEXIT_CRITICAL_ISR(&mux);
 
-    dacWrite(PIN_DAC_RSSI,
-             passEnded ? profile.baseline : envelopeAt(t, ticksPerPass));
+    const uint8_t out = passEnded ? profile.baseline
+                                  : envelopeAt(t, ticksPerPass);
+    if (!passEnded && out > passObsMax) passObsMax = out;
+    dacSet(out);
 }
 
 // ── Marker ISR ──────────────────────────────────────────────────────────────
@@ -217,10 +282,32 @@ static void emit(const JsonDocument& doc) {
     Serial.println();
 }
 
+// Translate the ROM/IDF reset cause into something readable.  This is the
+// single most useful line for "why did the emulator stop": a panic, a watchdog
+// and a brownout look identical from outside, and need completely different
+// fixes.
+static const char* resetReasonStr(esp_reset_reason_t r) {
+    switch (r) {
+        case ESP_RST_POWERON:  return "POWERON";     // normal cold boot
+        case ESP_RST_EXT:      return "EXT_RESET";   // the reset button
+        case ESP_RST_SW:       return "SW_RESTART";  // esp_restart()
+        case ESP_RST_PANIC:    return "PANIC";       // crash — check backtrace
+        case ESP_RST_INT_WDT:  return "INT_WDT";     // interrupt watchdog
+        case ESP_RST_TASK_WDT: return "TASK_WDT";    // task starved the WDT
+        case ESP_RST_WDT:      return "OTHER_WDT";
+        case ESP_RST_BROWNOUT: return "BROWNOUT";    // power rail sagged
+        case ESP_RST_SDIO:     return "SDIO";
+        case ESP_RST_DEEPSLEEP:return "DEEPSLEEP";
+        default:               return "UNKNOWN";
+    }
+}
+
 static void emitReady() {
     JsonDocument d;
     d["event"] = "ready";
     d["fw"]    = "rx5808-emulator/1";
+    d["rst"]   = resetReasonStr(esp_reset_reason());
+    d["heap"]  = (uint32_t)ESP.getFreeHeap();
     emit(d);
 }
 
@@ -282,7 +369,7 @@ static void processCommand(const char* line) {
 
     } else if (strcmp(cmd, "stop") == 0) {
         running = false;
-        dacWrite(PIN_DAC_RSSI, profile.baseline);
+        dacSet(profile.baseline);
         JsonDocument d;
         d["event"] = "stopped";
         emit(d);
@@ -292,7 +379,7 @@ static void processCommand(const char* line) {
         // RSSI reading before trusting any timing number.
         running = false;
         const uint8_t v = doc["value"] | profile.baseline;
-        dacWrite(PIN_DAC_RSSI, v);
+        dacSet(v);
         JsonDocument d;
         d["event"] = "level";
         d["value"] = v;
@@ -320,7 +407,11 @@ void setup() {
 
     // Populate the envelope before the timer ISR can ever index it.
     buildEnvelopeTable(profile.baseline, profile.peak);
+    // Create the DAC oneshot channel ONCE, here in task context, where
+    // allocation and locking are fine.  Every later write goes through
+    // dacSet(), which touches only registers and is ISR-safe.
     dacWrite(PIN_DAC_RSSI, profile.baseline);
+    dacSet(profile.baseline);
 
     // Arduino-ESP32 v3.x timer API: timerBegin takes a frequency directly.
     // 1 MHz base so the alarm value is simply the tick period in microseconds.
@@ -332,7 +423,72 @@ void setup() {
     emitReady();
 }
 
+// Once a second, publish proof of life.  The decisive field is tickHz: the
+// timer ISR should run at TICK_HZ regardless of whether a profile is playing,
+// so tickHz==0 means the DAC has stopped being driven — which is exactly the
+// "emulator stalled" state that previously could only be inferred from the
+// device failing to detect anything.
+static void emitHeartbeat(uint32_t nowMs) {
+    static uint32_t lastMs    = 0;
+    static uint32_t lastTicks = 0;
+    if (nowMs - lastMs < 1000) return;
+
+    const uint32_t ticks = envTicks;
+    const uint32_t dt    = nowMs - lastMs;
+    const uint32_t hz    = dt ? ((ticks - lastTicks) * 1000UL) / dt : 0;
+    lastMs    = nowMs;
+    lastTicks = ticks;
+
+    JsonDocument d;
+    d["event"]   = "hb";
+    d["tickHz"]  = hz;                      // ~TICK_HZ when healthy, 0 if dead
+    // "commanded", not measured: this is what the firmware last asked the
+    // DAC for.  There is no ADC on this board to read the pin back, so a
+    // dead output can still report a healthy value here.  Confirm the pin
+    // itself via the device's own RSSI reading.
+    d["dacCmd"]  = (uint8_t)lastDacVal;
+    // Range over the last second.  During a run these straddle
+    // baseline..peak; if dacMax never rises above baseline while running is
+    // true, the envelope is NOT being played even though the ISR ticks.
+    d["dacMin"]  = (uint8_t)dacWinMin;
+    d["dacMax"]  = (uint8_t)dacWinMax;
+    dacWinMin    = 255;          // reset the window for the next second
+    dacWinMax    = 0;
+    d["running"] = (bool)running;
+    d["passes"]  = (uint32_t)passesDone;
+    d["dropped"] = (uint32_t)markerDropped;
+    d["heap"]    = (uint32_t)ESP.getFreeHeap();
+    d["upMs"]    = nowMs;
+    emit(d);
+}
+
+// One line per generated pass, emitted from loop() AFTER the pass has already
+// finished playing.  Deliberately not in the ISR and not real-time: the point
+// is confirmation that the stimulus went out, and nothing here may perturb the
+// envelope timing the whole rig exists to keep clean.
+//
+// This is separate from the "pass" event, which only appears when FPVRaceOne
+// raises its marker — i.e. when it DETECTED the pass.  Comparing the two tells
+// you whether a missing lap was never generated or generated but not seen.
+static void emitPassSent() {
+    static uint32_t lastReported = 0;
+    const uint32_t done = passesDone;
+    if (done == lastReported) return;
+    lastReported = done;
+
+    JsonDocument d;
+    d["event"]    = "passSent";
+    d["n"]        = done;
+    d["peak"]     = profile.peak;              // commanded
+    d["peakObs"]  = (uint8_t)lastPassObsMax;   // actually reached
+    d["baseline"] = profile.baseline;
+    d["widthMs"]  = profile.widthMs;
+    emit(d);
+}
+
 void loop() {
+    emitHeartbeat(millis());
+    emitPassSent();
     // Drain a captured marker edge and report its latency relative to the
     // pass that produced it.
     if (markerPending) {

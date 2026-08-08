@@ -40,9 +40,39 @@ def _fail(msg, code=1):
     sys.exit(code)
 
 
+def _vid_of(device):
+    """USB vendor ID for a port name, or None if unknown."""
+    try:
+        import serial.tools.list_ports
+    except ImportError:
+        return None
+    for p in serial.tools.list_ports.comports():
+        if p.device.upper() == device.upper():
+            return p.vid
+    return None
+
+
 def find_emulator_port():
     override = os.environ.get("EMULATOR_PORT", "").strip()
     if override:
+        # The override used to bypass every safety check.  Pointing it at an
+        # FPVRaceOne unit would flash ESP32 (WROOM) firmware at an ESP32-C6 —
+        # a different architecture entirely, and the emulator project's
+        # platformio.ini has no idea it is talking to the wrong chip.  Every
+        # client unit is also a 0x303A device, so this is easy to get wrong
+        # with several boards on the bench.
+        vid = _vid_of(override)
+        if vid == NATIVE_ESP_VID:
+            _fail(f"EMULATOR_PORT={override} is an Espressif native-USB device "
+                  f"(VID 0x{NATIVE_ESP_VID:04X}).\n"
+                  f"That is an ESP32-C6 — an FPVRaceOne master or client, NOT "
+                  f"the emulator.\n"
+                  f"The emulator is a WROOM-32 behind a CP210x/CH340/FTDI "
+                  f"bridge chip.\n"
+                  f"Refusing to upload ESP32 firmware to a C6.")
+        if vid is None:
+            print(f"      WARNING: {override} is not a recognised USB serial "
+                  f"port; cannot verify it is not an ESP32-C6.")
         print(f"      Using EMULATOR_PORT override: {override}")
         return override
 
@@ -65,7 +95,11 @@ def find_emulator_port():
         if p.vid in BRIDGE_VIDS:
             tag = "  <- bridge chip (emulator candidate)"
         elif p.vid == NATIVE_ESP_VID:
-            tag = "  <- Espressif native USB (FPVRaceOne — will NOT upload here)"
+            # Master AND every client are ESP32-C6 on this VID, so there are
+            # usually several.  Naming the serial number (which is the device
+            # MAC) makes it obvious which unit each one is.
+            sn = f"  SER={p.serial_number}" if p.serial_number else ""
+            tag = f"  <- ESP32-C6, EXCLUDED (FPVRaceOne master/client){sn}"
         vid = f"{p.vid:04X}" if p.vid else "????"
         print(f"        {p.device:10s} VID={vid}  {p.description}{tag}")
 

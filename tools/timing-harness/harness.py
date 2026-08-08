@@ -50,6 +50,39 @@ except ImportError:
     sys.exit("pyserial not found. Install with:  pip install pyserial")
 
 
+# ── Serial plumbing──────────────────────────────────────────
+
+def open_port_no_reset(port, baud=115200, timeout=0.05):
+    """Open a serial port WITHOUT resetting the board.
+
+    pyserial asserts DTR and RTS when it opens a port.  Both rig boards treat
+    that as a reset request:
+
+      * WROOM-32 (emulator) — classic auto-reset circuit on the bridge chip
+      * ESP32-C6 (FPVRaceOne) — the USB-Serial-JTAG peripheral implements the
+        same DTR/RTS reset sequence esptool uses to enter the bootloader
+
+    Measured 2026-08-08: the master was running with 400 s uptime, the harness
+    opened its port, and the very next lines reported an uptime of 5 s.  Two
+    reboots in one short session, neither preceded by a [HEAP] FATAL — i.e. the
+    tooling was rebooting the device it was trying to observe.  That destroyed
+    multi-node state (clients came back as "New node" with default names) and
+    killed the browser's SSE, which is why the Calibration view went blank.
+
+    Building the Serial object unopened lets DTR/RTS be cleared BEFORE the port
+    is opened, so the reset line is never pulled.
+    """
+    sp = serial.Serial()
+    sp.port = port
+    sp.baudrate = baud
+    sp.timeout = timeout
+    # Must be set before open() — afterwards the reset has already happened.
+    sp.dtr = False
+    sp.rts = False
+    sp.open()
+    return sp
+
+
 # ── Serial plumbing ─────────────────────────────────────────────────────────
 
 class JsonLink:
@@ -60,11 +93,15 @@ class JsonLink:
     treated as errors. The emulator is JSON-only but is handled identically.
     """
 
-    def __init__(self, port, baud=115200, name="dev", keep_log=False):
+    def __init__(self, port, baud=115200, name="dev", keep_log=False,
+                 on_line=None):
         self.name = name
-        self.ser = serial.Serial(port, baud, timeout=0.05)
-        # Give USB CDC a moment; some boards reset when the port opens.
-        time.sleep(2.0)
+        self.ser = open_port_no_reset(port, baud)
+        # Short settle for USB CDC enumeration.  The old 2.0 s wait was
+        # sized for a board REBOOTING on open; with DTR/RTS held low that
+        # no longer happens, so the device keeps running and only needs a
+        # moment for the host side to be ready.
+        time.sleep(0.3)
         self.ser.reset_input_buffer()
         self._buf = ""
         # Non-JSON lines are the firmware's own DEBUG output, which carries
@@ -73,6 +110,11 @@ class JsonLink:
         # detection is failing and the JSON stream simply shows nothing.
         self.keep_log = keep_log
         self.log = []
+        # Optional sink called with EVERY line received, JSON or not.  The GUI
+        # uses it to keep its raw-serial panels live during a test: the test
+        # owns the ports for its duration, so without this the panels go silent
+        # for exactly the window in which the device is under most stress.
+        self.on_line = on_line
 
     def send(self, obj):
         self.ser.write((json.dumps(obj) + "\n").encode())
@@ -91,6 +133,11 @@ class JsonLink:
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             line = line.strip()
+            if line and self.on_line:
+                try:
+                    self.on_line(line)
+                except Exception:
+                    pass          # a display sink must never break a measurement
             if not line or not line.startswith("{"):
                 if self.keep_log and line:
                     self.log.append(line)
@@ -144,7 +191,27 @@ class RunResult:
         return [l - self.interval_ms for l in self.laps[1:]]
 
 
-def await_event(link, event, timeout_s=6.0, collect=None):
+def pump(*links):
+    """Read and discard from links we are not otherwise consuming.
+
+    A JsonLink only surfaces data when it is polled: unread bytes sit in the OS
+    buffer and its on_line sink never fires.  Any test that talks to one device
+    while waiting on another therefore loses the first device's log entirely —
+    measure_transfer() drove the emulator for a whole run without ever reading
+    it back, so the emulator pane stayed empty for the duration.
+
+    Cheap enough to call in any wait loop; poll() returns immediately when
+    there is nothing to read.
+    """
+    for link in links:
+        if link is not None:
+            try:
+                link.poll()
+            except Exception:
+                pass      # a logging convenience must never fail a measurement
+
+
+def await_event(link, event, timeout_s=6.0, collect=None, also=None):
     """Wait for a named event from a device, optionally keeping others.
 
     Opening a serial port asserts DTR/RTS, which hardware-resets an ESP32 with
@@ -160,6 +227,7 @@ def await_event(link, event, timeout_s=6.0, collect=None):
                 return m
             if collect is not None:
                 collect.append(m)
+        pump(also)
         time.sleep(0.02)
     return None
 
@@ -175,7 +243,7 @@ def emulator_handshake(emu, timeout_s=8.0):
     return None
 
 
-def _await_ack(dut, want_id, timeout_s=8.0):
+def _await_ack(dut, want_id, timeout_s=8.0, also=None):
     """Wait for the device to acknowledge a specific command id.
 
     USBTransport::update() runs inside parallelTask, the same task that does
@@ -190,6 +258,7 @@ def _await_ack(dut, want_id, timeout_s=8.0):
         for m in dut.poll():
             if m.get("id") == want_id and m.get("status") == "OK":
                 return True
+        pump(also)          # don't let the other device's log stall meanwhile
         time.sleep(0.02)
     return False
 
@@ -212,7 +281,7 @@ def run_once(emu, dut, width_ms, interval_ms, count, peak, baseline,
 
     emu.send({"cmd": "profile", "baseline": baseline, "peak": peak,
               "widthMs": width_ms, "intervalMs": interval_ms, "count": count})
-    ps = await_event(emu, "profileSet", timeout_s=3.0)
+    ps = await_event(emu, "profileSet", timeout_s=3.0, also=dut)
     if ps is None:
         raise RuntimeError(
             "Emulator did not acknowledge 'profile'.\n"
@@ -238,7 +307,7 @@ def run_once(emu, dut, width_ms, interval_ms, count, peak, baseline,
     dut.send({"cmd": "timer/stop", "id": 1})
     time.sleep(0.2)
     dut.send({"cmd": "timer/start", "id": 2})
-    if not _await_ack(dut, 2):
+    if not _await_ack(dut, 2, also=emu):
         raise RuntimeError(
             "Device never acknowledged 'timer/start'.\n"
             "  USB commands are handled by parallelTask, which is also where the\n"
@@ -254,7 +323,7 @@ def run_once(emu, dut, width_ms, interval_ms, count, peak, baseline,
         on_armed()
 
     emu.send({"cmd": "run"})
-    if await_event(emu, "runStarted", timeout_s=3.0) is None:
+    if await_event(emu, "runStarted", timeout_s=3.0, also=dut) is None:
         raise RuntimeError(
             "Emulator did not acknowledge 'run' — no passes will be generated.\n"
             "  The DAC stays at baseline and every pass reads as 'missed', which\n"
@@ -543,6 +612,7 @@ def measure_transfer(emu, dut, levels=(0, 32, 64, 96, 128, 160, 200, 255),
     dut.send({"cmd": "rssi/start", "id": 90})
     time.sleep(0.3)
     dut.poll()
+    pump(emu)
 
     points = []
     try:
@@ -557,6 +627,7 @@ def measure_transfer(emu, dut, levels=(0, 32, 64, 96, 128, 160, 200, 255),
             # rig produced "Enter 34, Exit 34".
             time.sleep(0.25)          # let the level settle and old events land
             dut.poll()                # drop them
+            pump(emu)                 # surface the emulator's own output
             time.sleep(dwell_s)       # now sample only this level
             seen = [m["data"] for m in dut.poll()
                     if m.get("event") == "rssi" and isinstance(m.get("data"), int)]

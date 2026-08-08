@@ -16,6 +16,8 @@ Measurement logic is imported from harness.py rather than duplicated, so the
 CLI and GUI can never drift apart.
 """
 
+import json
+import os
 import queue
 import re
 import sys
@@ -25,11 +27,12 @@ import tkinter as tk
 from tkinter import ttk, scrolledtext
 
 try:
+    import serial
     from serial.tools import list_ports
 except ImportError:
     sys.exit("pyserial not found. Install with:  pip install pyserial")
 
-from harness import (JsonLink, run_once, summarize,
+from harness import (JsonLink, run_once, summarize, open_port_no_reset,
                      measure_transfer, diagnose_transfer, EXPECTED_GAIN,
                      read_device_config, check_interval_vs_minlap, set_min_lap,
                      check_maxlaps_vs_count, emulator_handshake,
@@ -262,12 +265,37 @@ class TimingRigGUI:
         self.worker = None
         self.cancel = threading.Event()
 
+        # Live-monitor state.  Buffers are bounded: this runs for hours between
+        # tests and must not grow without limit.
+        self._mon_thread = None
+        self._mon_stop = threading.Event()
+        self._mon_resume_after_test = False
+        self._mon_lines = {"DUT": [], "EMU": []}
+        self._MON_MAX_LINES = 20000
+        # Raw serial goes to its own window rather than the results pane, so a
+        # long-running monitor cannot bury the test output that gets shared.
+        self._log_win = None
+        self._log_text = {}
+        self._log_follow = {}
+
         self._build_ports(root)
         self._build_settings(root)
         self._build_buttons(root)
         self._build_output(root)
 
+        # Capture the as-built values BEFORE restoring, so "Reset to Defaults"
+        # has something to go back to without re-reading the source.
+        self._defaults = {k: v.get() for k, v in self._setting_vars().items()}
+        self.restore_settings()
+
         self.refresh_ports()
+        # Listen from launch.  The faults worth catching (the master rebooting
+        # itself, the emulator panicking, clients cycling) happen while nobody
+        # is running a test, so a monitor that only starts on demand misses
+        # exactly the events it exists for.  Deferred slightly so the port
+        # comboboxes and the drain loop are live first.
+        if self.monitor_on.get():
+            self.root.after(300, self._autostart_monitor)
         self._update_sweep_estimate()   # traces only fire on edit, so seed it
         self.root.after(100, self._drain)
 
@@ -286,7 +314,27 @@ class TimingRigGUI:
         self.dut_cb.grid(row=1, column=1, padx=6, pady=2)
 
         ttk.Button(f, text="Refresh", command=self.refresh_ports)\
-            .grid(row=0, column=2, rowspan=2, padx=6)
+            .grid(row=0, column=2, padx=6)
+        ttk.Button(f, text="Remember Ports", command=self.remember_ports)\
+            .grid(row=1, column=2, padx=6)
+        ttk.Button(f, text="Save Settings", command=self.save_settings)\
+            .grid(row=0, column=3, padx=6)
+        ttk.Button(f, text="Reset to Defaults", command=self.reset_settings)\
+            .grid(row=1, column=3, padx=6)
+
+        # Live monitor.  Several faults this session were only visible in raw
+        # serial output that no test was capturing at the time — a floating
+        # marker pin hanging the emulator, the master self-rebooting on low
+        # heap, clients cycling between timeout and re-registration.  Watching
+        # continuously, outside a test run, is how those get seen at all.
+        self.monitor_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(f, text="Live monitor", variable=self.monitor_on,
+                        command=self._toggle_monitor)\
+            .grid(row=0, column=4, padx=(12, 2), sticky="w")
+        ttk.Button(f, text="Save Logs", command=self.save_logs)\
+            .grid(row=1, column=4, padx=(12, 2), sticky="w")
+        ttk.Button(f, text="Log Panel \u2197", command=self.open_log_panel)\
+            .grid(row=0, column=5, rowspan=2, padx=(6, 2))
 
     def _build_settings(self, root):
         # Settings are grouped by WHICH TEST USES THEM.  A single flat panel
@@ -313,7 +361,7 @@ class TimingRigGUI:
 
         spin(f, 0, "Baseline:", "baseline", 40, 0, 255, "at rest")
         spin(f, 1, "Peak:", "peak", 200, 0, 255, "at apex")
-        spin(f, 2, "Interval (ms):", "interval", 6000, 100, 60000, "pass to pass")
+        spin(f, 2, "Interval (ms):", "interval", 3000, 100, 60000, "pass to pass")
         spin(f, 3, "Count:", "count", 30, 2, 500, "passes per run")
 
         # Min Lap discards any crossing sooner than its threshold (default
@@ -327,7 +375,7 @@ class TimingRigGUI:
         # Announcements are rendered in the browser, never on the device, so
         # muting them cannot affect the measurement — it just spares a long
         # TTS backlog after a 30-lap run.
-        self.mute_voice = tk.BooleanVar(value=True)
+        self.mute_voice = tk.BooleanVar(value=False)
         ttk.Checkbutton(f, text="Mute device announcements during run "
                                 "(restored after; refresh the browser tab to apply)",
                         variable=self.mute_voice)\
@@ -401,7 +449,7 @@ class TimingRigGUI:
         self.stop_delay = tk.StringVar(value="0")
         ttk.Entry(fL, textvariable=self.stop_delay, width=6)            .grid(row=2, column=5, sticky="w")
         ttk.Label(fL, text="Pack (ms):").grid(row=1, column=8, sticky="e", padx=(8, 2))
-        self.burst_spread = tk.StringVar(value="50")
+        self.burst_spread = tk.StringVar(value="10")
         ttk.Entry(fL, textvariable=self.burst_spread, width=6)\
             .grid(row=1, column=9, sticky="w")
 
@@ -486,13 +534,139 @@ class TimingRigGUI:
 
     # -- helpers ------------------------------------------------------------
 
+    # Where the chosen ports are remembered between sessions.  Keyed by USB
+    # serial number, not COM port: COM numbers move when devices are re-plugged,
+    # while the serial number is stable.
+    _PREFS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "rig_settings.json")
+
+    def _load_prefs(self):
+        try:
+            with open(self._PREFS_PATH, "r", encoding="utf-8") as fh:
+                return json.load(fh)
+        except Exception:
+            return {}
+
+    def _write_prefs(self, prefs):
+        try:
+            with open(self._PREFS_PATH, "w", encoding="utf-8") as fh:
+                json.dump(prefs, fh, indent=2, sort_keys=True)
+            return True
+        except Exception as e:
+            self.log(f"Could not save settings: {e}\n", "warn")
+            return False
+
+    def _load_port_prefs(self):
+        return self._load_prefs().get("ports", {})
+
+    def _save_port_prefs(self, ports):
+        prefs = self._load_prefs()
+        prefs["ports"] = ports
+        self._write_prefs(prefs)
+
+    def _setting_vars(self):
+        """Every tk variable that represents a user setting.
+
+        Discovered by type rather than listed by hand, so a setting added later
+        is saved automatically instead of being silently forgotten — the usual
+        way these files rot.
+        """
+        found = {}
+        for name, val in vars(self).items():
+            if name.startswith("_"):
+                continue
+            if isinstance(val, (tk.StringVar, tk.BooleanVar,
+                                tk.IntVar, tk.DoubleVar)):
+                found[name] = val
+        for key, val in getattr(self, "vars", {}).items():
+            found[f"vars.{key}"] = val        # the Signal spinboxes
+        return found
+
+    def save_settings(self):
+        prefs = self._load_prefs()
+        prefs["settings"] = {k: v.get() for k, v in self._setting_vars().items()}
+        if self._write_prefs(prefs):
+            self.log(f"Saved {len(prefs['settings'])} setting(s). They will be "
+                     f"restored next time the GUI starts.\n", "good")
+
+    def reset_settings(self):
+        """Back to the values the GUI ships with, and forget the saved ones.
+
+        Without this, one bad saved value (a 60000 ms interval, load pointed at
+        a stale IP) persists across every future launch with no obvious way out
+        short of deleting the file by hand.
+        """
+        for name, var in self._setting_vars().items():
+            if name in getattr(self, "_defaults", {}):
+                try:
+                    var.set(self._defaults[name])
+                except Exception:
+                    pass
+        prefs = self._load_prefs()
+        prefs.pop("settings", None)          # ports are kept deliberately
+        self._write_prefs(prefs)
+        self.log("Settings reset to defaults and the saved copy cleared. "
+                 "Remembered ports are kept.\n", "good")
+
+    def restore_settings(self, quiet=False):
+        saved = self._load_prefs().get("settings", {})
+        if not saved:
+            return
+        applied = 0
+        for name, var in self._setting_vars().items():
+            if name not in saved:
+                continue
+            try:
+                var.set(saved[name])
+                applied += 1
+            except Exception:
+                pass      # a stale or renamed setting must not stop the rest
+        if applied and not quiet:
+            self.log(f"Restored {applied} saved setting(s).\n", "dim")
+
+    @staticmethod
+    def _serial_of(label):
+        """Pull the USB serial number back out of a combobox label."""
+        parts = label.split("  ")
+        return parts[2].strip() if len(parts) >= 3 else ""
+
+    def remember_ports(self):
+        """Pin the current selections by USB serial number.
+
+        Stored as serial numbers rather than COM ports because COM numbers are
+        reassigned on re-plug, while the serial number (the device MAC on ESP32
+        native USB) identifies one specific unit forever.
+        """
+        prefs = self._load_port_prefs()
+        dut_sn = self._serial_of(self.dut_cb.get())
+        emu_sn = self._serial_of(self.emu_cb.get())
+        if dut_sn and dut_sn != "no-serial":
+            prefs["dut"] = dut_sn
+        if emu_sn and emu_sn != "no-serial":
+            prefs["emu"] = emu_sn
+        self._save_port_prefs(prefs)
+        self.log(f"Remembered: FPVRaceOne={prefs.get('dut','-')}  "
+                 f"emulator={prefs.get('emu','-')}\n"
+                 f"  These are matched by serial number from now on, whatever "
+                 f"COM port they land on.\n", "good")
+
     def refresh_ports(self):
         ports = list(list_ports.comports())
+        prefs = self._load_port_prefs()
         labels, emu_guess, dut_guess = [], None, None
+        pref_emu_label, pref_dut_label = None, None
         for p in ports:
             vid = f"{p.vid:04X}" if p.vid else "????"
-            label = f"{p.device}  [{vid}]  {p.description[:40]}"
+            # On ESP32 native USB the serial number IS the device MAC, which is
+            # the only reliable way to tell the master from its client units —
+            # they all enumerate as 303A:1001 with identical descriptions.
+            sn = p.serial_number or "no-serial"
+            label = f"{p.device}  [{vid}]  {sn}  {p.description[:28]}"
             labels.append(label)
+            if sn and sn == prefs.get("dut"):
+                pref_dut_label = label
+            if sn and sn == prefs.get("emu"):
+                pref_emu_label = label
             # Same discriminator the upload task uses: Espressif native USB
             # (0x303A) is the XIAO C6; a bridge chip is the WROOM-32 devkit.
             if p.vid == 0x303A and dut_guess is None:
@@ -502,15 +676,239 @@ class TimingRigGUI:
 
         self.emu_cb["values"] = labels
         self.dut_cb["values"] = labels
-        if emu_guess:
-            self.emu_cb.set(emu_guess)
-        if dut_guess:
-            self.dut_cb.set(dut_guess)
+
+        # Auto-pick by USB VID, but never override a choice already made and
+        # still present.  Every client unit is also a 0x303A ESP32-C6, so
+        # "first native-USB port found" is not reliably the master — once the
+        # operator has picked the right one, a refresh must not silently move
+        # the test to a different device.
+        # Priority: remembered serial number > current selection > VID guess.
+        def _pick(cb, remembered, guess):
+            if remembered:
+                cb.set(remembered)
+                return remembered, True
+            cur = cb.get()
+            if cur and cur in labels:
+                return cur, False        # still connected — leave it alone
+            if guess:
+                cb.set(guess)
+                return guess, False
+            return None, False
+
+        _pick(self.emu_cb, pref_emu_label, emu_guess)
+        dut_sel, dut_remembered = _pick(self.dut_cb, pref_dut_label, dut_guess)
+
         self.log(f"Found {len(ports)} serial port(s).\n", "dim")
+        if dut_remembered:
+            self.log(f"  FPVRaceOne restored from saved serial "
+                     f"{self._serial_of(dut_sel)} on {dut_sel.split()[0]}.\n", "good")
+        else:
+            n303a = sum(1 for p in ports if p.vid == 0x303A)
+            if n303a > 1 and dut_sel:
+                self.log(f"  {n303a} devices share VID 0x303A (client units are "
+                         f"ESP32-C6 too). Pick the master, then press Remember "
+                         f"Ports\n  so it is matched by serial number "
+                         f"(= its MAC) from now on.\n", "warn")
 
     @staticmethod
     def _port_of(label):
         return label.split()[0] if label else None
+
+    # ── Live serial monitor ────────────────────────────────────────────
+    def _autostart_monitor(self):
+        """Deferred launch start — re-check the toggle at FIRE time.
+
+        Checking only at schedule time was a race: switching the monitor off
+        within the first 300 ms still let it grab the ports afterwards, so the
+        checkbox and reality disagreed.
+        """
+        if self.monitor_on.get():
+            self._start_monitor()
+
+    def _toggle_monitor(self):
+        if self.monitor_on.get():
+            self._start_monitor()
+        else:
+            self._stop_monitor()
+
+    def _start_monitor(self):
+        if self._mon_thread and self._mon_thread.is_alive():
+            return
+        if self.worker and self.worker.is_alive():
+            self.log("Cannot monitor while a test is running.\n", "warn")
+            self.monitor_on.set(False)
+            return
+        ports = self._links()
+        if not ports:
+            self.monitor_on.set(False)
+            return
+        emu_p, dut_p = ports
+        self._mon_stop.clear()
+        self._mon_thread = threading.Thread(
+            target=self._monitor_worker, args=(emu_p, dut_p), daemon=True)
+        self._mon_thread.start()
+        self.log(f"Live monitor ON — FPVRaceOne {dut_p}, emulator {emu_p}. "
+                 f"Raw output, nothing filtered.\n"
+                 f"  Open 'Log Panel' to view it. The ports are held while "
+                 f"monitoring, so untick Live monitor before flashing from "
+                 f"PlatformIO.\n", "good")
+
+    def _stop_monitor(self):
+        self._mon_stop.set()
+        t = self._mon_thread
+        if t:
+            t.join(timeout=2.0)
+        self._mon_thread = None
+        self.monitor_on.set(False)
+
+    def _monitor_worker(self, emu_p, dut_p):
+        """Read both ports raw and stream them to the log panel.
+
+        Deliberately does NOT parse or filter.  Every diagnostic gap this
+        session came from a filter dropping the one line that mattered — the
+        panic, the [HEAP] FATAL, the [CORE0] stall.  Raw means raw.
+
+        Each port reconnects independently.  Both boards reset in normal use —
+        the master on its own low-heap watchdog, the emulator when its port is
+        opened — and a monitor that gave up on the first read error would go
+        silent precisely when something interesting had just happened.
+        """
+        targets = {"DUT": dut_p, "EMU": emu_p}
+        handles = {}          # name -> serial handle (absent = needs opening)
+        buffers = {"DUT": "", "EMU": ""}
+        next_try = {"DUT": 0.0, "EMU": 0.0}
+        announced = set()
+
+        def _open(name):
+            now = time.time()
+            if now < next_try[name]:
+                return
+            next_try[name] = now + 2.0        # retry cadence while unplugged
+            try:
+                handles[name] = open_port_no_reset(targets[name])
+                if name in announced:
+                    self.emit_mon_status(name, f"  Monitor: {name} reconnected "
+                                               f"on {targets[name]}.\n", "good")
+                    announced.discard(name)
+            except Exception as e:
+                if name not in announced:
+                    hint = ""
+                    if "denied" in str(e).lower() or "access" in str(e).lower():
+                        hint = ("\n     Another program holds that port — a "
+                                "PlatformIO/VSCode serial monitor, PuTTY, or a "
+                                "second copy\n     of this GUI. Close it and "
+                                "the monitor will reconnect on its own.")
+                    self.emit_mon_status(name,
+                        f"  Monitor: cannot open {name} on {targets[name]} — "
+                        f"{e}{hint}\n", "bad")
+                    announced.add(name)
+
+        try:
+            while not self._mon_stop.is_set():
+                for name in ("DUT", "EMU"):
+                    if name not in handles:
+                        _open(name)
+                        continue
+                    try:
+                        data = handles[name].read(4096).decode("utf-8",
+                                                               errors="replace")
+                    except Exception as e:
+                        # Port vanished (board reset / cable). Drop it and let
+                        # the reconnect loop pick it up again.
+                        try:
+                            handles[name].close()
+                        except Exception:
+                            pass
+                        handles.pop(name, None)
+                        self.emit_mon_status(name, f"  Monitor: {name} "
+                                                   f"disconnected — {e}\n", "bad")
+                        announced.add(name)
+                        continue
+                    if not data:
+                        continue
+                    buffers[name] += data
+                    while "\n" in buffers[name]:
+                        line, buffers[name] = buffers[name].split("\n", 1)
+                        line = line.rstrip("\r")
+                        if not line:
+                            continue
+                        stamp = time.strftime("%H:%M:%S")
+                        rec = f"{stamp} [{name}] {line}"
+                        lines = self._mon_lines[name]
+                        lines.append(rec)
+                        if len(lines) > self._MON_MAX_LINES:
+                            del lines[:len(lines) - self._MON_MAX_LINES]
+                        tag = self._mon_tag(line)
+                        # The emulator heartbeat carries tickHz — the timer ISR
+                        # rate.  It should sit at TICK_HZ whether or not a run
+                        # is playing, so zero means the DAC has stopped being
+                        # driven.  Call that out rather than leave an operator
+                        # to notice one number among thousands of lines.
+                        if name == "EMU" and '"event":"hb"' in line.replace(" ", ""):
+                            m = re.search(r'"tickHz"\s*:\s*(\d+)', line)
+                            if m:
+                                hz = int(m.group(1))
+                                if hz == 0:
+                                    tag = "bad"
+                                    self.emit_mon(name,
+                                        "--- EMULATOR DAC STOPPED: tickHz=0, the "
+                                        "envelope timer ISR is not running ---\n",
+                                        "bad")
+                                elif hz < 9000 or hz > 11000:
+                                    tag = "warn"
+                        if name == "EMU" and '"rst"' in line and "POWERON" not in line \
+                                and "EXT_RESET" not in line:
+                            self.emit_mon(name,
+                                "--- EMULATOR RESTARTED for a non-normal reason "
+                                "(see rst= above) ---\n", "bad")
+                        self.emit_mon(name, rec + "\n", tag)
+                time.sleep(0.02)
+        finally:
+            for sp in handles.values():
+                try:
+                    sp.close()
+                except Exception:
+                    pass
+            self.emit("  Live monitor OFF.\n", "dim")
+
+    def save_logs(self):
+        """Write the monitor buffers and the on-screen results to text files."""
+        out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+        try:
+            os.makedirs(out_dir, exist_ok=True)
+        except Exception as e:
+            self.log(f"Could not create {out_dir}: {e}\n", "bad")
+            return
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        written = []
+        for name in ("DUT", "EMU"):
+            lines = self._mon_lines.get(name, [])
+            if not lines:
+                continue
+            path = os.path.join(out_dir, f"{stamp}-{name.lower()}-serial.txt")
+            try:
+                with open(path, "w", encoding="utf-8") as fh:
+                    fh.write("\n".join(lines) + "\n")
+                written.append((path, len(lines)))
+            except Exception as e:
+                self.log(f"Could not write {path}: {e}\n", "bad")
+        # The results pane too — that is what actually gets shared.
+        try:
+            path = os.path.join(out_dir, f"{stamp}-results.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(self.out.get("1.0", "end"))
+            written.append((path, None))
+        except Exception as e:
+            self.log(f"Could not write results: {e}\n", "bad")
+
+        if not written:
+            self.log("Nothing to save yet — turn the live monitor on, or run a "
+                     "test first.\n", "warn")
+            return
+        self.log(f"Saved {len(written)} file(s) to {out_dir}\n", "good")
+        for path, n in written:
+            self.log(f"   {os.path.basename(path)}"
+                     f"{f'  ({n} lines)' if n else ''}\n", "dim")
 
     def log(self, text, tag=None):
         self.out.insert("end", text, tag or "")
@@ -558,7 +956,8 @@ class TimingRigGUI:
         # backtrace and ROM boot banner to the same serial port it speaks JSON
         # on.  Without capture those lines were discarded, so a crashing rig was
         # invisible and its runs looked like device detection failures.
-        emu = JsonLink(emu_p, name="emu", keep_log=True)
+        emu = JsonLink(emu_p, name="emu", keep_log=True,
+                       on_line=self._mon_sink("EMU"))
         if emulator_handshake(emu) is None:
             emu.close()
             self.emit(
@@ -576,6 +975,14 @@ class TimingRigGUI:
     def _start(self, fn, *a):
         if self.worker and self.worker.is_alive():
             return
+        # A test needs exclusive access to both ports, so the monitor must
+        # release them first.  Remember to bring it back afterwards so the
+        # operator does not have to notice and re-tick it every run.
+        if self._mon_thread and self._mon_thread.is_alive():
+            self.log("Live monitor paused for the test; it will resume after.\n",
+                     "dim")
+            self._mon_resume_after_test = True
+            self._stop_monitor()
         self.cancel.clear()
         self._busy(True)
         self.worker = threading.Thread(target=fn, args=a, daemon=True)
@@ -589,11 +996,144 @@ class TimingRigGUI:
                 if kind == "log":
                     text, tag = payload
                     self.log(text, tag)
+                elif kind == "mon":
+                    name, text, tag = payload
+                    self._log_write(name, text, tag)
                 elif kind == "done":
                     self._busy(False)
+                    if self._mon_resume_after_test:
+                        self._mon_resume_after_test = False
+                        self.monitor_on.set(True)
+                        self._start_monitor()
         except queue.Empty:
             pass
         self.root.after(100, self._drain)
+
+    # ── Raw-serial side panel ──────────────────────────────────────────
+    @staticmethod
+    def _mon_tag(line):
+        """Colour for a raw serial line. Shared so the live monitor and the
+        during-test sink highlight the same things."""
+        if any(k in line for k in ("FATAL", "Guru", "panic", "rst:",
+                                   "assert", "Backtrace")):
+            return "bad"
+        if any(k in line for k in ("timed out", "WARN", "blocked")):
+            return "warn"
+        return "dim"
+
+    def _mon_sink(self, name):
+        """Callback that pushes one device's serial lines into the log panel.
+
+        Given to JsonLink during tests so the panels keep filling while the
+        monitor is paused.  Everything lands in the same _mon_lines buffers, so
+        Save Logs produces one continuous record of the session rather than
+        only the gaps between tests.
+        """
+        def sink(line):
+            stamp = time.strftime("%H:%M:%S")
+            rec = f"{stamp} [{name}] {line}"
+            buf = self._mon_lines.setdefault(name, [])
+            buf.append(rec)
+            if len(buf) > self._MON_MAX_LINES:
+                del buf[:len(buf) - self._MON_MAX_LINES]
+            self.emit_mon(name, rec + "\n", self._mon_tag(line))
+        return sink
+
+    def emit_mon_status(self, name, text, tag=None):
+        """Monitor connection status — shown in the MAIN pane as well.
+
+        Status was previously sent only to the log panel, so "port unavailable"
+        was invisible whenever that window happened to be closed: the operator
+        saw an empty pane and no reason for it.  The most important message
+        must not live in the window you might not have open.
+        """
+        self.emit(text, tag)
+        self.q.put(("mon", (name, text, tag)))
+
+    def emit_mon(self, name, text, tag=None):
+        """Queue a raw serial line for the log panel (thread-safe)."""
+        self.q.put(("mon", (name, text, tag)))
+
+    def open_log_panel(self):
+        """Two stacked raw-serial panes in a separate window.
+
+        Separate from the results pane because the monitor runs for hours and
+        would otherwise bury the test output — which is the part that gets
+        saved and shared.  Stacked rather than side-by-side so long firmware
+        lines stay readable without wrapping.
+        """
+        if self._log_win is not None and tk.Toplevel.winfo_exists(self._log_win):
+            self._log_win.lift()
+            self._log_win.focus_force()
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Raw serial — FPVRaceOne / emulator")
+        win.geometry("980x760")
+        self._log_win = win
+        self._log_text = {}
+        self._log_follow = {}
+
+        for name, title in (("DUT", "FPVRaceOne (device under test)"),
+                            ("EMU", "RX5808 emulator")):
+            frame = ttk.LabelFrame(win, text=title, padding=4)
+            frame.pack(fill="both", expand=True, padx=6, pady=(6, 3))
+
+            bar = ttk.Frame(frame)
+            bar.pack(fill="x")
+            follow = tk.BooleanVar(value=True)
+            self._log_follow[name] = follow
+            ttk.Checkbutton(bar, text="Follow", variable=follow).pack(side="left")
+            ttk.Button(bar, text="Clear",
+                       command=lambda n=name: self._log_clear(n)).pack(side="left", padx=4)
+            ttk.Label(bar, text="(raw, unfiltered)", foreground="#666",
+                      font=("", 8)).pack(side="left", padx=6)
+
+            txt = scrolledtext.ScrolledText(frame, wrap="none", height=18,
+                                            font=("Consolas", 9))
+            txt.pack(fill="both", expand=True)
+            txt.tag_config("bad", foreground="#b00020")
+            txt.tag_config("warn", foreground="#b06f00")
+            txt.tag_config("dim", foreground="#333333")
+            self._log_text[name] = txt
+
+        # Backfill whatever the monitor already captured, so opening the panel
+        # mid-session shows history instead of starting blank.
+        for name in ("DUT", "EMU"):
+            for line in self._mon_lines.get(name, [])[-2000:]:
+                self._log_write(name, line + "\n", None, backfill=True)
+
+        win.protocol("WM_DELETE_WINDOW", self._close_log_panel)
+
+    def _close_log_panel(self):
+        # Buffers survive in _mon_lines, so closing loses nothing and Save Logs
+        # still works.
+        if self._log_win is not None:
+            try:
+                self._log_win.destroy()
+            except Exception:
+                pass
+        self._log_win = None
+        self._log_text = {}
+        self._log_follow = {}
+
+    def _log_clear(self, name):
+        txt = self._log_text.get(name)
+        if txt:
+            txt.delete("1.0", "end")
+
+    def _log_write(self, name, text, tag, backfill=False):
+        txt = self._log_text.get(name)
+        if txt is None:
+            return                    # panel closed; _mon_lines still has it
+        txt.insert("end", text, tag or "")
+        # Bound the widget independently of the memory buffer — Tk slows badly
+        # once a text widget holds tens of thousands of lines.
+        if not backfill and int(txt.index("end-1c").split(".")[0]) > 5000:
+            txt.delete("1.0", "1000.0")
+        follow = self._log_follow.get(name)
+        if follow is None or follow.get():
+            txt.see("end")
 
     def emit(self, text, tag=None):
         self.q.put(("log", (text, tag)))
@@ -894,15 +1434,48 @@ class TimingRigGUI:
             self.emit(f"    CAUSE FOUND — the firmware rebooted ITSELF on low "
                       f"heap, this is not a crash:\n      {fatal[-1].strip()}\n",
                       "bad")
+            # WHICH threshold fired matters more than the fact one did.  Free
+            # heap low means too much is allocated; maxBlk low with free heap
+            # healthy means FRAGMENTATION — the memory exists but not in one
+            # piece.  They need completely different fixes, and the message
+            # above does not distinguish them.
+            fm = re.search(r"free=(\d+) maxBlk=(\d+)", fatal[-1])
+            if fm:
+                f_free, f_blk = int(fm.group(1)), int(fm.group(2))
+                if f_blk < 8000 and f_free >= 20000:
+                    self.emit(f"      FRAGMENTATION, not exhaustion: free heap "
+                              f"was {f_free} (healthy, floor is 20000) but the "
+                              f"largest\n      contiguous block was only "
+                              f"{f_blk} (floor 8000). The memory was there — "
+                              f"just not in one piece.\n      Fix repeated "
+                              f"large alloc/free churn, not total usage.\n",
+                              "bad")
+                elif f_free < 20000:
+                    self.emit(f"      EXHAUSTION: free heap {f_free} fell below "
+                              f"the 20000 floor. Something is holding too much, "
+                              f"not merely\n      fragmenting it.\n", "bad")
         elif warns:
             self.emit(f"    Heap warnings seen before the restart "
                       f"({len(warns)}x). Low heap is the likely cause:\n"
                       f"      {warns[-1].strip()}\n", "bad")
         if heaps:
-            self.emit(f"    Heap trail (last {min(4, len(heaps))} samples, "
-                      f"reboot triggers below 20000 free or 8000 maxBlk):\n",
-                      "dim")
-            for l in heaps[-4:]:
+            # Keep only the LAST boot's samples.  A log spanning restarts holds
+            # several epochs, and simply taking the tail interleaves them —
+            # producing a "trail" whose timestamps go backwards and whose trend
+            # is meaningless.  Walk back from the end until the clock stops
+            # increasing; that is the boot the reboot actually happened in.
+            epoch, prev = [], None
+            for l in reversed(heaps):
+                m = re.match(r"\s*\[(\d+)\]", l)
+                t = int(m.group(1)) if m else None
+                if prev is not None and t is not None and t > prev:
+                    break                      # crossed into an earlier boot
+                epoch.append(l)
+                prev = t
+            epoch.reverse()
+            self.emit(f"    Heap trail — LAST BOOT ONLY ({len(epoch)} sample(s); "
+                      f"reboot triggers below 20000 free OR 8000 maxBlk):\n", "dim")
+            for l in epoch[-6:]:
                 self.emit(f"      {l.strip()}\n", "dim")
 
         idx = None
@@ -1255,7 +1828,7 @@ class TimingRigGUI:
             emu = self._open_emu(emu_p)
             if emu is None:
                 return
-            dut = JsonLink(dut_p, name="dut")
+            dut = JsonLink(dut_p, name="dut", on_line=self._mon_sink("DUT"))
 
             dcfg = read_device_config(dut)
             enter = dcfg.get("enterRssi") if dcfg else None
@@ -1322,7 +1895,7 @@ class TimingRigGUI:
             emu = self._open_emu(emu_p)
             if emu is None:
                 return
-            dut = JsonLink(dut_p, name="dut")
+            dut = JsonLink(dut_p, name="dut", on_line=self._mon_sink("DUT"))
 
             points = measure_transfer(emu, dut)
             usable = [(d, v) for d, v in points if v is not None]
@@ -1424,7 +1997,8 @@ class TimingRigGUI:
             # Capture the device's DEBUG output for this run.  When detection
             # under-performs, the JSON stream shows only an absence of laps —
             # the firmware's own trace is what says WHY.
-            dut = JsonLink(dut_p, name="dut", keep_log=True)
+            dut = JsonLink(dut_p, name="dut", keep_log=True,
+                             on_line=self._mon_sink("DUT"))
 
             ok, restore = self._preflight(dut, cfg["interval"], cfg.get("count"))
             if not ok:
@@ -1634,7 +2208,8 @@ class TimingRigGUI:
             emu = self._open_emu(emu_p)
             if emu is None:
                 return
-            dut = JsonLink(dut_p, name="dut", keep_log=True)
+            dut = JsonLink(dut_p, name="dut", keep_log=True,
+                             on_line=self._mon_sink("DUT"))
 
             ok, restore = self._preflight(dut, cfg["interval"], cfg.get("count"))
             if not ok:

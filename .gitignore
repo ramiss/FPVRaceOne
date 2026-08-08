@@ -101,3 +101,4 @@ tools/apply_frontend_defaults.html
 /.claude
 /PCB
 /.tmp.driveupload
+/tools/timing-harness/logs

@@ -1,0 +1,30 @@
+{
+  "ports": {
+    "dut": "98:A3:16:8F:81:8C",
+    "emu": "0001"
+  },
+  "settings": {
+    "burst_interval": "3.0",
+    "burst_spread": "10",
+    "load_mode": "burst",
+    "load_nodes": "2,4,6,5,3,1,7",
+    "load_on": true,
+    "load_rate": "2.0",
+    "load_srcs": "",
+    "master_ip": "192.168.5.1",
+    "monitor_on": true,
+    "mute_voice": false,
+    "stop_delay": "5",
+    "target_rssi": false,
+    "vars.baseline": "40",
+    "vars.count": "30",
+    "vars.interval": "3000",
+    "vars.peak": "200",
+    "vars.sweep_count": "10",
+    "vars.sweep_require": "90",
+    "vars.sweep_res": "2",
+    "vars.sweep_start": "100",
+    "vars.width": "40",
+    "zero_minlap": false
+  }
+}
