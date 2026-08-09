@@ -59,6 +59,15 @@ class CpuMonitor {
         char     name[configMAX_TASK_NAME_LEN];
         uint8_t  percent;      // 0-100, integer
         uint32_t deltaRuntime;
+        // Smallest free stack this task has EVER had, in bytes.  Free, because
+        // uxTaskGetSystemState() below already fills usStackHighWaterMark on
+        // every call and the value was simply being discarded.
+        //
+        // Note the unit: ESP-IDF's FreeRTOS returns BYTES here, not words as
+        // the upstream FreeRTOS documentation says (see the comment on
+        // uxTaskGetStackHighWaterMark in freertos/task.h).  Getting that
+        // backwards would overstate headroom 4x.
+        uint16_t stackFreeBytes;
     };
 
     // Last completed measurement window.  Published whole, so a reader never
@@ -69,6 +78,21 @@ class CpuMonitor {
         uint8_t  idlePercent = 0;
         uint8_t  busyPercent = 0;
         bool     valid       = false;
+        // Worst stack headroom across EVERY task in the system, not just the
+        // CPUMON_TOP_TASKS busiest.  A task can be nearly idle and still be the
+        // one about to overflow — OTA is exactly that shape — so ranking by CPU
+        // would hide the task that matters most.
+        uint16_t minStackFreeBytes = 0xFFFF;
+        char     minStackTask[configMAX_TASK_NAME_LEN] = {0};
+
+        // The three tasks whose stacks are ours to size, captured by name during
+        // the full scan.  They are NOT read out of top[] because that array holds
+        // only the CPUMON_TOP_TASKS busiest — async_tcp drops out of it whenever
+        // the web UI is idle, which is precisely when you'd misread its absence
+        // as zero headroom.  0 means "task not found this window".
+        uint16_t stackLoopTask     = 0;   // Arduino loop() — runs the 997 Hz sampler
+        uint16_t stackParallelTask = 0;   // blocking network I/O; worst case is OTA
+        uint16_t stackAsyncTcp     = 0;   // every web handler runs here
     };
 
     // Singleton — mirrors the DebugLogger pattern already used in lib/DEBUG.
@@ -98,9 +122,15 @@ class CpuMonitor {
         Snapshot s;
         s.taskCount = sample(s.top, CPUMON_TOP_TASKS, &s.idlePercent);
         if (s.taskCount > 0) {
-            s.busyPercent = busyPercent(s.idlePercent);
-            s.valid       = true;
-            _published    = s;
+            s.busyPercent       = busyPercent(s.idlePercent);
+            s.minStackFreeBytes = _minStackBytes;
+            strncpy(s.minStackTask, _minStackName, configMAX_TASK_NAME_LEN - 1);
+            s.minStackTask[configMAX_TASK_NAME_LEN - 1] = '\0';
+            s.stackLoopTask     = _stackLoop;
+            s.stackParallelTask = _stackParallel;
+            s.stackAsyncTcp     = _stackAsyncTcp;
+            s.valid             = true;
+            _published          = s;
         }
     }
 
@@ -138,7 +168,31 @@ class CpuMonitor {
         uint8_t written = 0;
         uint32_t idleDelta = 0;
 
+        // Recomputed fresh each window rather than accumulated, because
+        // usStackHighWaterMark is ALREADY a per-task lifetime minimum — the
+        // min across tasks of a set of lifetime minima is itself the lifetime
+        // worst.  No state to carry.
+        _minStackBytes   = 0xFFFF;
+        _minStackName[0] = '\0';
+        _stackLoop = _stackParallel = _stackAsyncTcp = 0;
+
         for (UBaseType_t i = 0; i < curCount; i++) {
+            // Track stack headroom for EVERY task, before the IDLE filter and
+            // before the top-N cutoff.  The task closest to overflowing is not
+            // necessarily a busy one.
+            const uint16_t freeBytes = (uint16_t)cur[i].usStackHighWaterMark;
+            if (freeBytes < _minStackBytes) {
+                _minStackBytes = freeBytes;
+                strncpy(_minStackName, cur[i].pcTaskName, configMAX_TASK_NAME_LEN - 1);
+                _minStackName[configMAX_TASK_NAME_LEN - 1] = '\0';
+            }
+            // Name match, not handle: these three are created by the Arduino
+            // core, by main.cpp and by AsyncTCP respectively, and we hold a
+            // handle for none of them here.
+            if      (strcmp(cur[i].pcTaskName, "loopTask")     == 0) _stackLoop     = freeBytes;
+            else if (strcmp(cur[i].pcTaskName, "parallelTask") == 0) _stackParallel = freeBytes;
+            else if (strcmp(cur[i].pcTaskName, "async_tcp")    == 0) _stackAsyncTcp = freeBytes;
+
             // Match by task handle, not name — names are not unique (both
             // idle tasks are "IDLE") and handles are stable for a task's life.
             uint32_t prevRuntime = 0;
@@ -163,8 +217,9 @@ class CpuMonitor {
             if (written < maxOut) {
                 strncpy(out[written].name, cur[i].pcTaskName, configMAX_TASK_NAME_LEN - 1);
                 out[written].name[configMAX_TASK_NAME_LEN - 1] = '\0';
-                out[written].deltaRuntime = d;
-                out[written].percent      = (uint8_t)((uint64_t)d * 100ULL / totalDelta);
+                out[written].deltaRuntime   = d;
+                out[written].percent        = (uint8_t)((uint64_t)d * 100ULL / totalDelta);
+                out[written].stackFreeBytes = freeBytes;
                 written++;
             }
         }
@@ -215,6 +270,11 @@ class CpuMonitor {
     bool         _havePrev    = false;
     uint32_t     _windowStart = 0;
     Snapshot     _published;
+    uint16_t     _minStackBytes = 0xFFFF;
+    char         _minStackName[configMAX_TASK_NAME_LEN] = {0};
+    uint16_t     _stackLoop     = 0;
+    uint16_t     _stackParallel = 0;
+    uint16_t     _stackAsyncTcp = 0;
 };
 
 #endif  // CPU_MONITOR_ENABLED

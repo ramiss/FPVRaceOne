@@ -854,9 +854,18 @@ bool MultiNodeManager::getPrearmPhase() const {
     return true;
 }
 
+bool MultiNodeManager::directorBroadcastDue(uint32_t nowMs) {
+    if (!isMasterMode()) return false;
+    return (nowMs - _lastDirectorBroadcastMs) >= MIN_DIRECTOR_BROADCAST_INTERVAL_MS;
+}
+
 void MultiNodeManager::queueDirectorStateBroadcast(const String& payload) {
     if (!isMasterMode()) return;
+    // Assigning into the retained buffer rather than a fresh String: capacity
+    // is reused when it is already large enough, so the steady state does no
+    // allocation at all.
     _directorStatePayload          = payload;     // overwrites any pending payload — newest wins
+    _directorStatePayloadValid     = true;
     _directorStateBroadcastPending = true;
 }
 
@@ -1038,7 +1047,7 @@ void MultiNodeManager::_runRecruitJob(bool force) {
 }
 
 void MultiNodeManager::_broadcastDirectorState() {
-    if (_directorStatePayload.isEmpty()) return;
+    if (!_directorStatePayloadValid || _directorStatePayload.isEmpty()) return;
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
         HTTPClient http;
@@ -1060,7 +1069,11 @@ void MultiNodeManager::_broadcastDirectorState() {
         }
         vTaskDelay(1);
     }
-    _directorStatePayload = String();
+    // Empty WITHOUT releasing the buffer — see the note on _directorStatePayload
+    // in multinode.h.  `= String()` here used to hand back ~17 KB after every
+    // fanout, guaranteeing the next one had to re-find a contiguous block.
+    _directorStatePayload      = "";
+    _directorStatePayloadValid = false;
 }
 
 void MultiNodeManager::_broadcastRaceStop() {

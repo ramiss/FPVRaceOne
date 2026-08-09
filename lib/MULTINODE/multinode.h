@@ -136,6 +136,18 @@ public:
     // on Core 0 so the AsyncWebServer threads stay free.
     void   queueDirectorStateBroadcast(const String& payload);
 
+    // True when the HTTP fanout is actually due.  Callers use this to avoid
+    // handing over a payload that will only be overwritten before it ships.
+    //
+    // The SSE build runs every MN_STATE_BUILD_INTERVAL_MS (250 ms) but the
+    // fanout is throttled to MIN_DIRECTOR_BROADCAST_INTERVAL_MS (2000 ms), so
+    // seven of every eight payloads handed to queueDirectorStateBroadcast() were
+    // deep-copied — up to ~17 KB each — and then discarded unread.  Four
+    // multi-kilobyte malloc/copy/free cycles per second, forever, is a
+    // first-class heap fragmenter, and fragmentation (not total usage) is what
+    // actually crashes this device.
+    bool   directorBroadcastDue(uint32_t nowMs);
+
     // Pre-arm phase tracking — exposed to clients via the director-state payload
     // so the Race View banner can prompt "Arm your quad" during the countdown.
     void   setPrearmPhase(bool active);
@@ -236,7 +248,20 @@ private:
     volatile bool     _directorStateBroadcastPending = false;
     uint32_t          _lastDirectorBroadcastMs       = 0;
     static constexpr uint32_t MIN_DIRECTOR_BROADCAST_INTERVAL_MS = 2000;
+    // Emptied with `= ""` after each fanout, never with `= String()`.  The
+    // former keeps the allocated capacity (Arduino's String::copy calls
+    // reserve(0), which returns early when a buffer already exists); the latter
+    // hands ~17 KB back to the allocator so the next assignment has to find a
+    // contiguous 17 KB block all over again.  Same pattern, and same reasoning,
+    // as _mnPayloadBuf in fpv_webserver.h.
+    //
+    // Cost of keeping it: one payload's worth of capacity resident on the
+    // master for the life of the boot.  Worth it — this device fails on
+    // fragmentation, not on total usage.
     String            _directorStatePayload;
+    // isEmpty() can no longer serve as the "have I got something to send?" test,
+    // because an emptied-but-retained buffer is also empty.
+    bool              _directorStatePayloadValid = false;
 
     // Pre-arm phase: master entered the countdown but the race hasn't actually started yet.
     // Auto-clears after a timeout so a missed race/start (e.g. director cancelled) doesn't

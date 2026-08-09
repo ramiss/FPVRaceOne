@@ -110,7 +110,18 @@ struct TimingStats {
 };
 #endif
 
-#define LAPTIMER_LAP_HISTORY 10
+// Laps retained in RAM for page-reload restore.
+//
+// Was 10, which was far below a real race.  /api/laps/current rebuilds the
+// browser's lap table from this ring after a refresh, and the browser numbers
+// the restored laps by their position — so anything the ring has dropped
+// silently renumbers every lap that survives.  50 matches the per-node cap the
+// master already applies in multinode.cpp, so both modes now truncate at the
+// same place.
+//
+// Cost is 160 bytes of static RAM (50 vs 10 uint32) against the ~25 KB the
+// calibration buffers just returned.
+#define LAPTIMER_LAP_HISTORY 50
 #define LAPTIMER_RSSI_HISTORY 100
 #define LAPTIMER_CALIBRATION_HISTORY 5000  // Increased buffer for longer recordings
 
@@ -121,8 +132,26 @@ class LapTimer {
     void stop();
     bool     isRunning()           const;
     uint32_t getElapsedMs()        const;  // ms since race start (0 if stopped)
-    uint8_t  getLapCount()         const;  // laps completed so far
-    uint32_t getLapTimeAt(uint8_t index) const;  // lap time at 0-based index
+    uint8_t  getLapCount()         const;  // ring write position — NOT a lap total, see getLapTotal()
+    uint32_t getLapTimeAt(uint8_t index) const;  // lap time at 0-based RING index
+
+    // Monotonic count of laps recorded since the last start()/clearLapData().
+    // Unlike getLapCount(), this does NOT wrap.
+    //
+    // getLapCount() returns the ring's write cursor, which wraps modulo
+    // LAPTIMER_LAP_HISTORY.  /api/laps/current used it as a lap count, so after
+    // exactly LAPTIMER_LAP_HISTORY laps it read 0 and a page reload restored an
+    // EMPTY lap table; past that it restored the wrong laps under the wrong
+    // numbers.  Anything that means "how many laps has this pilot done" must
+    // use this instead.
+    uint16_t getLapTotal() const;
+
+    // Chronological access to the laps still held, oldest first.
+    // getRetainedLapCount() is min(getLapTotal(), LAPTIMER_LAP_HISTORY).
+    // getRetainedLap() writes the lap's TRUE lap number (which is not the index
+    // once the ring has wrapped) and its time.  Returns false if out of range.
+    uint16_t getRetainedLapCount() const;
+    bool     getRetainedLap(uint16_t index, uint16_t* lapNumber, uint32_t* lapTimeMs) const;
     void handleLapTimerUpdate(uint32_t currentTimeMs);
 
 #if RSSI_LOGGING_ENABLED
@@ -142,8 +171,12 @@ class LapTimer {
     void clearLapData();
     
     // Calibration wizard methods
-    void startCalibrationWizard();
-    void stopCalibrationWizard();
+    // Returns the number of samples actually granted, or 0 if even the smallest
+    // tier could not be allocated.  Callers should surface the granted capacity
+    // to the UI — a shorter recording is a normal outcome, not an error.
+    uint16_t startCalibrationWizard();
+    void     stopCalibrationWizard();
+    uint16_t getCalibrationCapacity() const { return calibrationCapacity; }
     uint16_t getCalibrationRssiCount();
     uint8_t getCalibrationRssi(uint16_t index);
     uint32_t getCalibrationTimestamp(uint16_t index);
@@ -158,7 +191,8 @@ class LapTimer {
     boolean lapCountWraparound;
     uint32_t raceStartTimeMs;
     uint32_t startTimeMs;
-    uint8_t lapCount;
+    uint8_t lapCount;      // ring write cursor, wraps at LAPTIMER_LAP_HISTORY
+    uint16_t lapTotal;     // monotonic laps this race; never wraps
     uint8_t rssiCount;
     uint32_t lapTimes[LAPTIMER_LAP_HISTORY];
     uint8_t rssi[LAPTIMER_RSSI_HISTORY];
@@ -219,10 +253,39 @@ public:
 private:
 #endif
     
-    // Calibration wizard data
+    // ── Calibration wizard data ──────────────────────────────────────────
+    // HEAP, not static, and only while the wizard is actually running.
+    //
+    // These were fixed arrays of LAPTIMER_CALIBRATION_HISTORY (5000) entries:
+    // 5,000 B + 20,000 B = 25,000 bytes of .bss, held for the entire life of
+    // every boot, on every device, during every race — for a stationary bench
+    // feature.  Measured 2026-08-08: the LapTimer instance was the single
+    // largest static symbol in the whole firmware at 25,336 B, a third of all
+    // static DRAM, against a steady-state free heap of ~152 KB.
+    //
+    // Allocated by startCalibrationWizard(), freed by stopCalibrationWizard().
+    // Every access must tolerate nullptr — the wizard can be off, and the
+    // allocation can be refused.
+    // Concurrency, which the static arrays never needed:
+    //   - the sampler WRITES from loopTask (priority 1)
+    //   - the web handlers ALLOCATE and FREE from async_tcp (priority 10)
+    // async_tcp can preempt loopTask mid-write, so freeing the buffer while the
+    // sampler sits between its bounds check and its store would be a
+    // use-after-free.  A spinlock around the store and around the pointer swap
+    // closes that window.  Both critical sections are a handful of
+    // instructions, and the sampler's only runs in wizard mode, so the 997 Hz
+    // race path is untouched.
+    //
+    // The /calibration/data READER needs no guard: it runs on async_tcp, the
+    // same task that does the freeing, and AsyncWebServer runs handlers
+    // sequentially on that one task.
+    portMUX_TYPE calibrationMux = portMUX_INITIALIZER_UNLOCKED;
+    void _freeCalibrationBuffers();
+
     uint16_t calibrationRssiCount;
-    uint8_t calibrationRssi[LAPTIMER_CALIBRATION_HISTORY];
-    uint32_t calibrationTimestamps[LAPTIMER_CALIBRATION_HISTORY];
+    uint16_t calibrationCapacity = 0;   // granted samples; 0 = not allocated
+    uint8_t  *calibrationRssi       = nullptr;
+    uint32_t *calibrationTimestamps = nullptr;
     uint32_t lastCalibrationSampleMs;  // Track when last sample was taken
 
     void lapPeakCapture();

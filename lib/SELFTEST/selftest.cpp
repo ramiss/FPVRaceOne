@@ -385,6 +385,26 @@ TestResult SelfTest::testCpuLoad() {
         if (i) result.details += ", ";
         result.details += String(s.top[i].name) + " " + String(s.top[i].percent) + "%";
     }
+
+    // Stack headroom.  Collected free — uxTaskGetSystemState() already fills
+    // usStackHighWaterMark and cpumon used to discard it.  Values are BYTES and
+    // are lifetime minima, so they only ever fall.
+    if (s.minStackFreeBytes != 0xFFFF) {
+        result.details += String(" | stack min ") + s.minStackTask + " "
+                        + String(s.minStackFreeBytes) + "B";
+        if (s.stackLoopTask || s.stackParallelTask || s.stackAsyncTcp) {
+            result.details += " (loop " + String(s.stackLoopTask)
+                            + ", parallel " + String(s.stackParallelTask)
+                            + ", asyncTcp " + String(s.stackAsyncTcp) + ")";
+        }
+        // Below 1 KB free anywhere is a genuine risk: a stack overflow on this
+        // chip is an immediate crash with no useful diagnostic.  Fail the test
+        // rather than let it pass quietly at 800 bytes.
+        if (s.minStackFreeBytes < 1024) {
+            result.passed = false;
+            result.details += " — LOW";
+        }
+    }
 #else
     result.passed = true;
     result.details = "Not compiled in (CPU_MONITOR_ENABLED=0)";

@@ -171,6 +171,26 @@ static void parallelTask(void *pvArgs) {
             worstCallThisWindow.ms   = 0;
             worstCallThisWindow.name = nullptr;
             worstTickGapThisWindow   = 0;
+
+#if CPU_MONITOR_ENABLED
+            // Stack headroom, on the same 10 s cadence.  This costs nothing to
+            // collect: uxTaskGetSystemState() already fills usStackHighWaterMark
+            // for every task and cpumon was discarding it.
+            //
+            // Read it as "worst free bytes, ever, on the tightest task".  Unlike
+            // heap figures it never recovers — it is a high-water mark — so a
+            // number that stops falling is a task that has found its true depth.
+            // Under ~2000 bytes on any task, stop shrinking stacks: an overflow
+            // here is an immediate crash with no warning and no diagnostic.
+            const CpuMonitor::Snapshot& cs = CpuMonitor::getInstance().getLast();
+            if (cs.valid && cs.minStackFreeBytes != 0xFFFF) {
+                DEBUG("[STACK] tightest: %s=%u B free | loop=%u parallel=%u asyncTcp=%u\n",
+                      cs.minStackTask, (unsigned)cs.minStackFreeBytes,
+                      (unsigned)cs.stackLoopTask,
+                      (unsigned)cs.stackParallelTask,
+                      (unsigned)cs.stackAsyncTcp);
+            }
+#endif
         }
 
         // Let other tasks run (WiFi/AsyncWebServer/etc.)

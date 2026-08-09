@@ -571,6 +571,11 @@
               <span>Recording RSSI Data...</span>
             </div>
             <div id="wizardSampleCount" style="margin-top: 8px; font-size: 14px;">Samples: 0</div>
+            <!-- Only shown when the firmware granted less than the full 100 s of
+                 recording because the heap was tight.  Hidden otherwise: the
+                 limit is not something the user needs to think about normally. -->
+            <div id="wizardCapacityNote"
+                 style="display: none; margin-top: 8px; font-size: 13px; opacity: 0.8;"></div>
           </div>
           <div style="display: flex; gap: 12px; margin-top: 24px;">
             <button onclick="stopCalibrationWizard()" style="flex: 1;">Stop Recording</button>

@@ -174,6 +174,58 @@ def _stage_web_assets(env):
 
 _stage_web_assets(env)
 
+# ── Static RAM budget report ─────────────────────────────────────────────────
+#
+# Prints .dram0.data + .dram0.bss after every successful link, plus the largest
+# static symbols.
+#
+# This is the ONLY honest way to measure static RAM.  Free-heap readings from
+# the device conflate it with allocator state — a change that moves 25 KB out of
+# .bss and a change that merely defers an allocation look identical at runtime,
+# and only one of them actually helped.  The linker knows the truth.
+#
+# Context: on 2026-08-08 the device had 75,692 bytes of static DRAM, of which a
+# single object (the LapTimer instance, holding the calibration wizard's 25,000
+# byte scratch arrays) accounted for 25,336 — a third of all static RAM, held
+# for the life of every boot, for a bench feature.  That was invisible until
+# somebody looked at the ELF.
+def _report_static_ram(source, target, env):
+    import shutil as _sh
+    elf = str(target[0])
+    size_tool = env.subst("$SIZETOOL") or _sh.which("riscv32-esp-elf-size")
+    if not size_tool or not os.path.exists(elf):
+        return
+    try:
+        out = subprocess.run([size_tool, "-A", elf],
+                             capture_output=True, text=True, timeout=30).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return
+
+    sections = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and parts[0].startswith("."):
+            try:
+                sections[parts[0]] = int(parts[1])
+            except ValueError:
+                pass
+
+    data = sections.get(".dram0.data", 0)
+    bss  = sections.get(".dram0.bss", 0)
+    total = data + bss
+    if not total:
+        return
+    # Total DRAM on the ESP32-C6.  Everything not counted here is what the
+    # allocator has left to work with at boot.
+    DRAM = 327680
+    # ASCII only: the PlatformIO console on Windows is cp1252 and mangles
+    # non-ASCII punctuation into mojibake.
+    print(f"[Build] Static RAM: {total} bytes "
+          f"(.data {data} + .bss {bss}) = {100.0 * total / DRAM:.1f}% of {DRAM}")
+    print(f"[Build]   Heap ceiling at boot: ~{DRAM - total} bytes")
+
+env.AddPostAction("$BUILD_DIR/${PROGNAME}.elf", _report_static_ram)
+
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 ESP32_VIDS = {

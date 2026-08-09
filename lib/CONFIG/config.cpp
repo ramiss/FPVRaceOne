@@ -196,7 +196,7 @@ void Config::toJson(AsyncResponseStream& destination) {
     serializeJson(config, destination);
 }
 
-void Config::toJsonString(char* buf) {
+void Config::toJsonString(char* buf, size_t bufSize) {
     DynamicJsonDocument config(2048);
     config["band"] = conf.bandIndex;
     config["chan"] = conf.channelIndex;
@@ -250,7 +250,7 @@ void Config::toJsonString(char* buf) {
     config["wifiExtAntenna"] = conf.wifiExtAntenna;
     config["wifiTxPower"] = conf.wifiTxPower;
 
-    serializeJsonPretty(config, buf, 2048);
+    serializeJsonPretty(config, buf, bufSize);
 }
 
 void Config::fromJson(JsonObject source) {

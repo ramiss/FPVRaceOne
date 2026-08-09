@@ -544,6 +544,9 @@ void Webserver::pushMultiNodeState() {
 // Build and dispatch at most one director-state payload per interval.  Called
 // from handleWebUpdate(), so it runs on parallelTask and never concurrently
 // with itself.
+// Build and dispatch at most one director-state payload per interval.  Called
+// from handleWebUpdate(), so it runs on parallelTask and never concurrently
+// with itself.
 void Webserver::_flushMultiNodeState(uint32_t currentTimeMs) {
     if (!_mnStateDirty) return;
     if (!multiNode || !multiNode->isMasterMode()) {
@@ -564,7 +567,34 @@ void Webserver::_flushMultiNodeState(uint32_t currentTimeMs) {
     _buildDirectorStatePayloadInto(_mnPayloadBuf, multiNode, timer, conf);
     String& payload = _mnPayloadBuf;
     if (servicesStarted) events.send(payload.c_str(), "multiNodeState");
-    multiNode->queueDirectorStateBroadcast(payload);
+
+    // Only hand the payload over when the HTTP fanout can actually use it.
+    // This build runs every 250 ms; the fanout ships every 2000 ms.  Queuing
+    // unconditionally meant seven of every eight handovers deep-copied up to
+    // ~17 KB into MultiNodeManager and then had it overwritten before it was
+    // ever read — four multi-kilobyte malloc/copy/free cycles per second whose
+    // only effect was to fragment the heap.
+    //
+    // No added latency: multiNodeManager.process() runs later in this same
+    // parallelTask tick (src/main.cpp), so a payload queued here still ships on
+    // this pass.
+    if (multiNode->directorBroadcastDue(currentTimeMs)) {
+        multiNode->queueDirectorStateBroadcast(payload);
+    } else {
+        // NOT due yet — stay dirty so a later tick retries.  Without this, a
+        // state change that lands inside the fanout's cooldown and is followed
+        // by no further changes would be sent over SSE but never reach the
+        // client nodes over HTTP: the dirty flag was cleared above, so nothing
+        // would ever rebuild it.
+        //
+        // Cost: until the fanout window opens (<=2 s) the payload is rebuilt and
+        // re-sent over SSE each 250 ms tick even if nothing changed — at most
+        // ~7 redundant builds per change, and none at all during an active race,
+        // where pushMultiNodeState() sets the flag continuously anyway.  A
+        // split dirty/pending flag pair would remove those; measured as not
+        // worth the extra state on this path.
+        _mnStateDirty = true;
+    }
 }
 
 bool Webserver::isConnected() {
@@ -598,16 +628,22 @@ void Webserver::startAP() {
     WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
 
     DEBUG("Starting WiFi AP: %s with password: %s on ch%d\n", wifi_ap_ssid.c_str(), wifi_ap_password, apChannel);
-    // All modes use the same 9-slot AP cap.  Master needs 7 client STAs + 1
-    // director phone + 1 buffer.  Single and client modes don't need that
-    // many normally, but a unit that was just demoted from master can have
-    // up to 7 stale ex-clients still trying to reattach at their cached
-    // SSID — capping single at 5 made it impossible for the director's
-    // phone to win a slot against them.  9 across the board keeps the
-    // recruit-job's spare slot intact in single mode too.  LwIP's 16-slot
-    // TCP ceiling has plenty of headroom over 9 WiFi stations (idle
-    // stations don't consume TCP slots).
-    uint8_t maxConn = 9;
+    // All modes use the same AP cap.  Master needs 7 client STAs + 1 director
+    // phone = 8.  Single and client modes don't need that many normally, but a
+    // unit just demoted from master can have up to 7 stale ex-clients still
+    // trying to reattach at their cached SSID — capping single at 5 made it
+    // impossible for the director's phone to win a slot against them.  A
+    // uniform cap keeps the recruit-job's slot intact in single mode too.
+    //
+    // 8, not 9.  The DHCP server cannot serve more: the prebuilt framework sets
+    // CONFIG_LWIP_DHCPS_MAX_STATION_NUM=8, and since the Arduino framework ships
+    // precompiled lwIP, a -D flag cannot raise it.  A 9th station therefore
+    // associates at the WiFi layer and then never receives a lease — presenting
+    // as a device that "connects" but cannot reach anything, while retrying.
+    // The 9th slot was never usable, so this removes a failure mode rather than
+    // a capability.  (LwIP's separate 16-slot TCP ceiling still has headroom;
+    // idle stations don't consume TCP slots.)
+    uint8_t maxConn = 8;
     WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, apChannel, 0, maxConn);
 
     // Master: embed a 6-byte vendor IE in every beacon and probe-response so
@@ -919,11 +955,12 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
                 // Client AP stays on 192.168.4.1 (pilots use the same IP as always).
                 // Master uses 192.168.5.1, so there is no subnet conflict.
                 WiFi.softAPConfig(ipAddress, IPAddress(0, 0, 0, 0), netMsk);
-                // 9 slots matches the master / single cap so a client node
-                // that was previously a master with 7 attached pilots can
-                // still let the director's phone in alongside the legacy
-                // STA reconnection storm.
-                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, 0, 0, 9);
+                // 8 slots matches the master / single cap (see startAP) so a
+                // client node that was previously a master with 7 attached
+                // pilots can still let the director's phone in alongside the
+                // legacy STA reconnection storm.  8 is the DHCP server's hard
+                // ceiling — see the note in startAP for why 9 was unusable.
+                WiFi.softAP(wifi_ap_ssid.c_str(), wifi_ap_password, 0, 0, 8);
 
                 // Disable modem power save on both interfaces for AP+STA stability
                 esp_wifi_set_ps(WIFI_PS_NONE);
@@ -1333,10 +1370,15 @@ void Webserver::startServices() {
         request->send(200, "application/json", "{\"status\":\"resumed\"}");
     });
 
+    // Streamed, not built in stack buffers.  This handler used to declare
+    // char buf[1536] + char configBuf[512] = 2 KB of frame on the async_tcp
+    // task, and passed the 512-byte one to a serializer hard-coded to write up
+    // to 2048 — a silent stack overrun on every hit.  Streaming fixes the
+    // overrun AND removes 2 KB from the deepest web-handler frame, which is the
+    // opposite of what simply enlarging the buffer would have done.
     server.on("/status", [this](AsyncWebServerRequest *request) {
-        char buf[1536];
-        char configBuf[512];
-        conf->toJsonString(configBuf);
+        AsyncResponseStream *response = request->beginResponseStream("text/plain");
+        char buf[512];
         const char *format =
             "\
 Heap:\n\
@@ -1357,15 +1399,30 @@ Chip:\n\
 Network:\n\
 \tIP:\t%s\n\
 \tMAC:\t%s\n\
-EEPROM:\n\
-%s";
+EEPROM:\n";
 
         snprintf(buf, sizeof(buf), format,
                  ESP.getFreeHeap(), ESP.getMinFreeHeap(), ESP.getHeapSize(), ESP.getMaxAllocHeap(),
                  storage->getStorageType().c_str(), storage->getUsedBytes(), storage->getTotalBytes(), storage->getFreeBytes(),
                  ESP.getChipModel(), ESP.getChipRevision(), ESP.getChipCores(), ESP.getSdkVersion(), ESP.getFlashChipSize(), ESP.getFlashChipSpeed() / 1000000, getCpuFrequencyMhz(),
-                 WiFi.localIP().toString().c_str(), getStaMacString().c_str(), configBuf);
-        request->send(200, "text/plain", buf);
+                 WiFi.localIP().toString().c_str(), getStaMacString().c_str());
+        response->print(buf);
+
+        // The config JSON is ~1 KB pretty-printed and needs a 2 KB buffer.  Take
+        // it from the heap rather than the stack: this runs on async_tcp, the
+        // deepest web-handler stack in the system, and /status is a diagnostic
+        // endpoint that can afford a transient allocation far more easily than
+        // it can afford 2 KB of permanent frame depth.
+        char *cfgBuf = (char *)malloc(2048);
+        if (cfgBuf) {
+            conf->toJsonString(cfgBuf, 2048);
+            response->print(cfgBuf);
+            free(cfgBuf);
+        } else {
+            response->print("{\"error\":\"out of memory\"}");
+        }
+
+        request->send(response);
         led->on(200);
     });
 
@@ -1705,7 +1762,7 @@ EEPROM:\n\
     // On-demand config dump to serial (called when user opens Configuration tab)
     server.on("/api/debugconfig", HTTP_GET, [this](AsyncWebServerRequest *request) {
         char buf[2048];
-        conf->toJsonString(buf);
+        conf->toJsonString(buf, sizeof(buf));
         Serial.println("[DEBUGCONFIG]");
         Serial.println(buf);
         request->send(200, "text/plain", "printed to serial");
@@ -2024,16 +2081,21 @@ EEPROM:\n\
     
     // Debug log endpoint for serial monitor
     server.on("/api/debuglog", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        const auto& buffer = DebugLogger::getInstance().getBuffer();
+        // Oldest-first via entryAt(): the ring's physical order stops being
+        // chronological once it wraps, so iterating the container directly
+        // would hand the UI a log that jumps back in time mid-list.
+        DebugLogger& logger = DebugLogger::getInstance();
+        const uint16_t n = logger.entryCount();
         DynamicJsonDocument doc(8192);
         JsonArray logs = doc.createNestedArray("logs");
-        
-        for (const auto& entry : buffer) {
+
+        for (uint16_t i = 0; i < n; i++) {
+            const auto& entry = logger.entryAt(i);
             JsonObject log = logs.createNestedObject();
             log["timestamp"] = entry.timestamp;
             log["message"] = entry.message;
         }
-        
+
         String json;
         serializeJson(doc, json);
         request->send(200, "application/json", json);
@@ -2293,8 +2355,22 @@ EEPROM:\n\
 
     // Calibration wizard endpoints
     server.on("/calibration/start", HTTP_POST, [this](AsyncWebServerRequest *request) {
-        timer->startCalibrationWizard();
-        request->send(200, "application/json", "{\"status\": \"OK\"}");
+        // The recording buffers are allocated on demand and sized to what the
+        // heap can spare, so the granted capacity is reported back and the UI
+        // uses it instead of assuming a fixed maximum.  A shorter recording is
+        // a normal outcome; only a total refusal is an error.
+        const uint16_t granted = timer->startCalibrationWizard();
+        if (granted == 0) {
+            request->send(503, "application/json",
+                "{\"status\":\"ERROR\",\"error\":\"Not enough memory to start calibration. "
+                "Reboot the timer and try again.\"}");
+            return;
+        }
+        char resp[96];
+        snprintf(resp, sizeof(resp),
+                 "{\"status\":\"OK\",\"maxSamples\":%u,\"maxSeconds\":%u}",
+                 (unsigned)granted, (unsigned)(granted / 50));
+        request->send(200, "application/json", resp);
         led->on(200);
     });
 
@@ -2616,17 +2692,31 @@ EEPROM:\n\
 
     // /api/laps/current — returns in-progress lap data for page reload restore
     server.on("/api/laps/current", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        // 768 bytes: top-level obj(3) + array(10) + 10×obj(2) — gives ~50 bytes headroom
-        DynamicJsonDocument doc(768);
-        bool running   = timer ? timer->isRunning() : false;
-        uint8_t count  = timer ? timer->getLapCount() : 0;
+        // Iterate the RETAINED laps oldest-first, not the ring's write cursor.
+        //
+        // This used to loop `i < timer->getLapCount()` and emit `lapNumber = i`.
+        // getLapCount() is the ring write position, which wraps at
+        // LAPTIMER_LAP_HISTORY — so after exactly that many laps it returned 0
+        // and a page reload restored an EMPTY lap table, and past that it
+        // returned the wrong laps under the wrong numbers.  getLapTotal() is
+        // the real count and getRetainedLap() walks the ring in order.
+        DynamicJsonDocument doc(4096);
+        bool running     = timer ? timer->isRunning() : false;
+        uint16_t total   = timer ? timer->getLapTotal() : 0;
+        uint16_t held    = timer ? timer->getRetainedLapCount() : 0;
         doc["running"]  = running;
-        doc["lapCount"] = count;
+        doc["lapCount"] = total;
+        // True when the race outran the ring, so the client knows the restored
+        // list starts partway through rather than assuming it has everything.
+        doc["truncated"] = (held < total);
         JsonArray arr = doc.createNestedArray("laps");
-        for (uint8_t i = 0; i < count; i++) {
+        for (uint16_t i = 0; i < held; i++) {
+            uint16_t lapNumber = 0;
+            uint32_t lapTimeMs = 0;
+            if (!timer->getRetainedLap(i, &lapNumber, &lapTimeMs)) break;
             JsonObject lap = arr.createNestedObject();
-            lap["lapNumber"] = i;
-            lap["lapTimeMs"] = timer->getLapTimeAt(i);
+            lap["lapNumber"] = lapNumber;
+            lap["lapTimeMs"] = lapTimeMs;
         }
         String out; serializeJson(doc, out);
         request->send(200, "application/json", out);

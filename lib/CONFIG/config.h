@@ -244,7 +244,15 @@ class Config {
     void load();
     void write();
     void toJson(AsyncResponseStream& destination);
-    void toJsonString(char* buf);
+    // Serialize the whole config as pretty JSON into a caller-supplied buffer.
+    //
+    // bufSize is NOT optional and must be the real capacity of buf.  This used
+    // to be a single-argument call that assumed 2048 internally, and a caller
+    // at webserver.cpp passed a 512-byte stack array — a silent ~1 KB stack
+    // overrun on the AsyncWebServer task every time /status was hit.  Making
+    // the size explicit removes the whole class of mistake rather than the one
+    // instance.  Output is truncated (safely) if the buffer is too small.
+    void toJsonString(char* buf, size_t bufSize);
     void fromJson(JsonObject source);
     void handleEeprom(uint32_t currentTimeMs);
     

@@ -85,6 +85,7 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
 
     stop();
     lapCount = 0;
+    lapTotal = 0;
     lapCountWraparound = false;
     memset(lapTimes, 0, sizeof(lapTimes));
     memset(rssi, 0, sizeof(rssi));
@@ -138,6 +139,7 @@ void LapTimer::start() {
     medianFilter.setWindow(medianNFromSlider(conf ? conf->getV1Smoothing() : 5));
 
     lapCount = 0;
+    lapTotal = 0;
     lapCountWraparound = false;
     memset(lapTimes, 0, sizeof(lapTimes));
 
@@ -183,6 +185,33 @@ uint32_t LapTimer::getElapsedMs() const {
 }
 
 uint8_t LapTimer::getLapCount() const { return lapCount; }
+
+uint16_t LapTimer::getLapTotal() const { return lapTotal; }
+
+uint16_t LapTimer::getRetainedLapCount() const {
+    return (lapTotal < LAPTIMER_LAP_HISTORY) ? lapTotal : LAPTIMER_LAP_HISTORY;
+}
+
+// Oldest-first walk of the ring.
+//
+// lapCount is the NEXT slot to write, so the most recent lap sits one slot
+// behind it and the oldest retained lap sits `retained` slots behind that.
+// Once the ring has wrapped, a lap's position no longer equals its lap number,
+// which is exactly what broke the reload restore: the browser numbers restored
+// laps by position, so it renumbered every surviving lap.  Reporting the true
+// number here lets the caller keep them straight.
+bool LapTimer::getRetainedLap(uint16_t index, uint16_t* lapNumber, uint32_t* lapTimeMs) const {
+    const uint16_t retained = getRetainedLapCount();
+    if (index >= retained) return false;
+
+    const uint16_t slot = (uint16_t)((lapCount + LAPTIMER_LAP_HISTORY - retained + index)
+                                     % LAPTIMER_LAP_HISTORY);
+    if (lapTimeMs) *lapTimeMs = lapTimes[slot];
+    // Lap numbering is 0-based and lap 0 is the initial gate crossing (shown as
+    // "-" in the UI), so the oldest retained lap is numbered lapTotal-retained.
+    if (lapNumber) *lapNumber = (uint16_t)(lapTotal - retained + index);
+    return true;
+}
 
 uint32_t LapTimer::getLapTimeAt(uint8_t index) const {
     if (index >= LAPTIMER_LAP_HISTORY) return 0;
@@ -487,13 +516,21 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         }
 
         case CALIBRATION_WIZARD:
-            if (calibrationRssiCount < LAPTIMER_CALIBRATION_HISTORY &&
+            // Spinlock: the buffers are heap-allocated now and the web handler
+            // that frees them runs at a HIGHER priority than this task, so it
+            // can preempt between the bounds check and the store.  See the note
+            // on calibrationMux in laptimer.h.  Capacity is per-session and may
+            // be below LAPTIMER_CALIBRATION_HISTORY if the heap was tight.
+            portENTER_CRITICAL(&calibrationMux);
+            if (calibrationRssi && calibrationTimestamps &&
+                calibrationRssiCount < calibrationCapacity &&
                 (currentTimeMs - lastCalibrationSampleMs) >= 20) {
                 calibrationRssi[calibrationRssiCount] = out;
                 calibrationTimestamps[calibrationRssiCount] = currentTimeMs;
                 calibrationRssiCount++;
                 lastCalibrationSampleMs = currentTimeMs;
             }
+            portEXIT_CRITICAL(&calibrationMux);
             break;
 
         default:
@@ -655,6 +692,7 @@ void LapTimer::finishLap() {
         lapCountWraparound = true;
     }
     lapCount = (lapCount + 1) % LAPTIMER_LAP_HISTORY;
+    if (lapTotal < 0xFFFF) lapTotal++;   // saturate rather than wrap
     lapAvailable = true;
 
 #ifdef ESP32S3
@@ -690,6 +728,7 @@ uint8_t LapTimer::getLastLapPeakRssi() const {
 
 void LapTimer::clearLapData() {
     lapCount = 0;
+    lapTotal = 0;
     lapCountWraparound = false;
     memset(lapTimes, 0, sizeof(lapTimes));
 }
@@ -698,29 +737,74 @@ void LapTimer::recordManualLap(uint32_t lapTimeMs) {
     lapTimes[lapCount] = lapTimeMs;
     if ((lapCount + 1) % LAPTIMER_LAP_HISTORY == 0) lapCountWraparound = true;
     lapCount = (lapCount + 1) % LAPTIMER_LAP_HISTORY;
+    if (lapTotal < 0xFFFF) lapTotal++;
 }
 
 bool LapTimer::isLapAvailable() {
     return lapAvailable;
 }
 
-void LapTimer::startCalibrationWizard() {
-    DEBUG("Calibration wizard started\n");
+// Recording capacity tiers, largest first.  At the 20 ms sample gate these are
+// 100 / 60 / 30 / 15 / 7.5 seconds of recording.
+//
+// The wizard asks for what the heap can actually give rather than demanding one
+// fixed size and failing.  A user who came to calibrate is far better served by
+// 60 seconds of recording than by an error message, and the difference is
+// invisible to them unless we say so — which /calibration/start does, by
+// returning the granted capacity for the UI to display.
+static const uint16_t kCalibrationTiers[] = { 5000, 3000, 1500, 750, 375 };
+
+uint16_t LapTimer::startCalibrationWizard() {
+    // Idempotent: a second start without a stop would leak the first pair.
+    _freeCalibrationBuffers();
+
+    for (uint8_t t = 0; t < sizeof(kCalibrationTiers) / sizeof(kCalibrationTiers[0]); t++) {
+        const uint16_t n = kCalibrationTiers[t];
+
+        // Timestamps first — it is 4x the size of the RSSI array and therefore
+        // the allocation that actually fails on a fragmented heap.  Trying the
+        // small one first would succeed, then fail, then have to be undone.
+        uint32_t *ts = (uint32_t *)calloc(n, sizeof(uint32_t));
+        if (!ts) continue;
+        uint8_t *rssi = (uint8_t *)calloc(n, sizeof(uint8_t));
+        if (!rssi) { free(ts); continue; }
+
+        calibrationTimestamps = ts;
+        calibrationRssi       = rssi;
+        calibrationCapacity   = n;
+        break;
+    }
+
+    if (!calibrationCapacity) {
+        // Every tier refused. The caller turns this into a 503 rather than
+        // entering a state whose sample path would write through a null pointer.
+        DEBUG("Calibration wizard: allocation failed at every tier (free=%u maxBlk=%u)\n",
+              (unsigned)ESP.getFreeHeap(), (unsigned)ESP.getMaxAllocHeap());
+        return 0;
+    }
+
+    DEBUG("Calibration wizard started: %u samples (%u s) using %u bytes, free=%u\n",
+          (unsigned)calibrationCapacity, (unsigned)(calibrationCapacity / 50),
+          (unsigned)(calibrationCapacity * 5), (unsigned)ESP.getFreeHeap());
+
     state = CALIBRATION_WIZARD;
     calibrationRssiCount = 0;
     lastCalibrationSampleMs = 0;  // Reset sample timing
-    memset(calibrationRssi, 0, sizeof(calibrationRssi));
-    memset(calibrationTimestamps, 0, sizeof(calibrationTimestamps));
+    // calloc already zeroed both buffers.
     buz->beep(300);
     led->on(300);
 #ifdef ESP32S3
     if (g_rgbLed) g_rgbLed->flashGreen();
 #endif
+    return calibrationCapacity;
 }
 
 void LapTimer::stopCalibrationWizard() {
     DEBUG("Calibration wizard stopped, recorded %u samples\n", calibrationRssiCount);
+    // Leave state first, so the sampling path in loop() cannot enter the
+    // CALIBRATION_WIZARD case between here and the free() below.
     state = STOPPED;
+    _freeCalibrationBuffers();
     buz->beep(300);
     led->on(300);
 #ifdef ESP32S3
@@ -728,19 +812,43 @@ void LapTimer::stopCalibrationWizard() {
 #endif
 }
 
+// Returns the 25 KB to the allocator.  Deliberately clears the count and
+// capacity too: the accessors gate on calibrationRssiCount, and leaving a
+// non-zero count beside freed pointers would be a use-after-free waiting for
+// the next /calibration/data poll to arrive late.
+void LapTimer::_freeCalibrationBuffers() {
+    // Detach under the spinlock, release outside it.  free() must never be
+    // called with interrupts disabled — it can take the allocator's own lock —
+    // so the critical section covers only the pointer swap, which is all that
+    // is needed to make the sampler's guarded write safe.
+    portENTER_CRITICAL(&calibrationMux);
+    uint8_t  *rssi = calibrationRssi;
+    uint32_t *ts   = calibrationTimestamps;
+    calibrationRssi       = nullptr;
+    calibrationTimestamps = nullptr;
+    calibrationCapacity   = 0;
+    calibrationRssiCount  = 0;
+    portEXIT_CRITICAL(&calibrationMux);
+
+    if (rssi) free(rssi);
+    if (ts)   free(ts);
+}
+
 uint16_t LapTimer::getCalibrationRssiCount() {
     return calibrationRssiCount;
 }
 
+// The buffers are freed when the wizard stops, so both accessors must tolerate
+// nullptr — a /calibration/data poll can land after a /calibration/stop.
 uint8_t LapTimer::getCalibrationRssi(uint16_t index) {
-    if (index < calibrationRssiCount) {
+    if (calibrationRssi && index < calibrationRssiCount) {
         return calibrationRssi[index];
     }
     return 0;
 }
 
 uint32_t LapTimer::getCalibrationTimestamp(uint16_t index) {
-    if (index < calibrationRssiCount) {
+    if (calibrationTimestamps && index < calibrationRssiCount) {
         return calibrationTimestamps[index];
     }
     return 0;

@@ -3309,10 +3309,17 @@ function _restoreInProgressLaps(laps) {
   laps.forEach((l, idx) => {
     const newLap = l.lapTimeMs / 1000;
     lapTimes.push(newLap);
-    lapNo = idx;
+    // Prefer the lap's TRUE number from the firmware over its position in this
+    // array.  They diverge whenever the race outran the firmware's lap ring and
+    // the oldest laps were dropped — numbering by position would then relabel
+    // lap 51 as lap 1 and quietly present a wrong race.  Older firmware omits
+    // lapNumber, in which case position is all we have and is correct anyway.
+    lapNo = Number.isFinite(l.lapNumber) ? l.lapNumber : idx;
     cumMs += l.lapTimeMs;
     if (table) {
       const row = table.insertRow();
+      // data-lap-index stays the ARRAY index — it addresses lapTimes[], which
+      // only holds what was restored.
       row.setAttribute('data-lap-index', idx);
       const c1 = row.insertCell(0); c1.innerHTML = lapNo;
       const c2 = row.insertCell(1);
@@ -3321,7 +3328,10 @@ function _restoreInProgressLaps(laps) {
       const c3 = row.insertCell(2);
       c3.innerHTML = (lapNo === 0 || gapMs === null) ? '-' : formatMsGap(gapMs);
       const c4 = row.insertCell(3);
-      c4.innerHTML = lapNo === 0 ? '-' : formatMsDisplay(cumMs);
+      // Cumulative time is only meaningful from lap 0.  If the list was
+      // truncated it starts mid-race, so the running total would be wrong —
+      // show a dash rather than a confidently incorrect number.
+      c4.innerHTML = (lapNo === 0 || lapNo !== idx) ? '-' : formatMsDisplay(cumMs);
     }
   });
   if (table) { highlightFastestLap(); updateLapCounter(); }
@@ -5745,6 +5755,35 @@ function importConfig(input) {
   input.value = '';   // reset so re-selecting the same file triggers another onchange
 }
 
+// Recording capacity is now NEGOTIATED, not assumed.
+//
+// The firmware used to hold a fixed 5000-sample buffer in static RAM for the
+// whole life of every boot — 25,000 bytes, a third of all static RAM, for a
+// bench feature.  It now allocates on demand and grants the largest tier the
+// heap can spare (5000 / 3000 / 1500 / 750 / 375 samples), returning the
+// granted size from POST /calibration/start.
+//
+// These constants are therefore only the DEFAULT / upper bound.  The live
+// values live in wizardState.maxSamples and wizardState.autoStopSamples, set
+// from the start response.  Use those, not these, anywhere the cap matters.
+//
+// 20 ms is the sample interval in laptimer.cpp's CALIBRATION_WIZARD branch.
+// When the buffer fills, further samples are silently dropped — so auto-stop a
+// beat before the cap, giving the polling loop time to react and surface a
+// friendly prompt instead.
+//
+// DECLARATION ORDER MATTERS: these must precede wizardState below, which reads
+// them in its initializer.  `const` is not hoisted the way `var` is — it sits in
+// the temporal dead zone until this line executes, so referencing it earlier
+// throws a ReferenceError at load and kills every statement after it in the
+// file.  That is not a syntax error, so `node --check` does not catch it.
+const WIZARD_MAX_SAMPLES        = 5000;
+const WIZARD_SAMPLE_INTERVAL_MS = 20;
+const WIZARD_MAX_DURATION_SEC   = (WIZARD_MAX_SAMPLES * WIZARD_SAMPLE_INTERVAL_MS) / 1000;  // 100
+const WIZARD_AUTO_STOP_SAMPLES  = 4900;   // ~98 s, leaves ~2 s of poll headroom under the cap
+// Stop this far below the granted cap, scaled the same way (98% of capacity).
+const WIZARD_AUTO_STOP_FRACTION = 0.98;
+
 // Calibration Wizard
 let wizardState = {
   recording: false,
@@ -5753,7 +5792,13 @@ let wizardState = {
   currentLap: 1,
   chart: null,
   calculatedEnter: 0,
-  calculatedExit: 0
+  calculatedExit: 0,
+  // Capacity granted by the firmware for THIS session (see the notes on
+  // WIZARD_MAX_SAMPLES).  Defaults assume the full buffer so a firmware that
+  // doesn't report capacity still behaves exactly as before.
+  maxSamples: WIZARD_MAX_SAMPLES,
+  autoStopSamples: WIZARD_AUTO_STOP_SAMPLES,
+  maxSeconds: WIZARD_MAX_DURATION_SEC
 };
 
 // Calibration wizard target.  0 = local (the wizard runs against this device's
@@ -5762,16 +5807,6 @@ let wizardState = {
 // proxies every call to the matching client.  Set by mnStartCalibrationWizard
 // before opening the wizard; cleared by closeCalibrationWizard.
 let wizardTargetNodeId = 0;
-
-// Mirrors LAPTIMER_CALIBRATION_HISTORY in lib/LAPTIMER/laptimer.h and the
-// 20 ms sample interval in laptimer.cpp's CALIBRATION_WIZARD branch.  When the
-// firmware buffer fills (5000 samples = 100 s) further samples are silently
-// dropped — auto-stop a beat before the cap so the polling loop can react and
-// surface a friendly retry prompt before that happens.
-const WIZARD_MAX_SAMPLES        = 5000;
-const WIZARD_SAMPLE_INTERVAL_MS = 20;
-const WIZARD_MAX_DURATION_SEC   = (WIZARD_MAX_SAMPLES * WIZARD_SAMPLE_INTERVAL_MS) / 1000;  // 100
-const WIZARD_AUTO_STOP_SAMPLES  = 4900;   // ~98 s, leaves ~2 s of poll headroom under the cap
 
 // Build a wizard URL.  In remote mode every wizard call routes through the
 // master's proxy with the target nodeId appended; in local mode the original
@@ -5806,6 +5841,9 @@ function startCalibrationWizard() {
     markers: [],
     currentLap: 1,
     chart: null,
+    maxSamples: WIZARD_MAX_SAMPLES,
+    autoStopSamples: WIZARD_AUTO_STOP_SAMPLES,
+    maxSeconds: WIZARD_MAX_DURATION_SEC,
     calculatedEnter: 0,
     calculatedExit: 0
   };
@@ -5815,23 +5853,68 @@ function startCalibrationWizard() {
   document.getElementById('wizardRecording').style.display = 'block';
   document.getElementById('wizardMarking').style.display = 'none';
   document.getElementById('wizardResults').style.display = 'none';
+  const capNote = document.getElementById('wizardCapacityNote');
+  if (capNote) { capNote.textContent = ''; capNote.style.display = 'none'; }
 
   // Start recording
   fetch(_wizardPath('start'), { method: 'POST', signal: wizardAbortController.signal })
     .then(async (response) => {
       if (!response.ok) {
         const t = await response.text().catch(() => '');
+        // 503 is specifically "not enough memory to allocate the recording
+        // buffer" — a distinct, actionable condition, not a generic failure.
+        // Surface the firmware's own message rather than burying it in a
+        // console log the user will never see.
+        if (response.status === 503) {
+          let msg = 'The timer does not have enough free memory to start calibration. '
+                  + 'Reboot the timer and try again.';
+          try {
+            const j = JSON.parse(t);
+            if (j && j.error) msg = j.error;
+          } catch (_) { /* not JSON — keep the default wording */ }
+          const err = new Error(msg);
+          err.userMessage = msg;
+          throw err;
+        }
         throw new Error(`POST calibration/start failed: HTTP ${response.status} ${response.statusText} ${t}`);
       }
-      // server returns JSON but don’t *require* parsing
-      await response.text().catch(() => '');
+      // The response carries the capacity the firmware actually granted.  Parse
+      // it if we can, but never make recording depend on parsing succeeding —
+      // an older firmware returns {"status":"OK"} with no capacity fields, and
+      // must still work.
+      let granted = null;
+      try {
+        const body = await response.json();
+        if (body && Number.isFinite(body.maxSamples) && body.maxSamples > 0) {
+          granted = body.maxSamples;
+        }
+      } catch (_) { /* older firmware, or non-JSON — fall back below */ }
+
+      wizardState.maxSamples = granted || WIZARD_MAX_SAMPLES;
+      wizardState.autoStopSamples = granted
+        ? Math.max(1, Math.floor(granted * WIZARD_AUTO_STOP_FRACTION))
+        : WIZARD_AUTO_STOP_SAMPLES;
+      wizardState.maxSeconds =
+        (wizardState.maxSamples * WIZARD_SAMPLE_INTERVAL_MS) / 1000;
+
+      // Only mention the limit when it is NOT the full 100 s — otherwise this
+      // is noise about something the user never had reason to think about.
+      if (granted && granted < WIZARD_MAX_SAMPLES) {
+        const note = document.getElementById('wizardCapacityNote');
+        if (note) {
+          note.textContent =
+            `Memory is limited right now — recording up to ${Math.round(wizardState.maxSeconds)} s.`;
+          note.style.display = 'block';
+        }
+      }
+
       wizardState.recording = true;
       wizardRecordingLoop();
     })
     .catch(error => {
       if (error?.name === 'AbortError') return;
       console.error('Error starting calibration wizard:', error);
-      alert('Error starting calibration wizard');
+      alert(error?.userMessage || 'Error starting calibration wizard');
       closeCalibrationWizard();
     });
 }
@@ -5888,7 +5971,7 @@ function wizardRecordingLoop() {
     .then(meta => {
       const total = meta.total || 0;
       document.getElementById('wizardSampleCount').textContent = `Samples: ${total}`;
-      if (total >= WIZARD_AUTO_STOP_SAMPLES) {
+      if (total >= wizardState.autoStopSamples) {
         // Hit the firmware buffer cap.  Auto-stop before the firmware starts
         // silently dropping samples and prompt the user to keep this recording
         // or retry with a shorter session.
@@ -5918,10 +6001,13 @@ async function wizardHandleMaxDurationReached() {
     clearTimeout(wizardRecordingTimerId);
     wizardRecordingTimerId = null;
   }
-  const mins = Math.floor(WIZARD_MAX_DURATION_SEC / 60);
-  const secs = String(WIZARD_MAX_DURATION_SEC % 60).padStart(2, '0');
+  // The limit is per-session: the firmware grants whatever recording capacity
+  // the heap can spare, so quote the real number rather than a fixed 100 s.
+  const limitSec = Math.round(wizardState.maxSeconds || WIZARD_MAX_DURATION_SEC);
+  const mins = Math.floor(limitSec / 60);
+  const secs = String(limitSec % 60).padStart(2, '0');
   const useThisRecording = confirm(
-    `Recording reached the maximum duration of ${WIZARD_MAX_DURATION_SEC} seconds (${mins}:${secs}).\n\n` +
+    `Recording reached the maximum duration of ${limitSec} seconds (${mins}:${secs}).\n\n` +
     `Click OK to mark gate crossings with this recording, or Cancel to start over ` +
     `with a shorter session (fly to the next gate and back 3 times faster).`
   );
