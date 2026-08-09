@@ -2246,6 +2246,20 @@ button.update-btn {
 }
 
 /* ── Master race view — leaderboard table ───────────────────── */
+/* Shown above the leaderboard when the node poll has been failing.  The data
+   underneath stays visible on purpose — a director mid-race still needs the lap
+   counts — so this has to be unmistakable about the data being frozen. */
+.mn-stale-banner {
+  padding: 8px 12px;
+  margin-bottom: 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #fff;
+  background: #b26a00;
+  border: 1px solid #d98300;
+}
+
 .mn-leaderboard {
   width: 100%;
   border-collapse: collapse;

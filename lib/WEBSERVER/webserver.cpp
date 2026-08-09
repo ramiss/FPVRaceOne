@@ -687,7 +687,15 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     // cliff means a single large allocation, a staircase means many small ones
     // never freed.  Those need completely different fixes, and at 10 s spacing
     // they are indistinguishable.  Costs one DEBUG line per second.
-#define HEAP_LOG_FAST 1
+    //
+    // Set to 1 for any heap investigation — it is what diagnosed the page-load
+    // transient on 2026-08-08.  The 10 s trace showed only a healthy plateau
+    // followed by a fatal reading; the 1 Hz trace showed a spike that fully
+    // recovered, which is a different problem with a different fix.  Note also
+    // that the `min` field (getMinFreeHeap) is a since-boot latch, so reading
+    // spike depth from the gap between two samples UNDERSTATES it — 51 KB by
+    // that method, 76 KB by the latch.
+#define HEAP_LOG_FAST 0
 #if HEAP_LOG_FAST
     const  uint32_t HEAP_LOG_PERIOD  = 1000;
 #else

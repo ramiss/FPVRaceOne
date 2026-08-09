@@ -7532,6 +7532,22 @@ function applyCalibMasterNote() {
   note.style.display = (mnNodeMode === 1) ? 'block' : 'none';
 }
 let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE / polling
+// ── Node-list freshness ──────────────────────────────────────────────────────
+// mnCurrentNodes starts empty, and a slot with no entry renders "Not connected".
+// That meant an UNREACHABLE timer looked exactly like a timer reporting that
+// nobody is connected — the UI stated as fact something it had no information
+// about.  Seen 2026-08-08: during a heap collapse the master could not accept
+// TCP connections, so every /api/multinode/nodes poll failed; the browser showed
+// all seven pilots disconnected while the master's own log listed them all
+// connected.  Both were "right" — they were answering different questions.
+//
+// For a race director mid-event that is the worst failure mode available: it
+// looks like the field just dropped out.  A stale display that admits it is
+// stale is far better than a confident wrong one.  These two flags split the
+// single boolean into three states — unknown, stale, and genuinely empty.
+let mnPollEverSucceeded  = false;  // false until the first successful node poll
+let mnPollFailStreak     = 0;      // consecutive failed polls; reset on success
+const MN_POLL_STALE_AFTER = 3;     // ~6 s at the 2 s poll interval
 let mnImportedNodes      = null;   // non-null while viewing an imported race; blocks polling from overwriting
 let mnRaceTimerIntervalId = null;
 let _pageInitDone        = false;  // true once DOMContentLoaded IIFE completes successfully
@@ -7907,14 +7923,34 @@ function mnStopClientPoll() {
 }
 
 async function mnRefreshNodes() {
+  let ok = false;
   try {
     const r = await fetch('/api/multinode/nodes');
-    if (!r.ok) return;
-    const data = await r.json();
-    const nodes = data.nodes || [];
-    mnRenderNodes(nodes);
-    if (mnImportedNodes === null) mnRenderRaceTab(nodes);
+    if (r.ok) {
+      const data = await r.json();
+      const nodes = data.nodes || [];
+      ok = true;
+      mnRenderNodes(nodes);
+      if (mnImportedNodes === null) mnRenderRaceTab(nodes);
+    }
   } catch (_) {}
+
+  // A failed poll must NOT be rendered as "no nodes".  Keep the last known list
+  // on screen and record the failure; mnRenderRaceTab turns a run of failures
+  // into a visible staleness banner.  See the notes on mnPollEverSucceeded.
+  if (ok) {
+    mnPollEverSucceeded = true;
+    mnPollFailStreak    = 0;
+  } else if (++mnPollFailStreak === MN_POLL_STALE_AFTER
+             && mnImportedNodes === null && Array.isArray(mnCurrentNodes)) {
+    // Re-render once, on the transition, so the banner appears.  Only on the
+    // transition: mnRenderRaceTab skips identical HTML, so repeating this every
+    // 2 s would be harmless but pointless — and the banner is deliberately
+    // static text (no "last seen 12s ago") to keep that HTML comparison a hit.
+    // A ticking timestamp would rebuild the DOM every poll and drop in-flight
+    // clicks, which is the problem __mnLastRaceTabHtml exists to prevent.
+    try { mnRenderRaceTab(mnCurrentNodes); } catch (_) {}
+  }
 }
 
 // Format milliseconds as a TTS-friendly string ("3 minutes 49 point 4 6" or "49 point 5 0").
@@ -8261,8 +8297,28 @@ function mnRenderRaceTab(nodes, opts) {
   const globalFastestMs = activeSlots.filter(p => p.lapCount > 0)
     .reduce((best, p) => Math.min(best, p.fastestMs), Infinity);
 
+  // ── Slot state: unknown vs genuinely empty ─────────────────────
+  // An empty slot means "nobody is in it" ONLY once we've actually heard from
+  // the source of truth.  Before that we know nothing, and saying "Not
+  // connected" would be inventing an answer.  Master view's source is the
+  // /api/multinode/nodes poll; the read-only client view's is the director-state
+  // push, whose arrival is implied by a non-empty nodes array.
+  const slotStateKnown = readOnly ? nodes.length > 0 : mnPollEverSucceeded;
+  const emptySlotLabel = slotStateKnown
+    ? 'Not connected'
+    : (readOnly ? 'Waiting for race director…' : 'Waiting for timer…');
+
   // ── Summary leaderboard table ──────────────────────────────────
-  let html = '<table class="mn-leaderboard"><thead><tr>';
+  let html = '';
+  // Stale: we had data, then the timer stopped answering.  Keep showing the last
+  // known race — a director mid-event needs the lap counts — but never let it
+  // masquerade as live.
+  if (!readOnly && mnPollFailStreak >= MN_POLL_STALE_AFTER) {
+    html += '<div class="mn-stale-banner">'
+          + '&#9888; Not receiving updates from this timer — showing last known data.'
+          + '</div>';
+  }
+  html += '<table class="mn-leaderboard"><thead><tr>';
   html += '<th></th><th>Pilot</th><th>Laps</th><th>Total</th><th>Avg</th><th>Fastest</th>';
   html += '</tr></thead><tbody>';
 
@@ -8298,7 +8354,7 @@ function mnRenderRaceTab(nodes, opts) {
     if (n.empty) {
       html += `<div class="mn-pilot-card mn-pilot-card-empty">
         <div class="mn-pilot-card-header mn-pilot-card-header-empty">Slot ${_slotLetter(n.nodeId)}</div>
-        <div class="mn-pilot-card-laps mn-card-empty-label">Not connected</div>
+        <div class="mn-pilot-card-laps mn-card-empty-label">${emptySlotLabel}</div>
       </div>`;
       return;
     }
