@@ -394,6 +394,23 @@ static void _jsonEscapeAppend(String& dst, const String& s) {
     }
 }
 
+bool Webserver::_rejectIfRacing(AsyncWebServerRequest *request) {
+    bool racing = (timer && timer->isRunning());
+
+    // A master may be idle while its clients are mid-race — the fanout is hot
+    // either way, so the local timer alone is not the right test.
+    if (!racing && multiNode && multiNode->isMasterMode()) {
+        for (const auto &n : multiNode->getNodes()) {
+            if (n.online && n.running) { racing = true; break; }
+        }
+    }
+    if (!racing) return false;
+
+    request->send(409, "application/json",
+                  "{\"status\":\"ERROR\",\"message\":\"Stop the race before opening race history\"}");
+    return true;
+}
+
 // Build the {"nodes":[master,...clients],"race":{...}} payload used by both the
 // local /api/multinode/nodes endpoint and the broadcast-to-clients push.
 //
@@ -416,7 +433,7 @@ static void _buildDirectorStatePayloadInto(String& out,
                                            MultiNodeManager *multiNode,
                                            LapTimer *timer, Config *conf) {
     bool     masterRunning = timer && timer->isRunning();
-    uint8_t  masterCnt     = timer ? timer->getLapCount() : 0;
+    uint16_t masterCnt     = timer ? timer->getLapCount() : 0;
     String   pilotName     = conf && conf->getPilotName() ? String(conf->getPilotName()) : String();
     uint32_t pilotColor    = conf ? conf->getPilotColor() : 0x0080FFu;
 
@@ -430,21 +447,33 @@ static void _buildDirectorStatePayloadInto(String& out,
     uint32_t elapsedMs     = timer ? timer->getElapsedMs() : 0;
     bool     prearmActive  = multiNode && multiNode->getPrearmPhase();
 
-    // Pre-size: master skeleton ~300 B, each client base ~400 B, each lap
-    // entry ~40 B.  Count laps across all sources so reserve fits without
-    // a realloc even in long races.
-    size_t lapEstimate = masterCnt;
+    // Pre-size.  This used to include `laps * 40` and grew without bound as a
+    // race went on: ~3 KB at lap 0, ~12 KB at lap 30, ~60 KB at lap 200 — and
+    // that string was rebuilt four times a second, deep-copied for the fanout,
+    // and POSTed to every client.  The lap arrays are gone (§6.4); what
+    // remains is a per-node digest plus a bounded delta window (§6.5), so the
+    // size now tracks the recent lap RATE and never the accumulated total.
     size_t clientCount = 0;
-    if (multiNode) {
-        const auto& nodes = multiNode->getNodes();
-        clientCount = nodes.size();
-        for (const auto& n : nodes) lapEstimate += n.laps.size();
+    if (multiNode) clientCount = multiNode->getNodes().size();
+    const size_t deltaCount = multiNode ? multiNode->getLapDeltas().size() : 0;
+
+    // Stage-4 gate (§10): keep sending the arrays until every node consumes
+    // deltas.  While this is true the payload still scales with lap count —
+    // the heap win only lands once the fleet is updated and this flips.
+    const bool emitLegacyLaps = !(multiNode && multiNode->allNodesLapSyncCapable());
+    const uint16_t masterRetained = timer ? timer->getRetainedLapCount() : 0;
+    size_t legacyLapEstimate = 0;
+    if (emitLegacyLaps) {
+        legacyLapEstimate = masterRetained;
+        if (multiNode) {
+            for (const auto& n : multiNode->getNodes()) legacyLapEstimate += n.laps.retained();
+        }
     }
     // Length to 0 but KEEP the capacity: Arduino's String::copy() calls
     // reserve(0), which returns early when a buffer already exists.  Assigning
     // "" therefore empties without freeing — which is the entire point.
     out = "";
-    out.reserve(400 + clientCount * 400 + lapEstimate * 40);
+    out.reserve(400 + clientCount * 460 + deltaCount * 96 + legacyLapEstimate * 40);
 
     // ── Header + master entry ─────────────────────────────────────────────
     // The MAC ties this physical device to the saved-pilots backup format
@@ -469,15 +498,35 @@ static void _buildDirectorStatePayloadInto(String& out,
     out += ",\"enterRssi\":";    out += masterEnter;
     out += ",\"exitRssi\":";     out += masterExit;
     out += ",\"running\":";      out += masterRunning ? "true" : "false";
-    out += ",\"lapCount\":";     out += masterCnt;
-    out += ",\"laps\":[";
-    for (uint8_t i = 0; i < masterCnt; i++) {
-        if (i > 0) out += ',';
-        out += "{\"lapNumber\":"; out += (int)i;
-        out += ",\"lapTimeMs\":"; out += (int)timer->getLapTimeAt(i);
-        out += '}';
+    // Digest instead of the array (§6.4).  A recipient compares lapCount and
+    // lapCrc against its own copy and pulls the difference from
+    // /api/multinode/laps if it cares; nothing walks history to build this.
+    {
+        static const RaceSummary kNoSummary = {};
+        const RaceSummary& ms = timer ? timer->getSummary() : kNoSummary;
+        out += ",\"lapCount\":";     out += (uint32_t)(timer ? timer->getLapTotal() : 0);
+        out += ",\"lapCrc\":";       out += (uint32_t)(timer ? timer->getLapCrc() : 0);
+        out += ",\"oldestSeq\":";    out += (uint32_t)(timer ? timer->getOldestSeq() : 0);
+        out += ",\"fastestLapMs\":"; out += (uint32_t)ms.fastestLapMs;
+        out += ",\"fastestLapNumber\":"; out += (uint32_t)ms.fastestLapNumber;
+        out += ",\"meanLapMs\":";    out += (uint32_t)lapSyncSummaryMeanMs(ms);
+        // The master is its own time reference, so it is always orderable.
+        out += ",\"anchored\":true";
     }
-    out += "]}";
+    // Legacy lap array — emitted until every node consumes lapDeltas (§10).
+    if (emitLegacyLaps) {
+        out += ",\"laps\":[";
+        for (uint16_t i = 0; i < masterRetained; i++) {
+            uint16_t ln = 0; uint32_t lt = 0;
+            if (!timer->getRetainedLap(i, &ln, &lt)) break;
+            if (i > 0) out += ',';
+            out += "{\"lapNumber\":"; out += (uint32_t)ln;
+            out += ",\"lapTimeMs\":"; out += (uint32_t)lt;
+            out += '}';
+        }
+        out += ']';
+    }
+    out += "}";
 
     // ── Client entries inline ─────────────────────────────────────────────
     // Replaces the old multiNode->getNodesToJson() path that allocated a
@@ -496,20 +545,56 @@ static void _buildDirectorStatePayloadInto(String& out,
             out += ",\"independent\":";    out += n.independent ? "true" : "false";
             out += ",\"skipEnabled\":";    out += n.skipEnabled ? "true" : "false";
             out += ",\"excludedFromCurrentRace\":"; out += n.excludedFromCurrentRace ? "true" : "false";
-            out += ",\"lapCount\":";       out += (int)n.lapCount;
+            out += ",\"lapCount\":";       out += (uint32_t)n.laps.total;
             out += ",\"clientIP\":\"";     _jsonEscapeAppend(out, n.clientIP); out += "\"";
             out += ",\"mac\":\"";          _jsonEscapeAppend(out, n.macAddress); out += "\"";
             out += ",\"apSuffix\":\"";     _jsonEscapeAppend(out, n.apSuffix); out += "\"";
             out += ",\"enterRssi\":";      out += (int)n.enterRssi;
             out += ",\"exitRssi\":";       out += (int)n.exitRssi;
-            out += ",\"laps\":[";
-            for (size_t i = 0; i < n.laps.size(); i++) {
-                if (i > 0) out += ',';
-                out += "{\"lapNumber\":"; out += (int)n.laps[i].lapNumber;
-                out += ",\"lapTimeMs\":"; out += (int)n.laps[i].lapTimeMs;
-                out += '}';
+            // Digest, not history (§6.4).
+            out += ",\"lapCrc\":";         out += (uint32_t)n.laps.crc;
+            out += ",\"oldestSeq\":";      out += (uint32_t)n.laps.oldestSeq();
+            out += ",\"fastestLapMs\":";   out += (uint32_t)n.laps.summary.fastestLapMs;
+            out += ",\"fastestLapNumber\":"; out += (uint32_t)n.laps.summary.fastestLapNumber;
+            out += ",\"meanLapMs\":";      out += (uint32_t)lapSyncSummaryMeanMs(n.laps.summary);
+            // Unanchored nodes are shown with their own times but carry no
+            // ordering key, so the UI can mark them "not comparable" rather
+            // than silently placing them wrongly against the field (§8).
+            out += ",\"anchored\":";       out += n.anchored ? "true" : "false";
+            if (emitLegacyLaps) {
+                out += ",\"laps\":[";
+                const uint16_t r = n.laps.retained();
+                for (uint16_t i = 0; i < r; i++) {
+                    LapSyncRecord rec;
+                    if (!n.laps.get(i, &rec)) break;
+                    if (i > 0) out += ',';
+                    out += "{\"lapNumber\":"; out += (uint32_t)rec.seq;
+                    out += ",\"lapTimeMs\":"; out += (uint32_t)rec.lapTimeMs;
+                    out += '}';
+                }
+                out += ']';
             }
-            out += "]}";
+            out += "}";
+        }
+    }
+
+    // ── Peer cache feed (§6.5) ────────────────────────────────────────────
+    // Laps appended since the previous broadcast.  This is the ONLY path by
+    // which a client learns about its peers now that the arrays are gone —
+    // clients render the Race View purely from this payload, and the
+    // multiNodeLap SSE event goes to the master's own browser, not to nodes.
+    out += "],\"lapDeltas\":[";
+    if (multiNode) {
+        const auto& deltas = multiNode->getLapDeltas();
+        for (size_t i = 0; i < deltas.size(); i++) {
+            const auto& d = deltas[i];
+            if (i > 0) out += ',';
+            out += "{\"nodeId\":";        out += (int)d.nodeId;
+            out += ",\"seq\":";           out += (uint32_t)d.seq;
+            out += ",\"lapTimeMs\":";     out += (uint32_t)d.lapTimeMs;
+            out += ",\"raceElapsedMs\":"; out += (uint32_t)d.raceElapsedMs;
+            if (d.ordered) { out += ",\"orderMs\":"; out += (uint32_t)d.orderMs; }
+            out += '}';
         }
     }
 
@@ -517,6 +602,10 @@ static void _buildDirectorStatePayloadInto(String& out,
     out += "],\"race\":{\"running\":"; out += masterRunning ? "true" : "false";
     out += ",\"elapsedMs\":";          out += (uint32_t)elapsedMs;
     out += ",\"prearmActive\":";       out += prearmActive ? "true" : "false";
+    // Epoch (§5).  A client whose raceId differs knows its digests are not
+    // comparable and must not merge — this is what stops a new race from
+    // inheriting the previous one's laps.
+    out += ",\"raceId\":";             out += (uint32_t)(multiNode ? multiNode->getRaceId() : 0);
     out += "}}";
 }
 
@@ -580,6 +669,13 @@ void Webserver::_flushMultiNodeState(uint32_t currentTimeMs) {
     // this pass.
     if (multiNode->directorBroadcastDue(currentTimeMs)) {
         multiNode->queueDirectorStateBroadcast(payload);
+        // Drain the delta window only once the payload is actually committed
+        // to the fanout (§6.5).  Clearing on every 250 ms build would discard
+        // deltas that were serialized into a payload which then got
+        // overwritten before it shipped — peers would never see those laps,
+        // and because peer data is never auto-repaired the gap would persist
+        // for the rest of the race.
+        multiNode->clearLapDeltas();
     } else {
         // NOT due yet — stay dirty so a later tick retries.  Without this, a
         // state change that lands inside the fanout's cooldown and is followed
@@ -1565,6 +1661,14 @@ EEPROM:\n";
         timer->start();
         if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
         if (multiNode && multiNode->isClientMode()) {
+            // Adopt the epoch in the SAME request that starts the clock (§5).
+            // Learning the two separately leaves a window in which laps are
+            // detected under the previous raceId and get dropped as stale by
+            // the master's epoch check.
+            if (request->hasParam("raceId")) {
+                multiNode->setRaceId((uint32_t)strtoul(
+                    request->getParam("raceId")->value().c_str(), nullptr, 10));
+            }
             multiNode->setTimerRunning(true);
             multiNode->setMasterRaceActive(true);
             events.send("started", "masterRaceState");
@@ -1898,12 +2002,14 @@ EEPROM:\n";
 
     // Race history endpoints
     server.on("/races", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (_rejectIfRacing(request)) return;
         String json = history->toJsonString();
         request->send(200, "application/json", json);
         led->on(200);
     });
 
     server.on("/api/races/download", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (_rejectIfRacing(request)) return;
 
         String json = history->toJsonString();
 
@@ -1962,6 +2068,7 @@ EEPROM:\n";
     });
 
     server.on("/races/delete", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (_rejectIfRacing(request)) return;
         if (request->hasParam("timestamp", true)) {
             uint32_t timestamp = request->getParam("timestamp", true)->value().toInt();
             bool success = history->deleteRace(timestamp);
@@ -1973,12 +2080,14 @@ EEPROM:\n";
     });
 
     server.on("/races/clear", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (_rejectIfRacing(request)) return;
         bool success = history->clearAll();
         request->send(200, "application/json", success ? "{\"status\": \"OK\"}" : "{\"status\": \"ERROR\"}");
         led->on(200);
     });
 
     server.on("/races/update", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (_rejectIfRacing(request)) return;
         if (request->hasParam("timestamp", true) && 
             request->hasParam("name", true) && 
             request->hasParam("tag", true)) {
@@ -2019,6 +2128,7 @@ EEPROM:\n";
     });
 
     server.on("/races/downloadOne", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (_rejectIfRacing(request)) return;
         if (request->hasParam("timestamp")) {
             uint32_t timestamp = request->getParam("timestamp")->value().toInt();
             
@@ -2814,25 +2924,140 @@ EEPROM:\n";
                 request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
                 return;
             }
-            JsonObject obj      = json.as<JsonObject>();
-            uint8_t  nodeId     = obj["nodeId"]    | 0;
-            uint32_t lapTimeMs  = obj["lapTimeMs"] | 0u;
-            uint8_t  lapNumber  = obj["lapNumber"] | 0;
+            JsonObject obj  = json.as<JsonObject>();
+            uint8_t  nodeId = obj["nodeId"] | 0;
 
-            bool ok = multiNode->handleLap(nodeId, lapTimeMs, lapNumber);
+            uint32_t ackSeq = 0, oldestSeq = 0;
+            bool     ok     = false;
+            uint32_t lastLapMs = 0, lastSeq = 0;
+            size_t   stored    = 0;
 
-            // Also push to SSE so master's browser updates in real time
-            if (ok && servicesStarted) {
-                char buf[64];
-                snprintf(buf, sizeof(buf), "{\"node\":%u,\"lap\":%u,\"ms\":%u}",
-                         nodeId, lapNumber, lapTimeMs);
-                events.send(buf, "multiNodeLap");
-                pushMultiNodeState();  // also mirror to client Race View tabs
+            if (obj["laps"].is<JsonArray>()) {
+                // ── Batch shape (§6.1) ──────────────────────────────────
+                JsonArray arr = obj["laps"].as<JsonArray>();
+                const uint32_t raceId = obj["raceId"] | 0u;
+                const uint32_t bootId = obj["bootId"] | 0u;
+
+                // Bounded on the RECEIVE side too.  A client is supposed to
+                // cap its drain, but a master must never size a stack buffer
+                // from a number an unverified peer chose.
+                LapSyncRecord recs[LAPSYNC_MAX_UNACKED_PER_REPORT];
+                for (JsonObject lo : arr) {
+                    if (stored >= LAPSYNC_MAX_UNACKED_PER_REPORT) break;
+                    recs[stored].seq           = lo["seq"]           | 0u;
+                    recs[stored].lapTimeMs     = lo["lapTimeMs"]     | 0u;
+                    recs[stored].raceElapsedMs = lo["raceElapsedMs"] | 0u;
+                    lastLapMs = recs[stored].lapTimeMs;
+                    lastSeq   = recs[stored].seq;
+                    stored++;
+                }
+                ok = multiNode->handleLapBatch(nodeId, raceId, bootId,
+                                               recs, stored, ackSeq, oldestSeq);
+            } else {
+                // ── Legacy single-lap shape (§10) ───────────────────────
+                // Kept indefinitely so an un-updated client keeps working
+                // exactly as it does today, just without self-healing.
+                uint32_t lapTimeMs = obj["lapTimeMs"] | 0u;
+                uint8_t  lapNumber = obj["lapNumber"] | 0;
+                ok        = multiNode->handleLap(nodeId, lapTimeMs, lapNumber);
+                lastLapMs = lapTimeMs;
+                lastSeq   = lapNumber;
+                stored    = ok ? 1 : 0;
             }
-            request->send(ok ? 200 : 404, "application/json",
-                          ok ? "{\"status\":\"OK\"}" : "{\"status\":\"ERROR\"}");
+
+            // Push to SSE so the master's own browser updates in real time.
+            // Client nodes do NOT learn peer laps from here — they get them
+            // from the lapDeltas window in directorState (§6.5).
+            if (ok && stored && servicesStarted) {
+                char buf[80];
+                snprintf(buf, sizeof(buf), "{\"node\":%u,\"lap\":%u,\"ms\":%u}",
+                         nodeId, (unsigned)lastSeq, (unsigned)lastLapMs);
+                events.send(buf, "multiNodeLap");
+                pushMultiNodeState();
+            }
+
+            if (ok) {
+                char buf[96];
+                snprintf(buf, sizeof(buf),
+                         "{\"status\":\"OK\",\"ackSeq\":%u,\"oldestSeq\":%u}",
+                         (unsigned)ackSeq, (unsigned)oldestSeq);
+                request->send(200, "application/json", buf);
+            } else {
+                request->send(404, "application/json", "{\"status\":\"ERROR\"}");
+            }
         });
     server.addHandler(mnLapHandler);
+
+    // /api/multinode/laps — bounded resync chunk (§6.3).
+    //
+    // Symmetric by design: a master serves this so a rebooted client can pull
+    // its own laps back, and a client serves the same shape so a rebooted
+    // master can rebuild its aggregate.  `since` below the window floor is
+    // answered from the floor rather than refused — those laps are retired,
+    // and refusing would stall a legitimate restore forever.
+    server.on("/api/multinode/laps", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!multiNode) {
+            request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
+            return;
+        }
+        const uint8_t  nodeId = request->hasParam("node")
+                              ? (uint8_t)request->getParam("node")->value().toInt() : 0;
+        const uint32_t since  = request->hasParam("since")
+                              ? (uint32_t)strtoul(request->getParam("since")->value().c_str(), nullptr, 10) : 0u;
+        uint32_t limit        = request->hasParam("limit")
+                              ? (uint32_t)strtoul(request->getParam("limit")->value().c_str(), nullptr, 10)
+                              : (uint32_t)LAPSYNC_CHUNK_IDLE;
+
+        // Never size a response from a number an unverified peer chose.
+        if (limit == 0 || limit > (uint32_t)LAPSYNC_MAX_LAPS) limit = LAPSYNC_CHUNK_IDLE;
+
+        // A client serving its OWN laps answers from LapTimer, which is the
+        // authoritative replica for this pilot (§3).
+        if (multiNode->isClientMode() && nodeId == multiNode->getMyNodeId() && timer) {
+            const uint32_t oldest   = timer->getOldestSeq();
+            const uint16_t retained = timer->getRetainedLapCount();
+            uint32_t from = (since < oldest) ? oldest : since;
+            uint16_t idx  = (uint16_t)(from - oldest);
+
+            String out;
+            out.reserve(256 + limit * 96);
+            const RaceSummary& s = timer->getSummary();
+            out += "{\"nodeId\":";    out += (int)nodeId;
+            out += ",\"raceId\":";    out += (uint32_t)multiNode->getRaceId();
+            out += ",\"oldestSeq\":"; out += (uint32_t)oldest;
+            out += ",\"count\":";     out += (uint32_t)timer->getLapTotal();
+            out += ",\"crc\":";       out += (uint32_t)timer->getLapCrc();
+            out += ",\"summary\":{\"fastestLapMs\":"; out += (uint32_t)s.fastestLapMs;
+            out += ",\"fastestLapNumber\":";          out += (uint32_t)s.fastestLapNumber;
+            out += ",\"slowestLapMs\":";              out += (uint32_t)s.slowestLapMs;
+            out += ",\"sumLapMs\":";                  out += (uint32_t)s.sumLapMs;
+            out += ",\"timedLapCount\":";             out += (uint32_t)s.timedLapCount;
+            out += ",\"lapTotal\":";                  out += (uint32_t)s.lapTotal;
+            out += "},\"laps\":[";
+            uint32_t sent = 0;
+            for (uint16_t i = idx; i < retained && sent < limit; i++, sent++) {
+                LapSyncRecord rec;
+                if (!timer->getRetainedRecord(i, &rec)) break;
+                if (sent) out += ',';
+                out += "{\"seq\":";           out += (uint32_t)rec.seq;
+                out += ",\"lapTimeMs\":";     out += (uint32_t)rec.lapTimeMs;
+                out += ",\"raceElapsedMs\":"; out += (uint32_t)rec.raceElapsedMs;
+                out += '}';
+            }
+            out += "],\"more\":";
+            out += ((uint32_t)idx + sent < retained) ? "true" : "false";
+            out += "}";
+            request->send(200, "application/json", out);
+            return;
+        }
+
+        String chunk;
+        if (!multiNode->buildLapChunk(nodeId, since, limit, chunk)) {
+            request->send(404, "application/json", "{\"status\":\"NOT_FOUND\"}");
+            return;
+        }
+        request->send(200, "application/json", chunk);
+    });
 
     // /api/multinode/heartbeat — client sends periodic heartbeat to master
     AsyncCallbackJsonWebHandler *mnHeartbeatHandler = new AsyncCallbackJsonWebHandler(
@@ -2853,8 +3078,30 @@ EEPROM:\n";
             if (ok && stateChanged) {
                 pushMultiNodeState();
             }
-            request->send(ok ? 200 : 404, "application/json",
-                          ok ? "{\"status\":\"OK\"}" : "{\"status\":\"NOT_FOUND\"}");
+            if (!ok) {
+                request->send(404, "application/json", "{\"status\":\"NOT_FOUND\"}");
+                return;
+            }
+
+            // §6.2 — the digest rides the heartbeat that already exists.
+            MultiNodeManager::HeartbeatSyncReply rep;
+            multiNode->handleHeartbeatSync(nodeId,
+                                           obj["raceId"]    | 0u,
+                                           obj["bootId"]    | 0u,
+                                           obj["lapSync"]   | false,
+                                           obj["count"]     | 0u,
+                                           obj["crc"]       | 0u,
+                                           obj["oldestSeq"] | 0u,
+                                           rep);
+
+            char buf[224];
+            snprintf(buf, sizeof(buf),
+                     "{\"status\":\"OK\",\"ackSeq\":%u,\"oldestSeq\":%u,\"wantFrom\":%d,"
+                     "\"resyncGrant\":%s,\"chunkLimit\":%u,\"raceId\":%u}",
+                     (unsigned)rep.ackSeq, (unsigned)rep.oldestSeq, (int)rep.wantFrom,
+                     rep.resyncGrant ? "true" : "false",
+                     (unsigned)rep.chunkLimit, (unsigned)rep.raceId);
+            request->send(200, "application/json", buf);
         });
     server.addHandler(mnHeartbeatHandler);
 

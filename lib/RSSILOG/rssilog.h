@@ -14,9 +14,21 @@
 //   MOSI          →   GPIO 13
 //   MISO          →   GPIO 25   ← use 25, NOT 12 (GPIO12 is a boot-strapping pin)
 
+#include <stdint.h>
+#include "config.h"   // for RSSI_LOGGING_ENABLED
+
+// SD/SPI are pulled in ONLY when the logger is actually built.
+//
+// This header is included by laptimer.h purely for the RssiSnapshot type, so
+// an unconditional <SD.h> here dragged the whole Arduino SD library — SD.cpp,
+// sd_diskio.cpp, sd_diskio_crc.c — into the link on every target, including
+// the ESP32-C6 where storage.cpp reports "SD card not supported on this
+// platform" and every SD function is #ifdef ESP32S3'd out.  Paying flash for
+// a driver the build can never call.
+#if RSSI_LOGGING_ENABLED
 #include <SD.h>
 #include <SPI.h>
-#include <stdint.h>
+#endif
 
 #define LOG_SD_CS   15
 #define LOG_SD_SCK  14
@@ -47,6 +59,10 @@ struct RssiSnapshot {
 // Logs are throttled — call log() every loop iteration; it rate-limits internally.
 #define RSSI_LOG_INTERVAL_MS 10   // 100 Hz
 
+// RssiSnapshot above stays unconditional — laptimer.h needs the type either
+// way.  The logger itself does not.
+#if RSSI_LOGGING_ENABLED
+
 class RssiLogger {
 public:
     bool init();
@@ -65,5 +81,7 @@ private:
     bool openNextFile();
     void writeHeader();
 };
+
+#endif // RSSI_LOGGING_ENABLED
 
 #endif // RSSILOG_H

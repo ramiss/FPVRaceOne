@@ -1,6 +1,10 @@
 #include "rssilog.h"
 #include <Arduino.h>
 
+// Whole translation unit is inert when the logger is off.  RssiSnapshot lives
+// in the header and is unaffected.
+#if RSSI_LOGGING_ENABLED
+
 bool RssiLogger::init() {
     _spi.begin(LOG_SD_SCK, LOG_SD_MISO, LOG_SD_MOSI, LOG_SD_CS);
     pinMode(LOG_SD_CS, OUTPUT);
@@ -82,3 +86,5 @@ void RssiLogger::log(const RssiSnapshot& s) {
         _lastFlushMs = now;
     }
 }
+
+#endif // RSSI_LOGGING_ENABLED

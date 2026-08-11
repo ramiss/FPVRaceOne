@@ -119,6 +119,15 @@ class Webserver : public TransportInterface {
 
     Config *conf;
     LapTimer *timer;
+    // §11 — race-history endpoints build a 16-32 KB DynamicJsonDocument and
+    // then serialize it into a String, so the peak is roughly double that.
+    // Landing that on top of the lap path and the director fanout, on a device
+    // whose measured heap minimum under load was 9 KB, is a gamble with
+    // nothing to win: stopping the race first costs the user one click.
+    //
+    // Returns true (and has already answered 409) when the caller should bail.
+    bool _rejectIfRacing(AsyncWebServerRequest *request);
+
     BatteryMonitor *monitor;
     Buzzer *buz;
     Led *led;

@@ -4,6 +4,7 @@
 #include "RX5808.h"
 #include "buzzer.h"
 #include "config.h"
+#include "lapsync.h"
 #include "led.h"
 
 // ── Small odd-window running median filter ──────────────────────────────────
@@ -115,13 +116,13 @@ struct TimingStats {
 // Was 10, which was far below a real race.  /api/laps/current rebuilds the
 // browser's lap table from this ring after a refresh, and the browser numbers
 // the restored laps by their position — so anything the ring has dropped
-// silently renumbers every lap that survives.  50 matches the per-node cap the
-// master already applies in multinode.cpp, so both modes now truncate at the
-// same place.
+// silently renumbers every lap that survives.
 //
-// Cost is 160 bytes of static RAM (50 vs 10 uint32) against the ~25 KB the
-// calibration buffers just returned.
-#define LAPTIMER_LAP_HISTORY 50
+// Now defined by the lap-sync protocol rather than locally: the client ring
+// and the master's per-node ring MUST truncate at the same point, or the two
+// sides advertise different windows and every digest compare after the first
+// eviction is meaningless.  One number, one place.
+#define LAPTIMER_LAP_HISTORY LAPSYNC_MAX_LAPS
 #define LAPTIMER_RSSI_HISTORY 100
 #define LAPTIMER_CALIBRATION_HISTORY 5000  // Increased buffer for longer recordings
 
@@ -132,8 +133,8 @@ class LapTimer {
     void stop();
     bool     isRunning()           const;
     uint32_t getElapsedMs()        const;  // ms since race start (0 if stopped)
-    uint8_t  getLapCount()         const;  // ring write position — NOT a lap total, see getLapTotal()
-    uint32_t getLapTimeAt(uint8_t index) const;  // lap time at 0-based RING index
+    uint16_t getLapCount()         const;  // ring write position — NOT a lap total, see getLapTotal()
+    uint32_t getLapTimeAt(uint16_t index) const;  // lap time at 0-based RING index
 
     // Monotonic count of laps recorded since the last start()/clearLapData().
     // Unlike getLapCount(), this does NOT wrap.
@@ -152,6 +153,41 @@ class LapTimer {
     // once the ring has wrapped) and its time.  Returns false if out of range.
     uint16_t getRetainedLapCount() const;
     bool     getRetainedLap(uint16_t index, uint16_t* lapNumber, uint32_t* lapTimeMs) const;
+
+    // ── Lap Sync Protocol (§4) ──────────────────────────────────────────
+    // The client's own laps are the authoritative replica: this ring is the
+    // source of truth for this pilot, and the master's copy is an aggregate
+    // healed from it.  These accessors are what the sync layer reads; they
+    // never recompute anything, because both values are folded at append.
+
+    // Full record for a retained lap, oldest first — what a resync serves.
+    // `seq` is the lap's TRUE sequence number, which is not the ring index
+    // once the ring has wrapped.
+    bool     getRetainedRecord(uint16_t index, LapSyncRecord* out) const;
+
+    // Rolling digest over ALL laps this race, not just the retained window.
+    // Window-independent by construction (§4) — and therefore NOT
+    // recomputable by a device that restored a windowed copy, which is why
+    // adoptSyncState() exists.
+    uint32_t getLapCrc() const { return _lapCrc; }
+
+    // Totals that survive ring eviction.  Never derived from lapTimes[].
+    const RaceSummary& getSummary() const { return _summary; }
+
+    // Oldest sequence number still retained.  Bounds what any peer may ask
+    // for: below this the laps are RETIRED, not missing (§6.1).
+    uint32_t getOldestSeq() const;
+
+    // Adopt a digest + summary restored from a peer (§4, CRC adoption).
+    // Used after a reboot, when this device holds laps it did not witness
+    // and so cannot fold its way to the correct digest.
+    void     adoptSyncState(uint32_t crc, const RaceSummary& summary);
+
+    // Append a lap that arrived from a peer rather than from local detection
+    // (a restore).  Folds digest and summary exactly as finishLap() would,
+    // so a restored ring and a lived-through ring are indistinguishable.
+    void     appendRestoredLap(const LapSyncRecord& lap);
+
     void handleLapTimerUpdate(uint32_t currentTimeMs);
 
 #if RSSI_LOGGING_ENABLED
@@ -191,11 +227,30 @@ class LapTimer {
     boolean lapCountWraparound;
     uint32_t raceStartTimeMs;
     uint32_t startTimeMs;
-    uint8_t lapCount;      // ring write cursor, wraps at LAPTIMER_LAP_HISTORY
+    uint16_t lapCount;     // ring write cursor, wraps at LAPTIMER_LAP_HISTORY
     uint16_t lapTotal;     // monotonic laps this race; never wraps
     uint8_t rssiCount;
     uint32_t lapTimes[LAPTIMER_LAP_HISTORY];
+    // Race-relative timestamp of each lap's peak, parallel to lapTimes[].
+    //
+    // Stored rather than derived because a lap that is later re-sent during a
+    // resync must carry the timestamp it was MEASURED at, not the one it was
+    // transmitted at.  Arrival time is not a timestamp (§8); without this the
+    // master would be stamping restored laps with resync time and any merged
+    // cross-pilot ordering would place them wrongly.
+    uint32_t lapRaceElapsedMs[LAPTIMER_LAP_HISTORY];
     uint8_t rssi[LAPTIMER_RSSI_HISTORY];
+
+    // ── Lap Sync derived state (§4) ─────────────────────────────────────
+    // Both are folded once per lap in _foldLap() and never recomputed from
+    // the ring, so eviction cannot change them.
+    uint32_t    _lapCrc = 0;
+    RaceSummary _summary = {};
+
+    // Fold one appended lap into the digest and the summary.  Single point of
+    // truth for both, so a locally-detected lap and a restored lap produce
+    // identical derived state.
+    void _foldLap(const LapSyncRecord& lap);
 
     // Single-stage running median.  Replaces the previous cascade of
     // Kalman → Median-3 → MA(7) → EMA → step limiter, which combined to

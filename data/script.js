@@ -8490,7 +8490,19 @@ function mnRenderRaceTab(nodes, opts) {
     const disconnectedBadge = isDisconnected
       ? ' <span class="mn-card-badge" style="background:rgba(208,80,80,0.85);color:#fff;">Disconnected</span>'
       : '';
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${slotPrefix}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${disconnectedBadge}${isRacing && !isDisconnected ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    // Peer lap data on a client is a cache, not a replica (§3), so a shortfall
+    // is disclosed rather than repaired.  Saying "3 laps not shown" is honest;
+    // rendering standings that are quietly wrong is not.
+    const staleBadge = (n.lapsStale > 0)
+      ? ` <span class="mn-card-badge" style="background:rgba(180,118,26,0.85);color:#fff;" title="Peer lap data is a cache and is not auto-repaired. Refresh to pull the full history from the master.">${n.lapsStale} not shown</span>`
+      : '';
+    // A node that never received a start acknowledgement has no clock anchor,
+    // so its laps cannot be placed on the field's timeline (§8).  Its own
+    // times are real; only cross-pilot comparison is unavailable.
+    const unanchoredBadge = (n.unanchored && !n.isMaster)
+      ? ' <span class="mn-card-badge" style="background:rgba(90,90,90,0.85);color:#fff;" title="No clock anchor — lap times are accurate, but this pilot cannot be ordered against the field.">Unsynced</span>'
+      : '';
+    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${slotPrefix}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${disconnectedBadge}${staleBadge}${unanchoredBadge}${isRacing && !isDisconnected ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {
@@ -9702,6 +9714,69 @@ function rvRender() {
   rvUpdateDownloadButton();
 }
 
+// ── Peer lap cache (Lap Sync Protocol §3, §6.5) ─────────────────────────────
+// Tier 2 of the ownership model: peer laps here are a CACHE — best-effort and
+// lossy by design.  They are fed by the bounded lapDeltas window and are never
+// automatically repaired, because only the owner of a lap is obliged to heal
+// it.  What we can always do is DETECT a shortfall, via the per-node digest
+// carried in the same payload, and say so rather than render wrong standings.
+let rvLapCache   = {};   // nodeId -> [{seq, lapTimeMs, raceElapsedMs, orderMs}]
+let rvCacheEpoch = 0;    // raceId the cache belongs to
+
+function rvMergeNodes(nodes, deltas, raceId) {
+  // A new epoch invalidates everything: laps from a previous race must never
+  // merge into this one's standings.
+  if (raceId && raceId !== rvCacheEpoch) {
+    rvLapCache   = {};
+    rvCacheEpoch = raceId;
+  }
+
+  // Fold this broadcast's deltas into the cache.  Deduped by seq so a repeated
+  // payload (the SSE build runs faster than the fanout drains) cannot double-count.
+  for (const d of deltas) {
+    if (!d || d.nodeId === undefined) continue;
+    // Rule 3: a client ignores anything bearing its own nodeId.  Its own laps
+    // are authoritative locally and must never be overwritten by the master's
+    // aggregate copy of them.
+    if (mnMyNodeId > 0 && d.nodeId === mnMyNodeId) continue;
+    const list = (rvLapCache[d.nodeId] ||= []);
+    if (!list.some(l => l.seq === d.seq)) {
+      list.push({ seq: d.seq, lapTimeMs: d.lapTimeMs,
+                  raceElapsedMs: d.raceElapsedMs, orderMs: d.orderMs });
+      list.sort((a, b) => a.seq - b.seq);
+    }
+  }
+
+  return nodes.map(n => {
+    // Transition period: while any node on the fleet still predates the
+    // protocol, the master keeps sending full lap arrays and those remain the
+    // better source.  Once the gate flips they stop arriving and the cache
+    // takes over. Handle both without the UI needing to know which.
+    if (Array.isArray(n.laps) && n.laps.length) {
+      return { ...n, lapsStale: 0, unanchored: n.anchored === false };
+    }
+
+    const cached = (mnMyNodeId > 0 && n.nodeId === mnMyNodeId)
+                 ? null                       // our own row is rendered from local data
+                 : (rvLapCache[n.nodeId] || []);
+
+    if (!cached) return { ...n, lapsStale: 0, unanchored: n.anchored === false };
+
+    // Digest comparison (§6.5).  lapCount is the authoritative total; anything
+    // we are missing was dropped by the delta cap or arrived while we were
+    // away.  We do not repair it — we disclose it.
+    const known  = typeof n.lapCount === 'number' ? n.lapCount : cached.length;
+    const missing = Math.max(0, known - cached.length);
+
+    return {
+      ...n,
+      laps: cached.map(l => ({ lapNumber: l.seq, lapTimeMs: l.lapTimeMs })),
+      lapsStale:  missing,
+      unanchored: n.anchored === false
+    };
+  });
+}
+
 function rvHandleDirectorState(payload) {
   // payload = { nodes: [...], race: { running, elapsedMs, prearmActive } }
   try {
@@ -9722,7 +9797,9 @@ function rvHandleDirectorState(payload) {
     // While viewing an imported file, ignore the live node list — but still
     // accept race/connection state so the banner and ticker stay accurate.
     if (!rvImportedNodes) {
-      rvLastNodes = Array.isArray(payload.nodes) ? payload.nodes : [];
+      rvLastNodes = rvMergeNodes(Array.isArray(payload.nodes) ? payload.nodes : [],
+                                 Array.isArray(payload.lapDeltas) ? payload.lapDeltas : [],
+                                 race.raceId);
     }
 
     if (rvRaceRunning) rvStartTicker(); else rvStopTicker();

@@ -88,6 +88,7 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
     lapTotal = 0;
     lapCountWraparound = false;
     memset(lapTimes, 0, sizeof(lapTimes));
+    memset(lapRaceElapsedMs, 0, sizeof(lapRaceElapsedMs));
     memset(rssi, 0, sizeof(rssi));
 
     // Median filter starts empty; window is set from the config slider
@@ -142,6 +143,12 @@ void LapTimer::start() {
     lapTotal = 0;
     lapCountWraparound = false;
     memset(lapTimes, 0, sizeof(lapTimes));
+    memset(lapRaceElapsedMs, 0, sizeof(lapRaceElapsedMs));
+    // New race is a new epoch: the digest and the summary must start clean or
+    // the first heartbeat of the new race compares against the old one's state
+    // and triggers a resync of laps that no longer exist (§5).
+    _lapCrc = 0;
+    lapSyncSummaryReset(_summary);
 
     raceStartTimeMs = millis();
     startTimeMs = raceStartTimeMs;
@@ -184,12 +191,20 @@ uint32_t LapTimer::getElapsedMs() const {
     return isRunning() ? (millis() - raceStartTimeMs) : 0;
 }
 
-uint8_t LapTimer::getLapCount() const { return lapCount; }
+uint16_t LapTimer::getLapCount() const { return lapCount; }
 
 uint16_t LapTimer::getLapTotal() const { return lapTotal; }
 
 uint16_t LapTimer::getRetainedLapCount() const {
-    return (lapTotal < LAPTIMER_LAP_HISTORY) ? lapTotal : LAPTIMER_LAP_HISTORY;
+    // Counted from what was actually WRITTEN, not derived from lapTotal.
+    //
+    // appendRestoredLap() sets lapTotal from the restored lap's seq, so a
+    // restore that begins above zero — which is every restore from a master
+    // that has evicted laps — used to make this over-report, and
+    // getRetainedRecord() then served zeroed slots as laps.  lapCount is the
+    // write cursor and lapCountWraparound records whether it has lapped, so
+    // together they are the true occupancy.
+    return lapCountWraparound ? (uint16_t)LAPTIMER_LAP_HISTORY : lapCount;
 }
 
 // Oldest-first walk of the ring.
@@ -213,9 +228,60 @@ bool LapTimer::getRetainedLap(uint16_t index, uint16_t* lapNumber, uint32_t* lap
     return true;
 }
 
-uint32_t LapTimer::getLapTimeAt(uint8_t index) const {
+uint32_t LapTimer::getLapTimeAt(uint16_t index) const {
     if (index >= LAPTIMER_LAP_HISTORY) return 0;
     return lapTimes[index];
+}
+
+// ── Lap Sync Protocol (§4) ──────────────────────────────────────────────
+
+// Single fold point for the digest and the summary.  Called from finishLap(),
+// recordManualLap() and appendRestoredLap() so all three produce identical
+// derived state — a restored ring and a lived-through ring must be
+// indistinguishable, or a client that reboots can never match CRC again.
+void LapTimer::_foldLap(const LapSyncRecord& lap) {
+    _lapCrc = lapSyncFoldLap(_lapCrc, lap);
+    lapSyncSummaryFold(_summary, lap);
+}
+
+uint32_t LapTimer::getOldestSeq() const {
+    const uint16_t retained = getRetainedLapCount();
+    return (lapTotal > retained) ? (uint32_t)(lapTotal - retained) : 0u;
+}
+
+bool LapTimer::getRetainedRecord(uint16_t index, LapSyncRecord* out) const {
+    const uint16_t retained = getRetainedLapCount();
+    if (index >= retained || !out) return false;
+
+    const uint16_t slot = (uint16_t)((lapCount + LAPTIMER_LAP_HISTORY - retained + index)
+                                     % LAPTIMER_LAP_HISTORY);
+    out->lapTimeMs     = lapTimes[slot];
+    out->raceElapsedMs = lapRaceElapsedMs[slot];
+    out->seq           = (uint32_t)(lapTotal - retained + index);
+    return true;
+}
+
+void LapTimer::adoptSyncState(uint32_t crc, const RaceSummary& summary) {
+    // Adopted verbatim, NOT recomputed.  This device is holding laps it did
+    // not witness — the evicted ones — so folding its own window would yield
+    // a digest that can never match the peer it restored from, and every
+    // subsequent compare would re-trigger a resync (§4).
+    _lapCrc  = crc;
+    _summary = summary;
+}
+
+void LapTimer::appendRestoredLap(const LapSyncRecord& lap) {
+    lapTimes[lapCount]         = lap.lapTimeMs;
+    lapRaceElapsedMs[lapCount] = lap.raceElapsedMs;
+
+    if ((lapCount + 1) % LAPTIMER_LAP_HISTORY == 0) lapCountWraparound = true;
+    lapCount = (uint16_t)((lapCount + 1) % LAPTIMER_LAP_HISTORY);
+
+    // lapTotal tracks the restored sequence rather than counting up from
+    // whatever this device had: the restore is authoritative about how many
+    // laps exist, and getOldestSeq()/getRetainedRecord() both derive the true
+    // seq from it.
+    if (lap.seq + 1 > lapTotal) lapTotal = (uint16_t)(lap.seq + 1);
 }
 
 void LapTimer::stop() {
@@ -679,8 +745,26 @@ void LapTimer::finishLap() {
                               ? raceStartTimeMs : startTimeMs;
     const int32_t lapDelta = (int32_t)(rssiPeakTimeMs - startRef);
     lapTimes[lapCount] = (lapDelta > 0) ? (uint32_t)lapDelta : 0;
+
+    // Race-relative timestamp of the PEAK, not of this call.  Same clamp
+    // rationale as lapDelta: the gate-1 bootstrap can seed rssiPeakTimeMs at
+    // or just before the race start reference.
+    const int32_t elapsedDelta = (int32_t)(rssiPeakTimeMs - raceStartTimeMs);
+    lapRaceElapsedMs[lapCount] = (elapsedDelta > 0) ? (uint32_t)elapsedDelta : 0;
+
     lastLapPeakRssi = rssiPeak;
     DEBUG("Lap finished, lap time = %u\n", lapTimes[lapCount]);
+
+    // Fold BEFORE the cursor advances — seq is the count of laps that existed
+    // before this one, so the first crossing is seq 0 (gate 1) and the summary
+    // excludes it from timing statistics (§4).
+    {
+        LapSyncRecord rec;
+        rec.lapTimeMs     = lapTimes[lapCount];
+        rec.raceElapsedMs = lapRaceElapsedMs[lapCount];
+        rec.seq           = lapTotal;
+        _foldLap(rec);
+    }
 
 #if RSSI_LOGGING_ENABLED
     snapshot.lapEvent  = true;
@@ -731,12 +815,28 @@ void LapTimer::clearLapData() {
     lapTotal = 0;
     lapCountWraparound = false;
     memset(lapTimes, 0, sizeof(lapTimes));
+    memset(lapRaceElapsedMs, 0, sizeof(lapRaceElapsedMs));
+    _lapCrc = 0;
+    lapSyncSummaryReset(_summary);
 }
 
 void LapTimer::recordManualLap(uint32_t lapTimeMs) {
     lapTimes[lapCount] = lapTimeMs;
+    // A manually recorded lap has no peak, so its race-relative stamp is
+    // simply now.  Still a measured instant on this device's own clock, which
+    // is all §8 requires — never an arrival time from somewhere else.
+    lapRaceElapsedMs[lapCount] = getElapsedMs();
+
+    {
+        LapSyncRecord rec;
+        rec.lapTimeMs     = lapTimeMs;
+        rec.raceElapsedMs = lapRaceElapsedMs[lapCount];
+        rec.seq           = lapTotal;
+        _foldLap(rec);
+    }
+
     if ((lapCount + 1) % LAPTIMER_LAP_HISTORY == 0) lapCountWraparound = true;
-    lapCount = (lapCount + 1) % LAPTIMER_LAP_HISTORY;
+    lapCount = (uint16_t)((lapCount + 1) % LAPTIMER_LAP_HISTORY);
     if (lapTotal < 0xFFFF) lapTotal++;
 }
 

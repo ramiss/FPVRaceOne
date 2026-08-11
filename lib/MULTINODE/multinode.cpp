@@ -1,6 +1,7 @@
 #include "multinode.h"
 #include "config.h"
 #include "debug.h"
+#include "laptimer.h"
 #include "led.h"
 #include "fpv_webserver.h"
 #include <ArduinoJson.h>
@@ -45,7 +46,15 @@ void MultiNodeManager::init(Config* config, Led* led, Webserver* webserver) {
     // it.  0 means "no preference yet — let the master pick first available".
     _myNodeId            = config ? config->getMnPreferredSlot() : 0;
     _lapPending          = false;
-    _localLapCount       = 0;
+    // Random per boot, non-zero.  A changed bootId is how a peer distinguishes
+    // "this device restarted mid-race" from "the race just started" — the two
+    // are otherwise identical (count 0, crc 0) and one of them must not
+    // trigger a resync (§5).
+    do { _bootId = esp_random(); } while (_bootId == 0);
+    _ackedSeq            = 0;
+    _hasAckedSeq         = false;
+    _masterOldest        = 0;
+    _raceId              = 0;
     _lastHeartbeatMs     = 0;
     _lastRegistrationMs  = 0;
     _heartbeatFailCount  = 0;
@@ -117,6 +126,23 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             _processQueuedLap();
         }
 
+        // Unacked laps can also exist without _lapPending — a lap detected
+        // while the master was unreachable is already in the ring and simply
+        // outstanding.  Retry them on the heartbeat cadence so a dropout heals
+        // without needing a fresh crossing to trigger it.
+        if (_masterConnected && _timer && !_lapPending) {
+            const uint32_t lapTotal = (uint32_t)_timer->getLapTotal();
+            const uint32_t nextWanted = _hasAckedSeq ? (_ackedSeq + 1) : _timer->getOldestSeq();
+            if (lapTotal > nextWanted &&
+                (uint32_t)(currentTimeMs - _lastHeartbeatMs) < MULTINODE_HEARTBEAT_INTERVAL_MS) {
+                _processQueuedLap();
+            }
+        }
+
+        // Pull our own laps back from the master, one bounded chunk per tick,
+        // and only while holding the fleet-wide grant (§7).
+        _processResyncPull();
+
         // Drain quit notification (set when pilot stops during a master race)
         if (_quitPending) {
             _quitPending = false;
@@ -125,6 +151,10 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
 
     } else if (isMasterMode()) {
         _checkNodeTimeouts(currentTimeMs);
+
+        // §7 — decide who, if anyone, may repair right now.  Detection already
+        // happened in handleHeartbeatSync; this only rations the repair.
+        _runResyncGovernor(currentTimeMs);
 
         // Periodic "who's actually connected right now" summary.  Every 10 s
         // log a single line listing slot=name for every online node — replaces
@@ -356,12 +386,26 @@ void MultiNodeManager::_sendRegistration() {
 }
 
 void MultiNodeManager::_sendHeartbeat() {
-    DynamicJsonDocument doc(192);
+    DynamicJsonDocument doc(320);
     doc["nodeId"]      = _myNodeId;
     doc["mac"]         = _myMacAddress;   // master verifies this matches its stored MAC for nodeId
     doc["running"]     = _timerRunning;
     doc["independent"]  = _conf->getMnSkipMasterStart() && _timerRunning && !_masterRaceActive;
     doc["skipEnabled"]  = _conf->getMnSkipMasterStart();
+
+    // §6.2 — the digest rides the heartbeat that already runs every 2 s.  Cost
+    // is roughly twenty bytes per node per interval: no new endpoint, no new
+    // timer, and the repair channel exists whether or not anything is wrong.
+    doc["raceId"]      = _raceId;
+    doc["bootId"]      = _bootId;
+    doc["lapSync"]     = 1;             // capability advertisement (§10 gate)
+    if (_timer) {
+        doc["count"]     = (uint32_t)_timer->getLapTotal();
+        doc["crc"]       = (uint32_t)_timer->getLapCrc();
+        doc["oldestSeq"] = (uint32_t)_timer->getOldestSeq();
+        doc["nextSeq"]   = (uint32_t)_timer->getLapTotal();
+    }
+
     String body;
     serializeJson(doc, body);
 
@@ -369,6 +413,7 @@ void MultiNodeManager::_sendHeartbeat() {
     bool ok = _postToMasterWithResponse("/api/multinode/heartbeat", body, resp);
     if (ok) {
         _heartbeatFailCount = 0;
+        _consumeHeartbeatResponse(resp);
     } else if (resp.indexOf("NOT_FOUND") >= 0) {
         // Master doesn't know this nodeId (e.g. master rebooted) — re-register immediately
         DEBUG("[MULTINODE] Heartbeat 404 — master lost our node, re-registering\n");
@@ -387,20 +432,225 @@ void MultiNodeManager::_sendHeartbeat() {
     }
 }
 
-void MultiNodeManager::_processQueuedLap() {
-    if (!_masterConnected || _myNodeId == 0) return;
+void MultiNodeManager::_processResyncPull() {
+    if (!_resyncGranted || !_masterConnected || _myNodeId == 0 || !_timer) return;
 
-    DynamicJsonDocument doc(128);
+    // One chunk per tick, and never faster than the heartbeat cadence — the
+    // grant authorises repair, it does not authorise a burst.
+    const uint32_t now = millis();
+    if (_lastResyncPullMs != 0 &&
+        (uint32_t)(now - _lastResyncPullMs) < MULTINODE_HEARTBEAT_INTERVAL_MS) return;
+    _lastResyncPullMs = now;
+
+    // Restore from where our own ring ends.  If we hold nothing, that is 0 and
+    // the master answers from its own window floor.
+    const uint32_t since = (uint32_t)_timer->getLapTotal();
+
+    String url = String("/api/multinode/laps?node=") + String(_myNodeId) +
+                 "&since=" + String(since) +
+                 "&limit=" + String(_resyncChunk);
+
+    String resp;
+    if (!_getFromMaster(url, resp)) {
+        DEBUG("[LAPSYNC] Resync pull failed\n");
+        return;
+    }
+
+    DynamicJsonDocument doc(512 + LAPSYNC_CHUNK_IDLE * 96);
+    if (deserializeJson(doc, resp)) return;
+
+    // Epoch check — a chunk from another race must never be merged.
+    const uint32_t chunkRaceId = doc["raceId"] | 0u;
+    if (chunkRaceId != _raceId) {
+        DEBUG("[LAPSYNC] Resync chunk epoch %u != %u — ignoring\n",
+              (unsigned)chunkRaceId, (unsigned)_raceId);
+        return;
+    }
+
+    JsonArray arr = doc["laps"].as<JsonArray>();
+    uint32_t applied = 0;
+    for (JsonObject lo : arr) {
+        LapSyncRecord rec;
+        rec.seq           = lo["seq"]           | 0u;
+        rec.lapTimeMs     = lo["lapTimeMs"]     | 0u;
+        rec.raceElapsedMs = lo["raceElapsedMs"] | 0u;
+        if (rec.seq < (uint32_t)_timer->getLapTotal()) continue;   // already held
+        _timer->appendRestoredLap(rec);
+        applied++;
+    }
+
+    const bool more = doc["more"] | false;
+    if (!more) {
+        // ── Convergence check ───────────────────────────────────────────
+        // `more == false` means the master has nothing further to send; it
+        // does NOT mean we arrived where the master is.  buildLapChunk()
+        // answers an out-of-window `since` with an empty array and
+        // more == false, so a client holding MORE laps than the master would
+        // reach this point having applied nothing — and then overwrite its
+        // own fastest lap and totals with the master's smaller summary, after
+        // which the digests falsely agree and nothing re-triggers.
+        //
+        // Adopt only on an exact match.  Anything else leaves the grant held,
+        // so the master's stall timer retries and, failing that, marks the
+        // node DIVERGENT — a visible non-convergence is the right outcome
+        // here, and silently corrupting the replica is not.
+        const uint32_t masterCount = doc["count"] | 0u;
+        if ((uint32_t)_timer->getLapTotal() != masterCount) {
+            DEBUG("[LAPSYNC] Restore short: hold %u, master %u — not adopting\n",
+                  (unsigned)_timer->getLapTotal(), (unsigned)masterCount);
+            return;
+        }
+
+        // ── CRC adoption (§4) ───────────────────────────────────────────
+        // Only at the END of the restore, and only verbatim.  This device is
+        // now holding laps it never witnessed — the evicted ones — so folding
+        // its own window would produce a digest that can never match the
+        // master's, and every later compare would re-trigger a resync.
+        RaceSummary s = {};
+        JsonObject sj = doc["summary"].as<JsonObject>();
+        s.lapTotal         = (uint16_t)(sj["lapTotal"]         | 0u);
+        s.fastestLapMs     =           (sj["fastestLapMs"]     | 0u);
+        s.fastestLapNumber = (uint16_t)(sj["fastestLapNumber"] | 0u);
+        s.slowestLapMs     =           (sj["slowestLapMs"]     | 0u);
+        s.sumLapMs         =           (sj["sumLapMs"]         | 0u);
+        s.timedLapCount    = (uint16_t)(sj["timedLapCount"]    | 0u);
+
+        _timer->adoptSyncState(doc["crc"] | 0u, s);
+        _resyncGranted = false;
+        DEBUG("[LAPSYNC] Restore complete — adopted crc %08X, %u lap(s) this chunk\n",
+              (unsigned)(doc["crc"] | 0u), (unsigned)applied);
+    }
+}
+
+void MultiNodeManager::_consumeHeartbeatResponse(const String& resp) {
+    if (resp.isEmpty()) return;
+    DynamicJsonDocument rdoc(320);
+    if (deserializeJson(rdoc, resp)) return;
+
+    // Epoch first — everything below is meaningless across a race boundary.
+    if (rdoc["raceId"].is<uint32_t>()) {
+        const uint32_t rid = rdoc["raceId"].as<uint32_t>();
+        if (rid != 0 && rid != _raceId) setRaceId(rid);
+    }
+
+    if (rdoc["ackSeq"].is<uint32_t>()) {
+        const uint32_t ack = rdoc["ackSeq"].as<uint32_t>();
+        if (!_hasAckedSeq || ack >= _ackedSeq) { _ackedSeq = ack; _hasAckedSeq = true; }
+    }
+    if (rdoc["oldestSeq"].is<uint32_t>()) _masterOldest = rdoc["oldestSeq"].as<uint32_t>();
+
+    // wantFrom >= 0 means the master is short and knows exactly where the gap
+    // starts.  Cheaper than a resync: the normal lap report simply resumes
+    // from there on the next tick.
+    if (rdoc["wantFrom"].is<int32_t>()) {
+        const int32_t wf = rdoc["wantFrom"].as<int32_t>();
+        if (wf >= 0) { _masterWantsFrom = true; _masterWantFromSeq = (uint32_t)wf; }
+        else          { _masterWantsFrom = false; }
+    }
+
+    // §7 — the master issues at most one grant fleet-wide.  Holding it is what
+    // permits this node to pull its own laps back after a reboot.
+    _resyncGranted   = rdoc["resyncGrant"] | false;
+    _resyncChunk     = rdoc["chunkLimit"]  | (uint32_t)LAPSYNC_CHUNK_RACING;
+    if (_resyncChunk == 0) _resyncChunk = 1;
+}
+
+void MultiNodeManager::_processQueuedLap() {
+    // NOTE the guard that is NOT here.  The old code returned early when
+    // !_masterConnected, which discarded every lap detected during a dropout —
+    // permanently, because nothing else held them.  Laps now live in
+    // LapTimer's ring the moment they are detected, so a disconnect costs
+    // nothing but a delay: the unacked window simply drains when the link
+    // returns.
+    if (_myNodeId == 0 || !_timer) return;
+    if (!_masterConnected) return;   // nothing to send TO — laps are safe in the ring
+
+    const uint16_t retained = _timer->getRetainedLapCount();
+    if (retained == 0) return;
+
+    // The unacked window is [_ackedSeq+1 .. lapTotal-1], clamped to what the
+    // ring still holds and to what the master has not already retired.
+    const uint32_t oldest = _timer->getOldestSeq();
+    uint32_t from = _hasAckedSeq ? (_ackedSeq + 1) : oldest;
+
+    // Never resend below the master's window floor.  Those laps aged out of
+    // its ring; they are RETIRED, not missing, and re-sending them would loop
+    // forever because the master can never ack a lap it has evicted (§6.1).
+    if (from < _masterOldest) from = _masterOldest;
+    if (from < oldest)        from = oldest;
+
+    // If the master named a resume point, honour it in BOTH directions — but
+    // never below either window floor.  The previous form only accepted a
+    // request that moved `from` forward, which made wantFrom inert in exactly
+    // the case it was added for: a master that is short and knows where the
+    // gap starts is asking for an EARLIER seq than our ack implies.
+    if (_masterWantsFrom) {
+        uint32_t want = _masterWantFromSeq;
+        if (want < _masterOldest) want = _masterOldest;
+        if (want < oldest)        want = oldest;
+        from = want;
+    }
+
+    const uint32_t lapTotal = (uint32_t)_timer->getLapTotal();
+    if (from >= lapTotal) return;    // nothing outstanding
+
+    // Cap the drain (§6.1).  An uncapped window would dump every lap
+    // accumulated during a long dropout in a single POST, at exactly the
+    // moment the master is also handling this node's re-registration.
+    uint32_t toSend = lapTotal - from;
+    if (toSend > LAPSYNC_MAX_UNACKED_PER_REPORT) toSend = LAPSYNC_MAX_UNACKED_PER_REPORT;
+
+    // ~90 bytes per lap plus a small header; sized for the cap so the
+    // document never has to grow.
+    DynamicJsonDocument doc(256 + LAPSYNC_MAX_UNACKED_PER_REPORT * 96);
     doc["nodeId"]    = _myNodeId;
-    doc["lapTimeMs"] = (uint32_t)_pendingLapTime;
-    doc["lapNumber"] = _localLapCount;
-    _localLapCount++;
+    doc["raceId"]    = _raceId;
+    doc["bootId"]    = _bootId;
+    doc["oldestSeq"] = oldest;
+    JsonArray arr    = doc.createNestedArray("laps");
+
+    for (uint32_t s = from; s < from + toSend; s++) {
+        // Translate seq -> ring index. getRetainedRecord() walks oldest-first.
+        if (s < oldest) continue;
+        const uint16_t idx = (uint16_t)(s - oldest);
+        LapSyncRecord rec;
+        if (!_timer->getRetainedRecord(idx, &rec)) break;
+
+        JsonObject o = arr.createNestedObject();
+        o["seq"]           = rec.seq;
+        o["lapTimeMs"]     = rec.lapTimeMs;
+        o["raceElapsedMs"] = rec.raceElapsedMs;
+    }
+    if (arr.size() == 0) return;
+
     String body;
     serializeJson(doc, body);
 
-    if (!_postToMaster("/api/multinode/lap", body)) {
-        DEBUG("[MULTINODE] Lap POST to master failed\n");
+    String resp;
+    if (!_postToMasterWithResponse("/api/multinode/lap", body, resp)) {
+        // No ack, so _ackedSeq does not move and these laps are still
+        // outstanding.  They ride the next report; nothing is lost and no
+        // counter has been advanced on a send that did not land.
+        DEBUG("[LAPSYNC] Lap report failed — %u lap(s) still unacked\n", (unsigned)arr.size());
+        return;
     }
+
+    DynamicJsonDocument rdoc(192);
+    if (deserializeJson(rdoc, resp)) return;   // malformed: treat as unacked
+
+    if (rdoc["ackSeq"].is<uint32_t>()) {
+        const uint32_t ack = rdoc["ackSeq"].as<uint32_t>();
+        if (!_hasAckedSeq || ack >= _ackedSeq) {
+            _ackedSeq    = ack;
+            _hasAckedSeq = true;
+        }
+    }
+    if (rdoc["oldestSeq"].is<uint32_t>()) {
+        _masterOldest = rdoc["oldestSeq"].as<uint32_t>();
+    }
+    // Gap request satisfied for now; the heartbeat digest will re-raise it if
+    // the master is still short.
+    _masterWantsFrom = false;
 }
 
 void MultiNodeManager::_sendQuitNotification() {
@@ -414,6 +664,22 @@ void MultiNodeManager::_sendQuitNotification() {
     } else {
         DEBUG("[MULTINODE] Quit notification to master failed\n");
     }
+}
+
+bool MultiNodeManager::_getFromMaster(const String& endpoint, String& response) {
+    HTTPClient http;
+    String url = String("http://") + MULTINODE_MASTER_IP + endpoint;
+    if (!http.begin(url)) return false;
+    http.setTimeout(800);
+    // Paired with setTimeout deliberately: setTimeout does NOT cover the
+    // connect phase, so an unreachable peer costs the full default 5000 ms and
+    // stalls this whole tick.
+    http.setConnectTimeout(800);
+    int code = http.GET();
+    bool ok = (code == 200);
+    if (ok) response = http.getString();
+    http.end();
+    return ok;
 }
 
 bool MultiNodeManager::_postToMaster(const String& endpoint, const String& body) {
@@ -570,7 +836,6 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     n.apSuffix      = apSuffix;
     n.lastSeen      = millis();
     n.online        = true;
-    n.lapCount      = 0;
     _nodes.push_back(n);
 
     assignedNodeId = newId;
@@ -580,20 +845,135 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     return true;
 }
 
-bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber) {
+const NodeInfo* MultiNodeManager::findNode(uint8_t nodeId) const {
+    for (const auto& n : _nodes) {
+        if (n.nodeId == nodeId) return &n;
+    }
+    return nullptr;
+}
+
+bool MultiNodeManager::handleLapBatch(uint8_t nodeId, uint32_t raceId, uint32_t bootId,
+                                      const LapSyncRecord* laps, size_t count,
+                                      uint32_t& outAckSeq, uint32_t& outOldestSeq) {
     if (_pausedForOta) return false;   // master is OTA-busy
+
     for (auto& n : _nodes) {
-        if (n.nodeId == nodeId) {
-            MultiNodeLap lap;
-            lap.lapTimeMs = lapTimeMs;
-            lap.timestamp = millis();
-            lap.lapNumber = lapNumber;
-            n.laps.push_back(lap);
-            if (n.laps.size() > 50) n.laps.erase(n.laps.begin());
-            n.lapCount = lapNumber;
-            n.lastSeen = millis();
-            return true;
+        if (n.nodeId != nodeId) continue;
+
+        // Epoch check first (§5).  Laps from a stale race must never merge
+        // into the current one — that is exactly how run 2 inherited run 1's
+        // laps and doubled the payload.
+        if (raceId != n.raceId) {
+            if (raceId != 0 && n.raceId != 0) {
+                DEBUG("[LAPSYNC] Node %c raceId %u != %u — dropping stale batch\n",
+                      slotLetter(nodeId), raceId, n.raceId);
+                outAckSeq    = n.hasAck ? n.ackSeq : 0;
+                outOldestSeq = n.laps.oldestSeq();
+                n.lastSeen   = millis();
+                return true;   // handled; the client will resync on the digest
+            }
+            if (raceId == 0 && n.raceId != 0) {
+                // We have an epoch and this client has not adopted it yet —
+                // it reconnected, or its masterStart POST never landed.  This
+                // must NOT fall through to the reset below: doing so wiped
+                // the master's copy of that node's race, which is the exact
+                // backup the protocol exists to keep.  Hold the batch; the
+                // raceId already in this reply brings the client forward and
+                // it resends on the next tick.
+                outAckSeq    = n.hasAck ? n.ackSeq : 0;
+                outOldestSeq = n.laps.oldestSeq();
+                n.lastSeen   = millis();
+                return true;
+            }
+            // We have no epoch of our own — adopt the client's and start clean.
+            n.raceId = raceId;
+            n.laps.reset();
+            n.hasAck = false;
+            n.ackSeq = 0;
         }
+
+        // A changed bootId means this node restarted.  Its laps are still
+        // valid (we hold them); what changed is that IT may have lost them.
+        // Record it so the governor can offer a restore (§7 trigger).
+        if (bootId != 0 && n.bootId != 0 && bootId != n.bootId) {
+            DEBUG("[LAPSYNC] Node %c bootId changed %u -> %u — reboot detected\n",
+                  slotLetter(nodeId), n.bootId, bootId);
+            n.resyncState      = LAPSYNC_NEEDED;
+            n.resyncNeededAtMs = millis();
+        }
+        if (bootId != 0) n.bootId = bootId;
+
+        for (size_t i = 0; i < count; i++) {
+            const LapSyncRecord& lap = laps[i];
+
+            // Idempotency: anything at or below the ack is already stored.
+            // This is what makes a retry after a lost response safe.
+            if (n.hasAck && lap.seq <= n.ackSeq) continue;
+
+            // Only append the lap that continues the sequence.  A gap means
+            // the client is ahead of us; we ack what we have and the client
+            // resends from there on its next report.
+            // An empty ring has no sequence to continue, so the first lap to
+            // arrive DEFINES the base — that is how a master which rebooted
+            // mid-race picks the fleet back up at seq 61 instead of demanding
+            // laps 0-60 that nobody is going to resend.  Every lap after it is
+            // gap-checked, because oldestSeq() reads total - retained() and is
+            // only the true base while appends stay contiguous.
+            const bool defining = (!n.hasAck && n.laps.retained() == 0);
+            const uint32_t expected = n.hasAck ? (n.ackSeq + 1) : n.laps.oldestSeq();
+            if (lap.seq != expected && !defining) {
+                DEBUG("[LAPSYNC] Node %c gap: got seq %u, expected %u\n",
+                      slotLetter(nodeId), lap.seq, expected);
+                break;
+            }
+
+            if (!n.laps.append(lap)) {
+                DEBUG("[LAPSYNC] Node %c ring alloc failed — dropping lap %u\n",
+                      slotLetter(nodeId), lap.seq);
+                break;
+            }
+            n.ackSeq   = lap.seq;
+            n.hasAck   = true;
+
+            // §6.5 — queue for the next directorState so peers learn of it.
+            _queueLapDelta(n, lap);
+        }
+
+        n.lastSeen   = millis();
+        // Quiet-gate reference (§7 guard 3).  Any real lap pushes resync back,
+        // so repair traffic can never land inside a crossing.
+        _lastLapHandledMs = n.lastSeen;
+        outAckSeq    = n.hasAck ? n.ackSeq : 0;
+        outOldestSeq = n.laps.oldestSeq();
+        return true;
+    }
+    return false;
+}
+
+bool MultiNodeManager::handleLap(uint8_t nodeId, uint32_t lapTimeMs, uint8_t lapNumber) {
+    // Legacy shape (§10): no seq, no epoch, no timestamp.  Synthesise what we
+    // can — the seq becomes our own next slot, and raceElapsedMs is left zero
+    // because this client did not send one and inventing an arrival time here
+    // is precisely the defect this protocol removes (§8).  Such a node is
+    // stored and displayed but is never anchored for cross-pilot ordering.
+    if (_pausedForOta) return false;
+
+    for (auto& n : _nodes) {
+        if (n.nodeId != nodeId) continue;
+
+        LapSyncRecord lap;
+        lap.lapTimeMs     = lapTimeMs;
+        lap.raceElapsedMs = 0;
+        lap.seq           = n.hasAck ? (n.ackSeq + 1) : 0;
+        (void)lapNumber;   // 8-bit, wraps at 255 — deliberately not trusted
+
+        if (!n.laps.append(lap)) return false;
+        n.ackSeq   = lap.seq;
+        n.hasAck   = true;
+        n.anchored = false;            // legacy nodes cannot be ordered (§8)
+        n.lastSeen = millis();
+        _queueLapDelta(n, lap);
+        return true;
     }
     return false;
 }
@@ -644,6 +1024,237 @@ bool MultiNodeManager::handleHeartbeat(uint8_t nodeId, const String& macAddress,
     return false;
 }
 
+bool MultiNodeManager::handleHeartbeatSync(uint8_t nodeId, uint32_t raceId, uint32_t bootId,
+                                           bool lapSyncCapable,
+                                           uint32_t count, uint32_t crc, uint32_t oldestSeq,
+                                           HeartbeatSyncReply& out) {
+    for (auto& n : _nodes) {
+        if (n.nodeId != nodeId) continue;
+
+        n.lapSyncCapable = lapSyncCapable;
+        n.reportedCount  = count;
+        n.reportedCrc    = crc;
+        n.reportedOldest = oldestSeq;
+
+        out.raceId    = _masterRaceId;
+        out.ackSeq    = n.hasAck ? n.ackSeq : 0;
+        out.oldestSeq = n.laps.oldestSeq();
+
+        // ── Capability (§10) ────────────────────────────────────────────
+        // A node that does not speak the protocol reports no digest, so its
+        // count and crc arrive as 0 — which is indistinguishable from "I lost
+        // every lap".  Left ungated, a single legacy client would trip the
+        // restore trigger below, be handed the one fleet-wide resync grant it
+        // cannot act on, hold that grant until the 120 s stall timeout, and
+        // block every other node's repair in the meantime.  It cannot be
+        // healed by a mechanism it does not implement, so it never enters the
+        // state machine at all.
+        if (!lapSyncCapable) {
+            out.wantFrom    = -1;
+            out.resyncGrant = false;
+            return true;
+        }
+
+        // ── Epoch (§5) ──────────────────────────────────────────────────
+        // Digests from different races are incomparable.  Say nothing about
+        // gaps or resync until the client has adopted the current epoch —
+        // it will, from the raceId in this very reply.
+        if (raceId != _masterRaceId) {
+            out.wantFrom = -1;
+            return true;
+        }
+
+        // ── bootId (§5) ─────────────────────────────────────────────────
+        // A changed bootId with an unchanged raceId is the one case that is
+        // NOT "the race just started": this node restarted mid-race and may
+        // have lost laps we still hold.
+        if (bootId != 0 && n.bootId != 0 && bootId != n.bootId &&
+            n.resyncState == LAPSYNC_IDLE && n.laps.total > 0) {
+            DEBUG("[LAPSYNC] Node %c rebooted mid-race — restore needed\n", slotLetter(nodeId));
+            n.resyncState      = LAPSYNC_NEEDED;
+            n.resyncNeededAtMs = millis();
+            n.resyncAttempts   = 0;
+        }
+        if (bootId != 0) n.bootId = bootId;
+
+        // ── Gap detection ───────────────────────────────────────────────
+        // The client is ahead of us: ask for the continuation on the fast
+        // path rather than spending a resync grant on it.
+        const uint32_t haveNext = n.hasAck ? (n.ackSeq + 1) : n.laps.oldestSeq();
+        if (count > haveNext) {
+            out.wantFrom = (int32_t)(haveNext < oldestSeq ? oldestSeq : haveNext);
+        } else {
+            out.wantFrom = -1;
+        }
+
+        // ── Divergence (§7 triggers) ────────────────────────────────────
+        // Same count, different digest: silent corruption that a count check
+        // alone would never see.  This is what the CRC is for.
+        if (n.resyncState == LAPSYNC_IDLE &&
+            count == n.laps.total && count > 0 && crc != n.laps.crc) {
+            DEBUG("[LAPSYNC] Node %c digest mismatch (count %u, crc %08X vs %08X)\n",
+                  slotLetter(nodeId), (unsigned)count, (unsigned)crc, (unsigned)n.laps.crc);
+            n.resyncState      = LAPSYNC_NEEDED;
+            n.resyncNeededAtMs = millis();
+            n.resyncAttempts   = 0;
+        }
+
+        // The client holds fewer laps than we do — it lost them.  It cannot
+        // simply be lagging: `count` is the client's own lapTotal and we only
+        // hold what it sent us, so our total can never legitimately run ahead
+        // of its own.
+        //
+        // This used to require count == 0, which healed a rebooted client but
+        // left a PARTIAL loss stranded forever: at count 5 against our 20 the
+        // CRC trigger below never fires (it needs equal counts) and wantFrom
+        // never fires (it needs the client ahead), so nothing repaired it.
+        if (n.resyncState == LAPSYNC_IDLE && n.laps.total > 0 && count < n.laps.total) {
+            DEBUG("[LAPSYNC] Node %c holds %u laps, master holds %u — restore needed\n",
+                  slotLetter(nodeId), (unsigned)count, (unsigned)n.laps.total);
+            n.resyncState      = LAPSYNC_NEEDED;
+            n.resyncNeededAtMs = millis();
+            n.resyncAttempts   = 0;
+        }
+
+        // ── Verify (§7) ─────────────────────────────────────────────────
+        // A streaming node that now matches is healed.
+        if (n.resyncState == LAPSYNC_STREAMING &&
+            count == n.laps.total && crc == n.laps.crc) {
+            DEBUG("[LAPSYNC] Node %c resync verified\n", slotLetter(nodeId));
+            n.resyncState    = LAPSYNC_IDLE;
+            n.resyncDoneAtMs = millis();
+            n.resyncAttempts = 0;
+            if (_resyncGrantNodeId == nodeId) _resyncGrantNodeId = 0;
+        }
+
+        out.resyncGrant = (_resyncGrantNodeId == nodeId);
+        if (out.resyncGrant) {
+            // Adaptive budget: the constraint only exists while racing.
+            const bool racing = _anyNodeRunning();
+            const bool escaped = (millis() - n.resyncNeededAtMs) >= LAPSYNC_ESCAPE_VALVE_MS;
+            out.chunkLimit = escaped ? LAPSYNC_CHUNK_ESCAPE
+                                     : (racing ? LAPSYNC_CHUNK_RACING : LAPSYNC_CHUNK_IDLE);
+            if (n.resyncState == LAPSYNC_GRANTED) n.resyncState = LAPSYNC_STREAMING;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool MultiNodeManager::buildLapChunk(uint8_t nodeId, uint32_t since, uint32_t limit,
+                                     String& out) const {
+    const NodeInfo* n = findNode(nodeId);
+    if (!n) return false;
+
+    if (limit == 0 || limit > LAPSYNC_MAX_LAPS) limit = LAPSYNC_CHUNK_IDLE;
+
+    const uint32_t oldest = n->laps.oldestSeq();
+    // A request below the window is answered from the window floor.  Refusing
+    // would stall a restore forever over laps that are retired, not lost.
+    if (since < oldest) since = oldest;
+
+    const uint16_t retained = n->laps.retained();
+    uint16_t startIdx = (uint16_t)(since - oldest);
+
+    out = "";
+    out.reserve(256 + limit * 96);
+    out += "{\"nodeId\":";      out += (int)nodeId;
+    out += ",\"raceId\":";      out += (uint32_t)n->raceId;
+    out += ",\"oldestSeq\":";   out += (uint32_t)oldest;
+    out += ",\"count\":";       out += (uint32_t)n->laps.total;
+    // Authoritative digest — the recipient ADOPTS this rather than folding its
+    // own window, which it cannot do for laps it never witnessed (§4).
+    out += ",\"crc\":";         out += (uint32_t)n->laps.crc;
+    out += ",\"summary\":{\"fastestLapMs\":"; out += (uint32_t)n->laps.summary.fastestLapMs;
+    out += ",\"fastestLapNumber\":";          out += (uint32_t)n->laps.summary.fastestLapNumber;
+    out += ",\"slowestLapMs\":";              out += (uint32_t)n->laps.summary.slowestLapMs;
+    out += ",\"sumLapMs\":";                  out += (uint32_t)n->laps.summary.sumLapMs;
+    out += ",\"timedLapCount\":";             out += (uint32_t)n->laps.summary.timedLapCount;
+    out += ",\"lapTotal\":";                  out += (uint32_t)n->laps.summary.lapTotal;
+    out += "},\"laps\":[";
+
+    uint32_t sent = 0;
+    for (uint16_t i = startIdx; i < retained && sent < limit; i++, sent++) {
+        LapSyncRecord rec;
+        if (!n->laps.get(i, &rec)) break;
+        if (sent) out += ',';
+        out += "{\"seq\":";            out += (uint32_t)rec.seq;
+        out += ",\"lapTimeMs\":";      out += (uint32_t)rec.lapTimeMs;
+        out += ",\"raceElapsedMs\":";  out += (uint32_t)rec.raceElapsedMs;
+        out += '}';
+    }
+    out += "],\"more\":";
+    out += ((uint32_t)startIdx + sent < retained) ? "true" : "false";
+    out += "}";
+    return true;
+}
+
+bool MultiNodeManager::_anyNodeRunning() const {
+    if (_nodes.empty()) return false;
+    for (const auto& n : _nodes) if (n.online && n.running) return true;
+    return false;
+}
+
+void MultiNodeManager::_runResyncGovernor(uint32_t nowMs) {
+    if (!isMasterMode()) return;
+
+    // Guard 3 — quiet gate.  Any real lap resets the reference, so the stream
+    // finds actual lulls empirically instead of trying to predict them.
+    const bool quiet = (uint32_t)(nowMs - _lastLapHandledMs) >= LAPSYNC_QUIET_GATE_MS;
+
+    // A grant is outstanding: let it run, but do not let it wedge the single
+    // fleet-wide slot forever if the node went away mid-stream.
+    if (_resyncGrantNodeId != 0) {
+        NodeInfo* g = nullptr;
+        for (auto& n : _nodes) if (n.nodeId == _resyncGrantNodeId) { g = &n; break; }
+
+        if (!g || !g->online ||
+            (g->resyncState != LAPSYNC_GRANTED && g->resyncState != LAPSYNC_STREAMING)) {
+            _resyncGrantNodeId = 0;
+        } else if ((uint32_t)(nowMs - _resyncGrantAtMs) > 120000u) {
+            // Stalled stream. Count it as a failed attempt so a node that can
+            // never converge reaches DIVERGENT instead of holding the slot.
+            if (++g->resyncAttempts >= LAPSYNC_VERIFY_ATTEMPTS) {
+                DEBUG("[LAPSYNC] Node %c DIVERGENT after %u attempts — giving up\n",
+                      slotLetter(g->nodeId), g->resyncAttempts);
+                g->resyncState = LAPSYNC_DIVERGENT;
+            } else {
+                g->resyncState = LAPSYNC_NEEDED;
+            }
+            g->resyncDoneAtMs  = nowMs;
+            _resyncGrantNodeId = 0;
+        }
+        return;
+    }
+
+    // No grant outstanding — pick at most one candidate.
+    for (auto& n : _nodes) {
+        if (!n.online || n.resyncState != LAPSYNC_NEEDED) continue;
+        // Belt and braces alongside the capability check in
+        // handleHeartbeatSync: the single fleet-wide grant must never be
+        // spent on a node that cannot consume it.
+        if (!n.lapSyncCapable) { n.resyncState = LAPSYNC_IDLE; continue; }
+
+        // Guard 4 — escape valve.  A saturated race must not starve repair
+        // indefinitely; slow repair beats no repair.
+        const bool escaped = (uint32_t)(nowMs - n.resyncNeededAtMs) >= LAPSYNC_ESCAPE_VALVE_MS;
+
+        // Guard 1 — per-node cooldown.  A node rebooting every ten seconds
+        // costs one stream per cooldown, not one per boot.
+        if (n.resyncDoneAtMs != 0 &&
+            (uint32_t)(nowMs - n.resyncDoneAtMs) < LAPSYNC_RESYNC_COOLDOWN_MS) continue;
+
+        if (!quiet && !escaped) continue;
+
+        n.resyncState      = LAPSYNC_GRANTED;
+        _resyncGrantNodeId = n.nodeId;
+        _resyncGrantAtMs   = nowMs;
+        DEBUG("[LAPSYNC] Resync grant -> node %c (%s)\n",
+              slotLetter(n.nodeId), escaped ? "escape valve" : "quiet");
+        return;   // Guard 2 — exactly one grant fleet-wide
+    }
+}
+
 bool MultiNodeManager::handleQuit(uint8_t nodeId) {
     if (_pausedForOta) return false;   // master is OTA-busy
     for (auto& n : _nodes) {
@@ -659,14 +1270,98 @@ bool MultiNodeManager::handleQuit(uint8_t nodeId) {
 
 void MultiNodeManager::clearAllLaps() {
     for (auto& n : _nodes) {
-        n.laps.clear();
-        n.lapCount               = 0;
+        n.laps.reset();
+        n.ackSeq                 = 0;
+        n.hasAck                 = false;
+        n.reportedCrc            = 0;
+        n.reportedCount          = 0;
+        n.reportedOldest         = 0;
+        n.resyncState            = LAPSYNC_IDLE;
+        n.resyncAttempts         = 0;
         n.running                = false;
         n.quitEarly              = false;
         n.excludedFromCurrentRace = false;
+        // Anchors belong to a race, not to a node — a cleared race has none.
+        n.anchored               = false;
+        n.anchorRttMs            = 0xFFFFFFFF;
     }
     _excludeNodes.clear();
+    _lapDeltas.clear();
     DEBUG("[MULTINODE] All laps cleared\n");
+}
+
+// ── Lap Sync: epochs, anchors and the peer delta feed ───────────────────
+
+uint32_t MultiNodeManager::beginRaceEpoch() {
+    // A fresh, non-zero id per race.  esp_random() is seeded from hardware, so
+    // two masters powering up together do not collide the way millis() would.
+    do { _masterRaceId = esp_random(); } while (_masterRaceId == 0);
+
+    for (auto& n : _nodes) {
+        n.raceId         = _masterRaceId;
+        n.laps.reset();
+        n.ackSeq         = 0;
+        n.hasAck         = false;
+        n.reportedCrc    = 0;
+        n.reportedCount  = 0;
+        n.reportedOldest = 0;
+        n.resyncState    = LAPSYNC_IDLE;
+        n.resyncAttempts = 0;
+        n.anchored       = false;
+        n.anchorRttMs    = 0xFFFFFFFF;
+    }
+    _lapDeltas.clear();
+    DEBUG("[LAPSYNC] Race epoch %u begun\n", _masterRaceId);
+    return _masterRaceId;
+}
+
+void MultiNodeManager::recordAnchor(uint8_t nodeId, uint32_t masterAckMs, uint32_t rttMs) {
+    for (auto& n : _nodes) {
+        if (n.nodeId != nodeId) continue;
+
+        // Keep the LOWEST-RTT sample.  Outbound and return paths queue
+        // differently under load, so half-RTT is only a good estimate of the
+        // one-way delay when there was little queueing to be asymmetric about
+        // (§8).  Later heartbeats can therefore improve the anchor, never
+        // degrade it.
+        if (n.anchored && rttMs >= n.anchorRttMs) return;
+
+        n.anchorMs    = masterAckMs - (rttMs / 2);
+        n.anchorRttMs = rttMs;
+        n.anchored    = true;
+        return;
+    }
+}
+
+void MultiNodeManager::_queueLapDelta(const NodeInfo& n, const LapSyncRecord& lap) {
+    // Bounded (§6.5).  Dropping past the cap is deliberate: peer lap data is a
+    // cache, and the recipient detects the shortfall through the per-node
+    // digest carried in the same payload.  Growing this vector under load is
+    // exactly the behaviour this protocol exists to remove.
+    if (_lapDeltas.size() >= (size_t)LAPSYNC_MAX_LAP_DELTAS) return;
+
+    LapDelta d;
+    d.nodeId        = n.nodeId;
+    d.seq           = lap.seq;
+    d.lapTimeMs     = lap.lapTimeMs;
+    d.raceElapsedMs = lap.raceElapsedMs;
+    d.ordered       = n.anchored;
+    // Unanchored nodes (solo racers, legacy clients) are stored and displayed
+    // but cannot be placed on the field's timeline, so they carry no ordering
+    // key rather than a fabricated one (§8).
+    d.orderMs       = n.anchored ? (n.anchorMs + lap.raceElapsedMs) : 0u;
+    _lapDeltas.push_back(d);
+}
+
+void MultiNodeManager::setRaceId(uint32_t raceId) {
+    if (raceId == _raceId) return;
+    _raceId          = raceId;
+    // Acks are only meaningful inside one epoch.
+    _ackedSeq        = 0;
+    _hasAckedSeq     = false;
+    _masterOldest    = 0;
+    _masterWantsFrom = false;
+    DEBUG("[LAPSYNC] Adopted race epoch %u\n", raceId);
 }
 
 void MultiNodeManager::_checkNodeTimeouts(uint32_t /*currentTimeMs*/) {
@@ -819,6 +1514,11 @@ void MultiNodeManager::setExcludeNodes(const std::vector<uint8_t>& ids) {
 }
 
 void MultiNodeManager::_broadcastRaceStart() {
+    // New epoch before anything ships (§5).  This is what stops a second race
+    // from inheriting the first one's laps — the regression that started this
+    // work, where run 2's payload was double run 1's and heap min fell to 9 KB.
+    const uint32_t raceId = beginRaceEpoch();
+
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
         // Skip excluded nodes (e.g., solo racers the director chose to leave running)
@@ -826,17 +1526,37 @@ void MultiNodeManager::_broadcastRaceStart() {
         for (uint8_t id : _excludeNodes) { if (id == n.nodeId) { excluded = true; break; } }
         n.excludedFromCurrentRace = excluded;
         if (excluded) {
+            // No start ack means no anchor, so this node is unanchored for the
+            // whole race: stored and displayed, but never placed on the
+            // field's timeline (§8).  Anchors are never back-filled — a
+            // fabricated one would misplace every lap it covers.
+            n.anchored = false;
             DEBUG("[MULTINODE] Race start → node %c (%s): SKIPPED (excluded)\n", slotLetter(n.nodeId), n.staIP.c_str());
             continue;
         }
         HTTPClient http;
-        String url = "http://" + n.staIP + "/timer/masterStart";
+        // raceId rides the start so the client adopts the epoch at the same
+        // instant it starts its clock — the two must not be learned separately.
+        String url = "http://" + n.staIP + "/timer/masterStart?raceId=" + String(raceId);
         if (http.begin(url)) {
             http.setTimeout(500);
             http.setConnectTimeout(500);
+            const uint32_t t1 = millis();
             int code = http.POST("");
+            const uint32_t t4 = millis();
             http.end();
-            DEBUG("[MULTINODE] Race start → node %c (%s): HTTP %d\n", slotLetter(n.nodeId), n.staIP.c_str(), code);
+
+            if (code > 0 && code < 400) {
+                // Anchor this node's race clock into master time (§8).
+                // masterAckMs - rtt/2 estimates the instant the client
+                // actually started, assuming a symmetric path; the estimate is
+                // refined later by keeping the lowest-RTT sample.
+                recordAnchor(n.nodeId, t4, t4 - t1);
+            } else {
+                n.anchored = false;
+            }
+            DEBUG("[MULTINODE] Race start → node %c (%s): HTTP %d rtt=%u\n",
+                  slotLetter(n.nodeId), n.staIP.c_str(), code, (unsigned)(t4 - t1));
         }
         vTaskDelay(1);  // yield between nodes so async_tcp stays fed
     }

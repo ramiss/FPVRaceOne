@@ -330,6 +330,11 @@ void setup() {
     // Initialize multi-node manager — pass LED and webserver so the recruit
     // job can hold the LED solid-on and restore the AP after STA work.
     multiNodeManager.init(&config, &led, &ws);
+    // The client's own laps live in LapTimer's ring and are authoritative
+    // (§3).  Handing the sync layer that pointer is what lets it read the
+    // unacked window straight out of the ring instead of keeping a second,
+    // lossy copy — see the notes on _timer in multinode.h.
+    multiNodeManager.setLapTimer(&timer);
 
     ws.init(&config, &timer, nullptr, &buzzer, &led, &raceHistory, &storage, &selfTest, &rx, &webhookManager, &multiNodeManager);
 
