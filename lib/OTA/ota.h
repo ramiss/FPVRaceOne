@@ -59,6 +59,24 @@ public:
         String firmwareUrl;      // browser_download_url for firmware asset (first option)
         String filesystemUrl;    // browser_download_url for littlefs asset (first option)
         std::vector<ReleaseOption> options;   // up to 5, newest-first; populated on pre-release channel
+
+        // ── Partition-fit check ─────────────────────────────────────────────
+        // The partition table lives at 0x8000 and OTA only ever writes app and
+        // data partitions, so a unit flashed before a layout change keeps its
+        // OLD, smaller partitions forever.  Once a release outgrows them, the
+        // download succeeds and Update.begin() then refuses for lack of space —
+        // surfacing as a generic "download failed, re-run the update", which
+        // sends the pilot round in circles re-running something that can never
+        // work.  Comparing the published asset sizes against THIS device's
+        // partitions turns that into a single accurate instruction: reflash
+        // over USB.  Sizes come from the GitHub release JSON; the partition
+        // sizes are read from the running partition table.
+        uint32_t firmwareSize     = 0;   // bytes, from the release asset metadata
+        uint32_t filesystemSize   = 0;
+        uint32_t appPartitionSize = 0;   // bytes available in the target OTA slot
+        uint32_t fsPartitionSize  = 0;
+        bool     fits             = true;   // false => OTA cannot succeed on this unit
+        String   fitError;                  // pilot-facing reason, empty when fits
     };
 
     // multinode is optional — if provided, the check/apply flows pause it
@@ -76,6 +94,14 @@ public:
               MultiNodeManager* multinode = nullptr,
               Webserver* webserver = nullptr);
     void loop();  // call from parallel task — drains pending apply work
+
+    // Fill UpdateInfo's partition-fit fields from the RUNNING partition table.
+    // Shared by checkForUpdate() and the /api/update/status handler so there is
+    // exactly one verdict, rather than each re-deriving it slightly differently.
+    static void evaluateFit(UpdateInfo& info);
+
+    // URL shown to a pilot whose unit cannot take this update over the air.
+    static const char* flasherUrl();
 
     // Synchronous: connects, queries GitHub, fills `out`.
     // Returns false on error and sets `errorMessage`.

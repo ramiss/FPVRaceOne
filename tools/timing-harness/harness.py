@@ -1029,6 +1029,111 @@ def probe_master(master_ip, timeout=2.0):
                 pass
 
 
+# ── Fanout probe ────────────────────────────────────────────────────────────
+#
+# The master's directorState fanout POSTs to every client SEQUENTIALLY, with
+# HTTPClient setTimeout(300) + setConnectTimeout(300).  Six clients therefore
+# cost up to ~3.6 s per broadcast against a 2 s minimum interval, and a bench
+# capture showed 1.8-2.5 s sustained WITH NO LOAD AT ALL — i.e. most clients
+# were eating the timeout on every broadcast.  That saturates parallelTask,
+# which is what starves the SSE channel and produces "not receiving updates"
+# in the browser.
+#
+# These helpers answer the question the serial log cannot: is any individual
+# client actually slower than the 300 ms the firmware allows it?
+
+DIRECTOR_STATE_PATH   = "/api/multinode/directorState"
+DIRECTOR_FANOUT_MS    = 300     # HTTPClient setTimeout in _broadcastDirectorState
+DIRECTOR_INTERVAL_MS  = 2000    # MIN_DIRECTOR_BROADCAST_INTERVAL_MS
+
+
+def fetch_director_state(master_ip, timeout=4.0):
+    """Return (raw_bytes, parsed_or_None) for the master's directorState.
+
+    This is the exact payload the master fans out, so its length is the real
+    per-client transfer size -- not an estimate.
+    """
+    conn = None
+    try:
+        host, port = _split_host_port(master_ip)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("GET", "/api/multinode/nodes")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            return None, None
+        raw = resp.read()
+        try:
+            return raw, json.loads(raw.decode("utf-8", "replace"))
+        except ValueError:
+            return raw, None
+    except Exception:
+        return None, None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def time_director_post(target_ip, payload, timeout=4.0):
+    """POST `payload` to one client's directorState endpoint; return ms.
+
+    Returns (elapsed_ms, status) with status None on transport failure.  The
+    timeout is deliberately far longer than the firmware's 300 ms: we want to
+    MEASURE how long the client really takes, not reproduce the firmware's
+    truncation of it.
+    """
+    conn = None
+    t0 = time.time()
+    try:
+        host, port = _split_host_port(target_ip)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("POST", DIRECTOR_STATE_PATH, body=payload,
+                     headers={"Content-Type": "application/json",
+                              "Content-Length": str(len(payload))})
+        resp = conn.getresponse()
+        resp.read()
+        return (time.time() - t0) * 1000.0, resp.status
+    except Exception:
+        return (time.time() - t0) * 1000.0, None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def client_targets(nodes_json):
+    """[(nodeId, ip, pilotName)] for online clients in a directorState payload.
+
+    MUST use staIP, not clientIP.  clientIP is the node's OWN AP gateway --
+    192.168.4.1 on every unit, identical across the fleet and unroutable from
+    the bench PC.  staIP is request->client()->remoteIP() as the master saw it
+    at registration, i.e. the exact address _broadcastDirectorState() dials.
+    Probing clientIP measured nothing and reported every node UNREACHABLE.
+
+    Falls back to clientIP only for firmware too old to publish staIP, so the
+    caller can still report something rather than silently finding no targets.
+    """
+    out = []
+    if not isinstance(nodes_json, dict):
+        return out
+    for n in nodes_json.get("nodes", []) or []:
+        if not isinstance(n, dict):
+            continue
+        nid = n.get("nodeId")
+        if not nid:                      # 0 == the master's own row
+            continue
+        if not n.get("online"):
+            continue
+        ip = (n.get("staIP") or "").strip() or (n.get("clientIP") or "").strip()
+        if ip:
+            out.append((nid, ip, n.get("pilotName") or "?"))
+    return out
+
+
 def find_min_detectable_width(emu, dut, interval_ms, peak, baseline,
                               start_ms=100, floor_ms=2, resolution_ms=2,
                               count=10, require=0.9, progress=None,

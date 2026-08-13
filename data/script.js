@@ -704,8 +704,16 @@ function setupWiFiEvents() {
     try {
       const data = JSON.parse(e.data);
       if (Array.isArray(data.nodes)) {
-        mnRenderNodes(data.nodes);
-        mnRenderRaceTab(data.nodes);
+        // MUST go through rvMergeNodes, exactly like the client Race View.
+        // Once the §10 capability gate opens the master stops sending per-node
+        // `laps` arrays, so mnRenderRaceTab's `found.laps` is undefined and
+        // every client row renders 0 laps.  This path used to read the raw
+        // nodes and only worked because the legacy arrays were still there.
+        const merged = rvMergeNodes(data.nodes,
+                                    Array.isArray(data.lapDeltas) ? data.lapDeltas : [],
+                                    (data.race || {}).raceId);
+        mnRenderNodes(merged);
+        mnRenderRaceTab(merged);
       }
     } catch (_) {}
   }, false);
@@ -8014,7 +8022,15 @@ async function mnRefreshNodes() {
     const r = await fetch('/api/multinode/nodes');
     if (r.ok) {
       const data = await r.json();
-      const nodes = data.nodes || [];
+      // Same merge the SSE path does.  /api/multinode/nodes is built by the
+      // SAME _buildDirectorStatePayload() as the push, so once the §10 gate is
+      // open it carries digests + lapDeltas and NO per-node `laps` arrays.
+      // Rendering it raw wipes every client's laps to 0, and because this poll
+      // interleaves with the SSE push (and fires again on every multiNodeLap)
+      // the table visibly fills and blanks over and over.
+      const nodes = rvMergeNodes(Array.isArray(data.nodes) ? data.nodes : [],
+                                 Array.isArray(data.lapDeltas) ? data.lapDeltas : [],
+                                 (data.race || {}).raceId);
       ok = true;
       mnRenderNodes(nodes);
       if (mnImportedNodes === null) mnRenderRaceTab(nodes);
@@ -9723,6 +9739,82 @@ function rvRender() {
 let rvLapCache   = {};   // nodeId -> [{seq, lapTimeMs, raceElapsedMs, orderMs}]
 let rvCacheEpoch = 0;    // raceId the cache belongs to
 
+// ── Peer-history backfill (§6.5) ────────────────────────────────────────────
+// lapDeltas is a LIVE stream capped at 32 entries per push, so the browser's
+// cache is only as complete as the pushes it happened to be open for.  Open the
+// page mid-race, or refresh it, and the cache starts empty with no way to catch
+// up — the payload carries digests and the last 32 deltas, nothing more.
+//
+// /api/multinode/laps is the master's authoritative per-node history (built for
+// client resync).  This is the browser using that same channel to close its own
+// gaps, which is what makes "the browser holds peer history" survivable across a
+// reload.
+//
+// Deliberately conservative: ONE request in flight fleet-wide and a per-node
+// cooldown.  A page load with seven nodes must not fan out seven parallel GETs
+// into the master's async_tcp task, which is the same thread serving the race.
+let   rvBackfillBusy   = false;
+const rvBackfillNextAt = {};          // nodeId -> earliest retry timestamp
+const RV_BACKFILL_COOLDOWN_MS = 5000;
+const RV_BACKFILL_CHUNK       = 25;
+
+// First sequence number this cache is missing, or -1 when complete.
+// Walks from the node's window floor so a gap in the MIDDLE is found, not just
+// a short tail — a dropped delta leaves a hole the tail check would skip past.
+function rvFirstMissingSeq(cached, oldestSeq, total) {
+  let want = oldestSeq;
+  for (const l of cached) {
+    if (l.seq < want) continue;      // already retired or duplicate
+    if (l.seq > want) break;         // hole at `want`
+    want++;
+  }
+  return want < total ? want : -1;
+}
+
+function rvMaybeBackfill(node, cached, raceId) {
+  const nodeId = node.nodeId;
+  // nodeId 0 is the master's own row.  buildLapChunk() resolves the node via
+  // findNode(), which only knows CLIENTS, so node=0 would 404 forever.
+  if (!nodeId) return;
+  const total  = Number(node.lapCount)  || 0;
+  const oldest = Number(node.oldestSeq) || 0;
+  if (total <= 0) return;
+
+  const from = rvFirstMissingSeq(cached, oldest, total);
+  if (from < 0) return;                       // nothing missing
+  if (rvBackfillBusy) return;                 // one at a time, fleet-wide
+  const now = Date.now();
+  if ((rvBackfillNextAt[nodeId] || 0) > now) return;
+
+  rvBackfillBusy = true;
+  rvBackfillNextAt[nodeId] = now + RV_BACKFILL_COOLDOWN_MS;
+
+  fetch(`/api/multinode/laps?node=${nodeId}&since=${from}&limit=${RV_BACKFILL_CHUNK}`)
+    .then(r => (r.ok ? r.json() : null))
+    .then(d => {
+      if (!d || !Array.isArray(d.laps)) return;
+      // Epoch guard: a chunk from a previous race must never merge into this
+      // one's standings.  Same rule the firmware applies on its own resync.
+      if (raceId && d.raceId && d.raceId !== raceId) return;
+      const list = (rvLapCache[nodeId] ||= []);
+      let added = 0;
+      for (const l of d.laps) {
+        if (list.some(x => x.seq === l.seq)) continue;
+        list.push({ seq: l.seq, lapTimeMs: l.lapTimeMs,
+                    raceElapsedMs: l.raceElapsedMs, orderMs: 0 });
+        added++;
+      }
+      if (added) {
+        list.sort((a, b) => a.seq - b.seq);
+        // More to fetch: clear the cooldown so the next push continues paging
+        // immediately instead of trickling one chunk per 5 s.
+        if (d.more) rvBackfillNextAt[nodeId] = 0;
+      }
+    })
+    .catch(() => { /* transient: the cooldown retries on a later push */ })
+    .finally(() => { rvBackfillBusy = false; });
+}
+
 function rvMergeNodes(nodes, deltas, raceId) {
   // A new epoch invalidates everything: laps from a previous race must never
   // merge into this one's standings.
@@ -9763,10 +9855,15 @@ function rvMergeNodes(nodes, deltas, raceId) {
     if (!cached) return { ...n, lapsStale: 0, unanchored: n.anchored === false };
 
     // Digest comparison (§6.5).  lapCount is the authoritative total; anything
-    // we are missing was dropped by the delta cap or arrived while we were
-    // away.  We do not repair it — we disclose it.
+    // we are missing was dropped by the delta cap or arrived while we were away.
     const known  = typeof n.lapCount === 'number' ? n.lapCount : cached.length;
     const missing = Math.max(0, known - cached.length);
+
+    // ...and now we DO repair it.  Disclosure alone was not enough: a refresh
+    // mid-race left the director looking at zeros with no way back, because the
+    // delta stream only carries what arrives from that moment on.  The badge
+    // still shows while the gap is being closed.
+    if (missing > 0) rvMaybeBackfill(n, cached, raceId);
 
     return {
       ...n,

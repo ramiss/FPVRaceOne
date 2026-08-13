@@ -112,7 +112,7 @@ jobs:
           # esptool v5 CLI: `merge-bin` + hyphenated flags. `--flash-size 4MB`
           # only sets the header value (does NOT pad — padding is --pad-to-size),
           # so the output spans 0x0..end-of-app and never overlaps the LittleFS
-          # partition at 0x320000 that gets flashed separately.
+          # partition at 0x380000 that gets flashed separately.
           python -m esptool --chip esp32c6 merge-bin \
             -o /tmp/merged-stash.bin \
             --flash-mode dio --flash-freq 80m --flash-size 4MB \
@@ -121,6 +121,22 @@ jobs:
             0xe000  "$BOOT_APP0" \
             0x10000 "$BUILD/firmware.bin"
           echo "Stashed merged image to /tmp/merged-stash.bin"
+
+          # ── Stash the partition table and otadata reset separately ──────────
+          # These let the flasher MIGRATE a unit to a new partition layout
+          # without using Recovery.  That matters because merge-bin pads the
+          # gaps, so merged.bin overwrites 0x8C00-0xE000 with 0xFF — i.e. it
+          # wipes NVS (WiFi credentials, pilot name, calibration).  Writing
+          # partitions.bin + boot_app0.bin on their own changes the layout and
+          # leaves NVS untouched.
+          #
+          # boot_app0.bin is NOT optional in that flow: it resets otadata to
+          # select ota_0.  A unit that last booted from ota_1 would otherwise
+          # keep booting an ota_1 that has MOVED under the new table, and run
+          # whatever bytes now live there.
+          cp "$BUILD/partitions.bin" /tmp/partitions-stash.bin
+          cp "$BOOT_APP0"            /tmp/boot_app0-stash.bin
+          echo "Stashed partitions.bin and boot_app0.bin"
 
       - name: Build filesystem image
         run: |
@@ -154,31 +170,54 @@ jobs:
           # Built in the "Build firmware" step (its bootloader/partitions inputs
           # are wiped by buildfs) and stashed; just restore it here.  It spans
           # 0x0..end-of-app and is flashed at 0x0; the littlefs image is written
-          # separately at 0x320000 for a complete restore of a bricked device.
+          # separately at 0x380000 for a complete restore of a bricked device.
           test -s /tmp/merged-stash.bin \
             || { echo "::error::merged image stash missing — Build firmware step did not produce it"; exit 1; }
           cp /tmp/merged-stash.bin release-assets/FPVRaceOne-merged.bin
+
+          # ── Layout migration assets ──────────────────────────────────────────
+          test -s /tmp/partitions-stash.bin \
+            || { echo "::error::partitions stash missing — Build firmware step did not produce it"; exit 1; }
+          test -s /tmp/boot_app0-stash.bin \
+            || { echo "::error::boot_app0 stash missing — Build firmware step did not produce it"; exit 1; }
+          cp /tmp/partitions-stash.bin release-assets/FPVRaceOne-partitions.bin
+          cp /tmp/boot_app0-stash.bin  release-assets/FPVRaceOne-boot_app0.bin
 
           # ── Machine-readable flash manifest ──────────────────────────────────
           # The portable flasher reads this from the release instead of
           # hardcoding offsets, so it never drifts when the partition table
           # changes.  `schema` lets the tool refuse manifests it's too old to
           # understand.
+          # schema 2 (was 1) BECAUSE the partition layout moved.  A schema bump
+          # makes older flashers refuse this release outright with "please
+          # update the tool" (engine.py checks schema > SUPPORTED_SCHEMA) — the
+          # safe failure.  Left at schema 1, an old flasher would happily read
+          # the new filesystem offset and write LittleFS to 0x380000 on a device
+          # whose table still says 0x320000, leaving it with no web UI.
           cat > release-assets/flash-manifest.json <<EOF
           {
-            "schema": 1,
+            "schema": 2,
             "product": "FPVRaceOne",
             "chip": "esp32c6",
             "baud": 460800,
             "version": "${{ steps.version.outputs.version }}",
             "tag": "${{ steps.version.outputs.tag }}",
+            "layout": {
+              "id":           "c6-2ota-1b0000",
+              "table_offset": "0x8000",
+              "app_offset":   "0x10000",
+              "app_size":     "0x1B0000"
+            },
             "assets": {
-              "firmware":   { "name": "FPVRaceOne-firmware.bin", "offset": "0x10000"  },
-              "filesystem": { "name": "FPVRaceOne-littlefs.bin", "offset": "0x320000" },
-              "merged":     { "name": "FPVRaceOne-merged.bin",   "offset": "0x0"      }
+              "firmware":   { "name": "FPVRaceOne-firmware.bin",   "offset": "0x10000"  },
+              "filesystem": { "name": "FPVRaceOne-littlefs.bin",   "offset": "0x380000" },
+              "merged":     { "name": "FPVRaceOne-merged.bin",     "offset": "0x0"      },
+              "partitions": { "name": "FPVRaceOne-partitions.bin", "offset": "0x8000"   },
+              "otadata":    { "name": "FPVRaceOne-boot_app0.bin",  "offset": "0xE000"   }
             },
             "flash_modes": {
               "update":   ["firmware", "filesystem"],
+              "migrate":  ["partitions", "otadata", "firmware", "filesystem"],
               "recovery": ["merged", "filesystem"]
             }
           }
@@ -186,10 +225,25 @@ jobs:
 
           echo "----- staged assets -----"
           ls -la release-assets/
-          # Sanity: print sizes (firmware must fit in the 1.5 MB OTA app slot)
-          stat --printf "firmware.bin: %s bytes\n" release-assets/FPVRaceOne-firmware.bin
-          stat --printf "littlefs.bin: %s bytes\n" release-assets/FPVRaceOne-littlefs.bin
-          stat --printf "merged.bin:   %s bytes\n" release-assets/FPVRaceOne-merged.bin
+          stat --printf "firmware.bin:   %s bytes\n" release-assets/FPVRaceOne-firmware.bin
+          stat --printf "littlefs.bin:   %s bytes\n" release-assets/FPVRaceOne-littlefs.bin
+          stat --printf "merged.bin:     %s bytes\n" release-assets/FPVRaceOne-merged.bin
+          stat --printf "partitions.bin: %s bytes\n" release-assets/FPVRaceOne-partitions.bin
+          stat --printf "boot_app0.bin:  %s bytes\n" release-assets/FPVRaceOne-boot_app0.bin
+
+          # Hard gates.  These are the two ways a release can brick a unit, so
+          # fail the build rather than publish.
+          APP_SIZE=$((0x1B0000))     # ota_0/ota_1 size in the CURRENT csv
+          FS_SIZE=$((0x80000))       # spiffs size in the CURRENT csv
+          FW_BYTES=$(stat --printf "%s" release-assets/FPVRaceOne-firmware.bin)
+          FS_BYTES=$(stat --printf "%s" release-assets/FPVRaceOne-littlefs.bin)
+          if [ "$FW_BYTES" -gt "$APP_SIZE" ]; then
+            echo "::error::firmware.bin is $FW_BYTES bytes, exceeds the $APP_SIZE byte app partition"; exit 1
+          fi
+          if [ "$FS_BYTES" -gt "$FS_SIZE" ]; then
+            echo "::error::littlefs.bin is $FS_BYTES bytes, exceeds the $FS_SIZE byte spiffs partition"; exit 1
+          fi
+          echo "size gates OK: fw $FW_BYTES/$APP_SIZE, fs $FS_BYTES/$FS_SIZE"
           cat release-assets/flash-manifest.json
 
       - name: Diagnostics on failure
@@ -248,4 +302,6 @@ jobs:
             release-assets/FPVRaceOne-firmware.bin
             release-assets/FPVRaceOne-littlefs.bin
             release-assets/FPVRaceOne-merged.bin
+            release-assets/FPVRaceOne-partitions.bin
+            release-assets/FPVRaceOne-boot_app0.bin
             release-assets/flash-manifest.json

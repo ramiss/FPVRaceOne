@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <vector>
+#include <esp_heap_caps.h>   // largest-free-block check in LapRing::ensure()
 
 // ─────────────────────────────────────────────────────────────────────────
 //  Lap Sync Protocol v1.1 — shared types and constants
@@ -26,6 +27,12 @@
 // removing the lap arrays from the directorState payload, which scaled at
 // 40 B per lap per node and was rebuilt four times a second.
 #define LAPSYNC_MAX_LAPS 200
+
+// Contiguous bytes LapRing::ensure() leaves unclaimed after taking its ring.
+// AsyncTCP needs a block of this order to accept a connection; losing the last
+// one costs the whole web UI, which is a far worse outcome than a node whose
+// lap ring could not be allocated this race.
+#define LAPSYNC_HEAP_RESERVE 8192
 
 // §6.1 — the unacked window drains at this rate, oldest first.  An uncapped
 // report would dump ~3.6 KB in one POST after a long disconnect, precisely
@@ -189,8 +196,24 @@ struct LapRing {
     // Returns false if the ring could not be allocated — caller should drop
     // the lap rather than crash.  On a device this close to its heap floor,
     // an allocation failure is a real branch, not a theoretical one.
+    //
+    // The check MUST happen before the resize, not after.  std::vector::resize
+    // does not report failure by returning — it throws std::bad_alloc, so the
+    // old `resize(); return size()==MAX;` form could never observe a failure:
+    // with exceptions enabled the return was unreachable, and with
+    // -fno-exceptions the throw becomes std::terminate.  Neither is the
+    // "caller should drop the lap" behaviour the signature promises.
+    //
+    // Largest-free-block rather than total free, because this device fails on
+    // fragmentation: measured 2026-08-08, maxBlk fell to 2356 while free heap
+    // was still 21792.  The reserve keeps us from claiming the last usable
+    // block and starving AsyncTCP.
     bool ensure() {
         if (buf.size() == (size_t)LAPSYNC_MAX_LAPS) return true;
+        const size_t need = (size_t)LAPSYNC_MAX_LAPS * sizeof(LapSyncRecord);
+        if (heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < need + LAPSYNC_HEAP_RESERVE) {
+            return false;
+        }
         buf.resize(LAPSYNC_MAX_LAPS);
         return buf.size() == (size_t)LAPSYNC_MAX_LAPS;
     }

@@ -19,7 +19,7 @@ Flow:
   4. Download both into .pio/build/published/<tag>/ (cached per tag).
   5. Auto-detect ALL connected ESP32-C6 USB serial ports.
   6. For every detected device: FULL CHIP ERASE, then flash merged.bin to
-     0x0 and littlefs.bin to 0x320000.
+     0x0 and littlefs.bin to 0x380000.
      A failure on one device does not stop the others — a per-device
      OK/FAILED summary is printed at the end and the task exits non-zero
      if any device failed.
@@ -32,7 +32,7 @@ WHY merged.bin AND WHY A FULL ERASE
   merged.bin is the CI-built full-flash image: bootloader (0x0), partition
   table (0x8000), boot_app0/otadata (0xE000) and the app (0x10000) in one
   blob, with the NVS gap at 0x9000 left as 0xFF.  It ends well below the
-  LittleFS partition at 0x320000, so the two writes never overlap.
+  LittleFS partition at 0x380000, so the two writes never overlap.
 
   Because merged.bin restores the bootloader and partition table, a full
   `erase_flash` is safe here — unlike a firmware-only flash, which would
@@ -68,7 +68,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 # the merge-bin offsets in .github/workflows/release.yml.  Keep them in
 # sync if the partition table ever changes.
 MERGED_OFFSET = "0x0"       # bootloader + partitions + boot_app0 + app
-FS_OFFSET     = "0x320000"  # LittleFS partition (extra_script.py FS_OFFSET)
+FS_OFFSET     = "0x380000"  # LittleFS partition (extra_script.py FS_OFFSET)
 
 MERGED_ASSET = "FPVRaceOne-merged.bin"
 FS_ASSET     = "FPVRaceOne-littlefs.bin"

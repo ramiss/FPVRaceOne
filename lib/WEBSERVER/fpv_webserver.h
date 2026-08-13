@@ -108,7 +108,7 @@ class Webserver : public TransportInterface {
     // the churn is what disappears.
     //
     // Only _flushMultiNodeState() may touch this — it runs on parallelTask.
-    // The /api/multinode/state endpoint runs on an AsyncWebServer thread and
+    // The /api/multinode/nodes endpoint runs on an AsyncWebServer thread and
     // keeps its own local String, because sharing one buffer across tasks is
     // exactly the cross-task String race that broke the incremental fanout.
     String _mnPayloadBuf;

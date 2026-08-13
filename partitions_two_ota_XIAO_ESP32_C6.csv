@@ -1,12 +1,38 @@
 # partitions_c6_two_ota_max_with_coredump.csv
 # ESP32-C6: no phy_init or fact partition
-# Increased OTA partitions from 0x170000 to 0x180000 to accommodate larger firmware
+#
+# 2026-08-11 — rebalanced.  OTA partitions 0x180000 -> 0x1B0000 (+192 KB each)
+# and spiffs 0xE0000 -> 0x80000 (512 KB).
+#
+# spiffs was 917,504 B holding a measured 180,525 B of gzipped web assets —
+# but LittleFS allocates in 4096 B blocks, so the real occupancy is ~210 KB,
+# not 180 KB.  512 KB leaves ~59 % free while taking the app partition from
+# 91.4 % to 79.1 % full.
+#
+# Why the filesystem got the generous end of the split: app pressure has
+# escape hatches (webserver consolidation, feature gating, and 39 KB was just
+# recovered by disabling C++ exceptions), whereas a filesystem that outgrows
+# its partition can only be fixed by another partition change — and a
+# partition change means USB-reflashing every unit in the field.  Pay that
+# once, not twice.
+#
+# App partitions must start on a 0x10000 boundary and both OTA slots must be
+# the same size.  Layout is exact: 0x380000 + 0x80000 = 0x400000 (4 MB).
+#
+# CHANGING THIS FILE IS A BREAKING CHANGE FOR UNITS IN THE FIELD.  The
+# partition table lives at 0x8000 and OTA only writes app partitions, so an
+# existing unit keeps its old layout until it is reflashed over USB.  Keep the
+# following in sync, all in one commit:
+#   - scripts/extra_script.py            FS_OFFSET + FS_SIZE
+#   - scripts/flash_published_release.py FS_OFFSET
+#   - .github/workflows/release.yml      manifest offsets + layout + size gates
+#   - docs/FLASHING_OPTIONAL.md
 
 nvs,        data, nvs,      0x9000,   0x5000
 otadata,    data, ota,      0xE000,   0x2000
 
- ota_0,      app,  ota_0,    0x10000,  0x180000
- ota_1,      app,  ota_1,    0x190000, 0x180000
+ ota_0,      app,  ota_0,    0x10000,  0x1B0000
+ ota_1,      app,  ota_1,    0x1C0000, 0x1B0000
 
-coredump,   data, coredump, 0x310000, 0x10000
-spiffs,     data, spiffs,   0x320000, 0xE0000
+coredump,   data, coredump, 0x370000, 0x10000
+spiffs,     data, spiffs,   0x380000, 0x80000

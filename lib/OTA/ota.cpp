@@ -13,6 +13,9 @@
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
+// Partition-fit check reads the RUNNING partition table — see evaluateFit().
+#include <esp_ota_ops.h>
+#include <esp_partition.h>
 
 OtaManager otaManager;
 
@@ -551,6 +554,9 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     filter[0]["prerelease"] = true;
     filter[0]["assets"][0]["name"]                 = true;
     filter[0]["assets"][0]["browser_download_url"] = true;
+    // `size` is what lets us tell the pilot an update cannot fit BEFORE they
+    // sit through a download that ends in a generic failure (UpdateInfo::fits).
+    filter[0]["assets"][0]["size"]                 = true;
     DynamicJsonDocument doc(4096);
 
     // Retry up to 3 times.  The retry covers BOTH layers:
@@ -738,9 +744,20 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     for (JsonObject asset : assets) {
         String name = asset["name"].as<String>();
         String aurl = asset["browser_download_url"].as<String>();
-        if (name == UPDATE_FW_ASSET) out.firmwareUrl   = aurl;
-        else if (name == UPDATE_FS_ASSET) out.filesystemUrl = aurl;
+        if (name == UPDATE_FW_ASSET) {
+            out.firmwareUrl  = aurl;
+            out.firmwareSize = asset["size"] | 0u;
+        } else if (name == UPDATE_FS_ASSET) {
+            out.filesystemUrl  = aurl;
+            out.filesystemSize = asset["size"] | 0u;
+        }
     }
+
+    // ── Will this release physically fit on THIS unit? ──────────────────────
+    // Read the sizes from the running partition table rather than a constant,
+    // because that is precisely the thing that differs between a unit flashed
+    // before the layout change and one flashed after.
+    evaluateFit(out);
 
     if (out.firmwareUrl.length() == 0 || out.filesystemUrl.length() == 0) {
         err = String("Release '") + out.latestVersion + "' is missing required assets ("
@@ -895,15 +912,61 @@ bool OtaManager::downloadAndFlash(const String& url, int target, const char* lab
     }
 }
 
+const char* OtaManager::flasherUrl() {
+    return "https://github.com/ramiss/FPVRaceOne-Flasher/releases/latest";
+}
+
+void OtaManager::evaluateFit(UpdateInfo& info) {
+    info.fits     = true;
+    info.fitError = "";
+
+    // The OTA slot we would actually write, not "the app partition" — with two
+    // OTA slots the running one is not the target.
+    const esp_partition_t* app = esp_ota_get_next_update_partition(nullptr);
+    const esp_partition_t* fs  = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+
+    info.appPartitionSize = app ? (uint32_t)app->size : 0u;
+    info.fsPartitionSize  = fs  ? (uint32_t)fs->size  : 0u;
+
+    // A zero size means the release JSON did not carry it (older release, or a
+    // filtered field). Absence is not evidence of a problem — say nothing
+    // rather than block an update that would have worked.
+    const bool fwTooBig = info.firmwareSize   > 0 && info.appPartitionSize > 0 &&
+                          info.firmwareSize   > info.appPartitionSize;
+    const bool fsTooBig = info.filesystemSize > 0 && info.fsPartitionSize  > 0 &&
+                          info.filesystemSize > info.fsPartitionSize;
+    if (!fwTooBig && !fsTooBig) return;
+
+    info.fits = false;
+    const uint32_t need = fwTooBig ? info.firmwareSize     : info.filesystemSize;
+    const uint32_t have = fwTooBig ? info.appPartitionSize : info.fsPartitionSize;
+    info.fitError = String(fwTooBig ? "Firmware" : "Filesystem") +
+                    " is " + String(need / 1024) + " KB but this unit's partition is only " +
+                    String(have / 1024) + " KB. This unit was flashed with an older "
+                    "partition layout, which an over-the-air update cannot change — the "
+                    "partition table is only writable over USB. Reflash once with the "
+                    "FPVRaceOne Flasher and over-the-air updates will work again.";
+    DEBUG("[OTA] Update does not fit: %s\n", info.fitError.c_str());
+}
+
 bool OtaManager::preflightCheck(const String& fwUrl, const String& fsUrl, String& err) {
     // Fetch headers only (GET, then end() without reading the body) for BOTH assets
     // and confirm each resolves to a 200 of a plausible size. This is the guard
     // against the catastrophic case: wiping the filesystem and only then discovering
     // the firmware asset is missing/404, leaving the device with neither image.
-    struct Target { const String& url; const char* label; long minBytes; };
+    // maxBytes comes from the RUNNING partition table, so a unit on the old
+    // layout gets the old, smaller ceiling — which is exactly the case this
+    // guard exists for.  0 means "unknown partition", which disables the check
+    // rather than blocking on a value we could not read.
+    const esp_partition_t* appPart = esp_ota_get_next_update_partition(nullptr);
+    const esp_partition_t* fsPart  = esp_partition_find_first(
+        ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+
+    struct Target { const String& url; const char* label; long minBytes; long maxBytes; };
     const Target targets[] = {
-        { fwUrl, "firmware",   400L * 1024 },
-        { fsUrl, "filesystem",  64L * 1024 },
+        { fwUrl, "firmware",   400L * 1024, appPart ? (long)appPart->size : 0L },
+        { fsUrl, "filesystem",  64L * 1024, fsPart  ? (long)fsPart->size  : 0L },
     };
 
     for (const Target& t : targets) {
@@ -941,6 +1004,21 @@ bool OtaManager::preflightCheck(const String& fwUrl, const String& fsUrl, String
         if (len >= 0 && len < t.minBytes) {
             err = String("Pre-flight: ") + t.label + " asset is implausibly small ("
                   + String(len) + " bytes)";
+            return false;
+        }
+        // Upper bound too.  checkForUpdate() already compared the RELEASE's
+        // published sizes against this unit's partitions, but a pilot can
+        // install a specific tag from the options list without that verdict
+        // being the one on screen, and Content-Length is authoritative for the
+        // bytes actually about to be written.  Catching it here means we refuse
+        // before the filesystem write — the one step with no A/B copy to fall
+        // back on.
+        if (len >= 0 && t.maxBytes > 0 && len > t.maxBytes) {
+            err = String("Pre-flight: ") + t.label + " is " + String(len / 1024) +
+                  " KB but this unit's partition is only " + String(t.maxBytes / 1024) +
+                  " KB. This unit has an older partition layout, which an over-the-air "
+                  "update cannot change. Reflash once over USB with the FPVRaceOne "
+                  "Flasher: " + flasherUrl();
             return false;
         }
         DEBUG("[OTA] Pre-flight OK: %s asset reachable (%ld bytes)\n", t.label, len);

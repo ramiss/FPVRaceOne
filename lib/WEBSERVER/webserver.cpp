@@ -457,10 +457,11 @@ static void _buildDirectorStatePayloadInto(String& out,
     if (multiNode) clientCount = multiNode->getNodes().size();
     const size_t deltaCount = multiNode ? multiNode->getLapDeltas().size() : 0;
 
-    // Stage-4 gate (§10): keep sending the arrays until every node consumes
-    // deltas.  While this is true the payload still scales with lap count —
-    // the heap win only lands once the fleet is updated and this flips.
-    const bool emitLegacyLaps = !(multiNode && multiNode->allNodesLapSyncCapable());
+    // Stage-4 gate (§10), fail-OPEN: send the arrays only when a node we have
+    // actually heard from did not advertise lapSync.  A freshly registered
+    // node no longer counts as legacy, which is what used to keep this true
+    // indefinitely and stop the heap win from ever landing.
+    const bool emitLegacyLaps = multiNode && multiNode->anyNodeNeedsLegacyLaps();
     const uint16_t masterRetained = timer ? timer->getRetainedLapCount() : 0;
     size_t legacyLapEstimate = 0;
     if (emitLegacyLaps) {
@@ -547,6 +548,13 @@ static void _buildDirectorStatePayloadInto(String& out,
             out += ",\"excludedFromCurrentRace\":"; out += n.excludedFromCurrentRace ? "true" : "false";
             out += ",\"lapCount\":";       out += (uint32_t)n.laps.total;
             out += ",\"clientIP\":\"";     _jsonEscapeAppend(out, n.clientIP); out += "\"";
+            // staIP is the address the master actually dials for the fanout and
+            // every proxied command.  clientIP is the node's OWN AP gateway —
+            // 192.168.4.1 on every unit, identical and unroutable from here — so
+            // it is useless for reaching a node.  Publishing staIP costs ~20
+            // bytes per node and is what lets the bench harness probe the very
+            // path the fanout uses.
+            out += ",\"staIP\":\"";        _jsonEscapeAppend(out, n.staIP); out += "\"";
             out += ",\"mac\":\"";          _jsonEscapeAppend(out, n.macAddress); out += "\"";
             out += ",\"apSuffix\":\"";     _jsonEscapeAppend(out, n.apSuffix); out += "\"";
             out += ",\"enterRssi\":";      out += (int)n.enterRssi;
@@ -561,6 +569,19 @@ static void _buildDirectorStatePayloadInto(String& out,
             // ordering key, so the UI can mark them "not comparable" rather
             // than silently placing them wrongly against the field (§8).
             out += ",\"anchored\":";       out += n.anchored ? "true" : "false";
+            // Which node is holding the §10 gate shut.  lapSyncCapable is set
+            // from each heartbeat and was previously read only by
+            // allNodesLapSyncCapable(), so a fleet stuck emitting legacy
+            // arrays gave no clue WHICH node was responsible — the gate is
+            // all-or-nothing, so one silent node costs everyone the payload
+            // win and there was no way to identify it.  ~18 bytes per node.
+            out += ",\"lapSync\":";        out += n.lapSyncCapable ? "true" : "false";
+            out += ",\"lapSyncHeard\":";   out += n.lapSyncHeard ? "true" : "false";
+            // Heartbeat age, because "not capable" has two very different
+            // causes: a node that never advertised, versus one whose
+            // heartbeats stopped arriving (MAC-mismatch 404 loops, for
+            // instance) and is coasting on a stale online flag.
+            out += ",\"lastSeenMs\":";     out += (uint32_t)(millis() - n.lastSeen);
             if (emitLegacyLaps) {
                 out += ",\"laps\":[";
                 const uint16_t r = n.laps.retained();
@@ -1419,6 +1440,14 @@ void Webserver::startServices() {
             body += ",\"releaseNotes\":\""    + notes                + "\"";
             body += ",\"firmwareUrl\":\""     + info.firmwareUrl     + "\"";
             body += ",\"filesystemUrl\":\""   + info.filesystemUrl   + "\"";
+            // Partition-fit verdict.  When fits=false the panel must offer the
+            // flasher instead of an Install button — the update can never
+            // succeed over the air on this unit, and letting the pilot retry
+            // is the failure mode this replaces.  fitError is plain prose with
+            // no quotes or backslashes (built in OtaManager::evaluateFit).
+            body += ",\"fits\":"              + String(info.fits ? "true" : "false");
+            body += ",\"fitError\":\""        + info.fitError        + "\"";
+            body += ",\"flasherUrl\":\""      + String(OtaManager::flasherUrl()) + "\"";
             // Inline version picker payload — the panel renders one row per
             // entry with a colored badge (upgrade/current/downgrade) and an
             // Install button.  kind: 0=upgrade, 1=current, 2=downgrade.
@@ -3084,11 +3113,27 @@ EEPROM:\n";
             }
 
             // §6.2 — the digest rides the heartbeat that already exists.
+            //
+            // lapSync is read with as<bool>(), NOT `| false`.  ArduinoJson's
+            // operator| returns the default unless is<T>() matches exactly,
+            // and Converter<bool>::checkJson() is strict — it requires a real
+            // JSON boolean (VariantData::isBoolean()).  The client used to
+            // send `1`, an integer, so `obj["lapSync"] | false` evaluated to
+            // false on EVERY heartbeat from EVERY node: the §10 gate could
+            // never open and the fleet emitted legacy lap arrays forever.
+            //
+            // as<bool>() goes through asBoolean(), which coerces Int32/Uint32
+            // as `!= 0`, so this accepts both the integer and boolean spellings
+            // — needed while clients are being reflashed one at a time.
+            // isNull() keeps a genuinely absent field meaning "legacy".
+            JsonVariantConst lapSyncVar = obj["lapSync"];
+            const bool lapSyncCapable = !lapSyncVar.isNull() && lapSyncVar.as<bool>();
+
             MultiNodeManager::HeartbeatSyncReply rep;
             multiNode->handleHeartbeatSync(nodeId,
                                            obj["raceId"]    | 0u,
                                            obj["bootId"]    | 0u,
-                                           obj["lapSync"]   | false,
+                                           lapSyncCapable,
                                            obj["count"]     | 0u,
                                            obj["crc"]       | 0u,
                                            obj["oldestSeq"] | 0u,

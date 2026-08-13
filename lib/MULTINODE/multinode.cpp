@@ -68,6 +68,28 @@ void MultiNodeManager::init(Config* config, Led* led, Webserver* webserver) {
     _myMacAddress        = _readStaMacString();
     DEBUG("[MULTINODE] My STA MAC: %s\n", _myMacAddress.c_str());
     _nodes.clear();
+    // Claim the full capacity ONCE, here, before any client can register.
+    //
+    // This is a concurrency fix, not a heap optimisation.  handleRegister()
+    // runs on the async_tcp task and does _nodes.push_back(); parallelTask
+    // iterates _nodes continuously (_checkNodeTimeouts, the fanout builders,
+    // the resync governor, which even holds a raw NodeInfo*).  async_tcp is
+    // priority 10 and preempts parallelTask at priority 2, so a push_back
+    // that REALLOCATED would free the buffer parallelTask was walking —
+    // a use-after-free, every time an eighth registration arrived at the
+    // wrong moment.
+    //
+    // With capacity reserved up front and the size ceiling enforced in
+    // handleRegister(), the buffer address never changes for the life of the
+    // boot, so no reader can be left holding a dangling pointer.
+    _nodes.reserve(MULTINODE_MAX_NODES);
+
+    // Same reasoning, second reason: _queueLapDelta() already refuses past
+    // LAPSYNC_MAX_LAP_DELTAS, so reserving that bound up front means push_back
+    // never allocates on the lap path.  With -fno-exceptions an allocation
+    // failure is std::terminate, not a catchable error, so the fix is to never
+    // allocate late rather than to handle the failure.
+    _lapDeltas.reserve(LAPSYNC_MAX_LAP_DELTAS);
 }
 
 void MultiNodeManager::process(uint32_t currentTimeMs) {
@@ -150,6 +172,12 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         }
 
     } else if (isMasterMode()) {
+        // FIRST, before anything iterates _nodes this tick.  Slots marked by
+        // removeNode() on the async_tcp task are erased here, on the one task
+        // that walks the vector, so the erase can never invalidate an
+        // iterator underneath a reader.
+        _reapRemovedNodes();
+
         _checkNodeTimeouts(currentTimeMs);
 
         // §7 — decide who, if anyone, may repair right now.  Detection already
@@ -398,7 +426,12 @@ void MultiNodeManager::_sendHeartbeat() {
     // timer, and the repair channel exists whether or not anything is wrong.
     doc["raceId"]      = _raceId;
     doc["bootId"]      = _bootId;
-    doc["lapSync"]     = 1;             // capability advertisement (§10 gate)
+    // A real BOOLEAN, not 1.  The master reads this with ArduinoJson, whose
+    // operator| and is<bool>() are strict about JSON types: an integer 1 is
+    // not a boolean, so `obj["lapSync"] | false` silently yielded false and
+    // the §10 gate never opened for any node.  The master now also accepts
+    // the integer spelling, but sending the correct type is the actual fix.
+    doc["lapSync"]     = true;          // capability advertisement (§10 gate)
     if (_timer) {
         doc["count"]     = (uint32_t)_timer->getLapTotal();
         doc["crc"]       = (uint32_t)_timer->getLapCrc();
@@ -731,6 +764,13 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
     // never lets a different unit hijack an existing slot.
     uint8_t incomingNodeId = assignedNodeId;
     for (auto& n : _nodes) {
+        // A slot the director just kicked is already gone as far as matching
+        // is concerned — it simply has not been reaped yet.  Without this, a
+        // client whose pauseReconnect never landed (which is the normal case,
+        // since we kick clients precisely when they are unreachable) could
+        // re-register into its old slot in the millisecond before the reap
+        // and undo the removal.
+        if (n.pendingRemoval) continue;
         bool macKnown    = macAddress.length() > 0 && n.macAddress.length() > 0;
         bool macMatch    = macKnown && macAddress == n.macAddress;
         bool macMismatch = macKnown && macAddress != n.macAddress;
@@ -792,6 +832,15 @@ bool MultiNodeManager::handleRegister(const String& pilotName,
         }
     }
 
+    // Hard capacity guard, and it must stay keyed on size() rather than on a
+    // live-slot count.  reserve() claimed exactly MULTINODE_MAX_NODES, so
+    // admitting an eighth element — even to replace one that is merely
+    // awaiting reap — would reallocate the vector and hand parallelTask a
+    // dangling pointer, which is the entire failure this reserve() prevents.
+    //
+    // A node marked for removal therefore still costs its slot until the next
+    // parallelTask tick.  That is a sub-tick delay before a replacement can
+    // register, against a 5 s client retry — invisible in practice.
     if (_nodes.size() >= MULTINODE_MAX_NODES) {
         DEBUG("[MULTINODE] Max nodes reached — rejecting %s\n", staIP.c_str());
         return false;
@@ -1031,6 +1080,10 @@ bool MultiNodeManager::handleHeartbeatSync(uint8_t nodeId, uint32_t raceId, uint
     for (auto& n : _nodes) {
         if (n.nodeId != nodeId) continue;
 
+        // Heard-from is what makes the absence of lapSync meaningful: only a
+        // node we have actually processed a heartbeat for can be classified
+        // as pre-protocol.  See anyNodeNeedsLegacyLaps().
+        n.lapSyncHeard   = true;
         n.lapSyncCapable = lapSyncCapable;
         n.reportedCount  = count;
         n.reportedCrc    = crc;
@@ -1453,14 +1506,48 @@ void MultiNodeManager::touchNode(uint8_t nodeId) {
 }
 
 bool MultiNodeManager::removeNode(uint8_t nodeId) {
-    for (auto it = _nodes.begin(); it != _nodes.end(); ++it) {
-        if (it->nodeId == nodeId) {
-            DEBUG("[MULTINODE] Node %c (%s) manually removed\n", slotLetter(it->nodeId), it->pilotName.c_str());
-            _nodes.erase(it);
+    // MARK, don't erase.
+    //
+    // This runs on the async_tcp task (the /kickNode and /removeNode
+    // handlers).  It used to call _nodes.erase() directly, which shifts every
+    // later element down and invalidates any iterator into the vector — while
+    // parallelTask may be part-way through _checkNodeTimeouts, a fanout
+    // builder, or the resync governor's raw NodeInfo*.  That is undefined
+    // behaviour, and "Disconnect from Slot" is the one control that reaches
+    // it: clicking it on an already-dead client could take the whole master
+    // down rather than free a slot.
+    //
+    // The actual erase now happens in process(), on parallelTask, which is
+    // the only task that iterates _nodes — so it can never run mid-walk.
+    for (auto& n : _nodes) {
+        if (n.nodeId == nodeId) {
+            DEBUG("[MULTINODE] Node %c (%s) marked for removal\n", slotLetter(n.nodeId), n.pilotName.c_str());
+            // Drop it out of every "is this node live" test immediately, so
+            // the UI and the fanout stop treating it as present in the tick
+            // or two before the reap.
+            n.online         = false;
+            n.running        = false;
+            n.pendingRemoval = true;
             return true;
         }
     }
     return false;
+}
+
+// Reap nodes marked by removeNode().  parallelTask ONLY — see removeNode().
+void MultiNodeManager::_reapRemovedNodes() {
+    for (auto it = _nodes.begin(); it != _nodes.end(); ) {
+        if (it->pendingRemoval) {
+            DEBUG("[MULTINODE] Node %c slot freed\n", slotLetter(it->nodeId));
+            // Release the grant if the departing node was holding it,
+            // otherwise the single fleet-wide slot stays wedged until the
+            // 120 s stall timeout.
+            if (_resyncGrantNodeId == it->nodeId) _resyncGrantNodeId = 0;
+            it = _nodes.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 bool MultiNodeManager::updateNodePilot(uint8_t nodeId, const String& name, uint32_t color) {

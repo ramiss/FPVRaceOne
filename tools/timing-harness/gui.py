@@ -39,7 +39,9 @@ from harness import (JsonLink, run_once, summarize, open_port_no_reset,
                      compute_thresholds, set_thresholds, _fit_line,
                      geometric_detect_ms, plan_envelope,
                      find_min_detectable_width, estimate_search_runs,
-                     MultiNodeLoad, probe_master, set_voice_enabled)
+                     MultiNodeLoad, probe_master, set_voice_enabled,
+                     fetch_director_state, time_director_post, client_targets,
+                     DIRECTOR_FANOUT_MS, DIRECTOR_INTERVAL_MS)
 
 
 # ── Interpretation ──────────────────────────────────────────────────────────
@@ -253,13 +255,45 @@ def interpret_sweep(rows):
     return out
 
 
+# ── Window sizing ───────────────────────────────────────────────────────────
+
+def fit_to_screen(win, want_w, want_h, min_w=760, min_h=520,
+                  margin_w=40, margin_h=90):
+    """Geometry string for want_w x want_h, shrunk to fit the actual display.
+
+    The rig wants a tall results pane — reading test output is the whole point
+    of the tool — but a window taller than the screen pushes the button row and
+    the Stop button under the taskbar, where they cannot be clicked.  A short
+    pane you can scroll beats a tall one you cannot reach, so the requested
+    size is a CEILING, not a promise.
+
+    margin_h covers a title bar plus a taskbar, margin_w a side dock.  Both are
+    deliberately generous: losing 90 px of pane is invisible, losing the Stop
+    button mid-soak is not.
+
+    Positioned near the top-left rather than centred, so the raw-serial panel
+    still has room to dock flush right on a wide display (see _dock_geometry).
+    """
+    win.update_idletasks()
+    sw = win.winfo_screenwidth()
+    sh = win.winfo_screenheight()
+    w = max(min_w, min(want_w, sw - margin_w))
+    h = max(min_h, min(want_h, sh - margin_h))
+    x = max(0, min(20, sw - w))
+    y = max(0, min(20, sh - h))
+    return "%dx%d+%d+%d" % (w, h, x, y)
+
+
 # ── GUI ─────────────────────────────────────────────────────────────────────
 
 class TimingRigGUI:
     def __init__(self, root):
         self.root = root
         root.title("FPVRaceOne Timing Rig")
-        root.geometry("880x720")
+        # 1180 is the desktop target; fit_to_screen() clamps it on a laptop so
+        # the button row never lands under the taskbar.
+        root.geometry(fit_to_screen(root, 880, 1180))
+        root.minsize(760, 520)
 
         self.q = queue.Queue()
         self.worker = None
@@ -268,6 +302,8 @@ class TimingRigGUI:
         # Live-monitor state.  Buffers are bounded: this runs for hours between
         # tests and must not grow without limit.
         self._mon_thread = None
+        # Ports a running test has claimed; the monitor must not reopen these.
+        self._mon_claimed = set()
         self._mon_stop = threading.Event()
         self._mon_resume_after_test = False
         self._mon_lines = {"DUT": [], "EMU": []}
@@ -499,8 +535,231 @@ class TimingRigGUI:
                         variable=self.target_rssi)\
             .grid(row=4, column=0, columnspan=8, sticky="w", padx=(8, 0), pady=(2, 0))
 
+    def run_fanout(self):
+        # DUT only — the probe POSTs over WiFi and reads the master's serial;
+        # the emulator is untouched, so its monitor stays live.
+        self._start(self._fanout_worker, needs=("DUT",))
+
+    def _fanout_worker(self):
+        """Measure the directorState fanout the master cannot measure itself.
+
+        The master only reports the AGGREGATE ("[CORE0] multinode blocked for
+        N ms").  That number cannot distinguish "six clients each took 300 ms"
+        from "five were instant and one ate the timeout", and those two call
+        for completely different fixes.  So we fetch the real payload and time
+        a POST of it to each client directly, from the PC, with a timeout long
+        enough to measure the truth rather than truncate it at the 300 ms the
+        firmware allows.
+
+        Read-only: each client receives the same directorState it already gets
+        twice a second, so this cannot disturb a race.
+        """
+        dut = None
+        try:
+            ports = self._links()
+            if not ports:
+                return
+            _emu_p, dut_p = ports
+            master = self.master_ip.get().strip()
+
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("FANOUT PROBE\n", "head")
+            self.emit("Times the directorState POST to each client individually.\n"
+                      "The firmware allows each one %d ms (connect + read) and fans\n"
+                      "out SEQUENTIALLY, so the whole cycle must finish inside\n"
+                      "%d ms or parallelTask never gets idle time and SSE starves.\n\n"
+                      % (DIRECTOR_FANOUT_MS, DIRECTOR_INTERVAL_MS), "dim")
+
+            # 1. The real payload, exactly as the master fans it out.
+            raw, parsed = fetch_director_state(master)
+            if raw is None:
+                self.emit("  Master at %s did not answer /api/multinode/nodes -- "
+                          "is it powered and on this network?\n" % master, "bad")
+                return
+            self.emit("  Payload: %s bytes\n" % format(len(raw), ","), "head")
+
+            if isinstance(parsed, dict):
+                nodes = parsed.get("nodes", []) or []
+                laps = 0
+                arrays = False
+                blockers = []      # online clients not advertising lapSync
+                unknown = False    # firmware too old to publish the field
+                for n in nodes:
+                    if not isinstance(n, dict):
+                        continue
+                    try:
+                        laps = max(laps, int(n.get("lapCount") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    if isinstance(n.get("laps"), list):
+                        arrays = True
+                    nid = n.get("nodeId")
+                    if not nid:
+                        continue          # 0 == the master's own row
+                    if "lapSync" not in n:
+                        unknown = True
+                    elif (n.get("online") and n.get("lapSyncHeard")
+                          and not n.get("lapSync")):
+                        # Only a node we have HEARD from that did not advertise
+                        # lapSync is a blocker; not-yet-heard is not legacy.
+                        age = n.get("lastSeenMs")
+                        blockers.append((nid, n.get("pilotName") or "?", age))
+                self.emit("  Highest lapCount seen: %d\n" % laps, "dim")
+
+                if arrays:
+                    self.emit("  Capability gate is SHUT -- nodes still carry full 'laps'\n"
+                              "  arrays, so the payload grows with lap count and the heap\n"
+                              "  win has not landed.\n", "bad")
+                    if blockers:
+                        # The gate is all-or-nothing, so ONE node closes it for
+                        # the whole fleet. Naming it is the entire point.
+                        self.emit("  Held shut by:\n", "bad")
+                        for nid, name, age in blockers:
+                            extra = ""
+                            if isinstance(age, int):
+                                extra = "  (last heartbeat %.1f s ago)" % (age / 1000.0)
+                                if age > 10000:
+                                    extra += "  <-- STALE, heartbeats not arriving"
+                            self.emit("    node %-2s %s%s\n" % (nid, name, extra), "bad")
+                        self.emit("  A node that is online but never advertises lapSync:1 is\n"
+                                  "  either on older firmware or its heartbeats are being\n"
+                                  "  rejected (a MAC mismatch 404s the heartbeat, and the\n"
+                                  "  capability is only set on the heartbeat path).\n", "dim")
+                    elif unknown:
+                        self.emit("  Master firmware predates the per-node lapSync field, so\n"
+                                  "  the blocker cannot be identified. Re-flash the MASTER to\n"
+                                  "  get that diagnostic, then re-run.\n", "warn")
+                    else:
+                        self.emit("  ODD: every online client advertises lapSync, yet arrays\n"
+                                  "  are still being emitted. Check for an node that is\n"
+                                  "  registered-but-offline flapping online between the\n"
+                                  "  payload build and this fetch.\n", "warn")
+                else:
+                    self.emit("  Digest-only payload (no per-node lap arrays) -- the\n"
+                              "  capability gate is OPEN and payload size is bounded.\n",
+                              "good")
+
+            targets = client_targets(parsed)
+            if not targets:
+                self.emit("  No online clients in the payload -- nothing to probe.\n",
+                          "warn")
+                return
+
+            # 2. Time each client on its own.
+            rounds = 5
+            self.emit("\n  Timing %d client(s), %d POSTs each (payload replayed "
+                      "verbatim)\n\n" % (len(targets), rounds), "dim")
+            results = []
+            for nid, ip, _name in targets:
+                if self.cancel.is_set():
+                    return
+                # Reachability first, with a SHORT timeout.  Five 4 s
+                # timeouts per node meant an unreachable fleet took two
+                # minutes to say so -- long enough to look like a hang.
+                probe_ms, probe_status = time_director_post(ip, raw, timeout=1.5)
+                if probe_status is None:
+                    self.emit("    node %-2s %-15s UNREACHABLE (no response in 1.5 s)\n"
+                              % (nid, ip), "bad")
+                    results.append((nid, None))
+                    continue
+                times = [probe_ms]
+                fails = 0
+                for _ in range(rounds - 1):
+                    if self.cancel.is_set():
+                        return
+                    ms, status = time_director_post(ip, raw, timeout=4.0)
+                    if status is None:
+                        fails += 1
+                    else:
+                        times.append(ms)
+                    time.sleep(0.15)
+                if times:
+                    times.sort()
+                    med = times[len(times) // 2]
+                    over = med > DIRECTOR_FANOUT_MS
+                    self.emit("    node %-2s %-15s min=%6.0f  med=%6.0f  max=%6.0f ms%s%s\n"
+                              % (nid, ip, times[0], med, times[-1],
+                                 "   TIMEOUT-BOUND" if over else "",
+                                 ("  (%d failed)" % fails) if fails else ""),
+                              "bad" if over else "good")
+                    results.append((nid, med))
+                else:
+                    self.emit("    node %-2s %-15s answered once then stopped "
+                              "(%d/%d failed)\n" % (nid, ip, fails, rounds), "bad")
+                    results.append((nid, None))
+
+            # 3. What the master itself reported over the same window.
+            import re as _re
+            dut = JsonLink(dut_p, name="dut", keep_log=True,
+                           on_line=self._mon_sink("DUT"))
+            self.emit("\n  Sampling the master's own fanout cost for 25 s...\n", "dim")
+            blocked = []
+            t0 = time.time()
+            while time.time() - t0 < 25.0 and not self.cancel.is_set():
+                for _ in dut.poll():
+                    pass
+                for line in dut.log[-40:]:
+                    m = _re.search(r"multinode blocked for (\d+) ms", line)
+                    if m:
+                        v = int(m.group(1))
+                        if not blocked or blocked[-1] != v:
+                            blocked.append(v)
+                time.sleep(0.2)
+
+            # 4. Verdict.
+            self.emit("\n  What this means\n", "head")
+            timed = [r for r in results if r[1] is not None]
+            slow = [r for r in timed if r[1] > DIRECTOR_FANOUT_MS]
+
+            if timed:
+                total = sum(r[1] for r in timed)
+                self.emit("  - Sum of per-client medians: %.0f ms across %d client(s).\n"
+                          % (total, len(timed)), "dim")
+
+            if blocked:
+                blocked.sort()
+                med_blocked = blocked[len(blocked) // 2]
+                self.emit("  - Master reported blocked %d-%d ms (median %d, %d samples).\n"
+                          % (blocked[0], blocked[-1], med_blocked, len(blocked)), "dim")
+                duty = 100.0 * med_blocked / DIRECTOR_INTERVAL_MS
+                tag = "bad" if duty >= 80 else ("warn" if duty >= 50 else "good")
+                self.emit("  - Fanout duty cycle: %.0f%% of the %d ms broadcast interval.\n"
+                          % (duty, DIRECTOR_INTERVAL_MS), tag)
+                if duty >= 80:
+                    self.emit("    At this duty parallelTask is effectively always inside\n"
+                              "    the fanout, which is what starves SSE and produces\n"
+                              "    'not receiving updates' in the browser.\n", "bad")
+            else:
+                self.emit("  - No '[CORE0] multinode blocked' lines seen. Either the fanout\n"
+                          "    is cheap right now, or DEBUG output is being dropped --\n"
+                          "    check the Log Panel.\n", "warn")
+
+            if slow:
+                names = ", ".join(str(r[0]) for r in slow)
+                self.emit("  - SLOW CLIENTS: node(s) %s exceed the %d ms the firmware\n"
+                          "    allows, so the master eats its timeout on them every\n"
+                          "    broadcast. Fixing those clients (or raising the timeout)\n"
+                          "    is worth more than restructuring the fanout.\n"
+                          % (names, DIRECTOR_FANOUT_MS), "bad")
+            elif timed:
+                self.emit("  - Every client answers inside %d ms individually. If the\n"
+                          "    master still blocks ~2 s, the cost is the SEQUENTIAL fanout\n"
+                          "    itself, not any one slow client -- the fix is to parallelise\n"
+                          "    it or lengthen the interval.\n" % DIRECTOR_FANOUT_MS, "warn")
+        except Exception as e:
+            self.emit("  Fanout probe failed: %s\n" % e, "bad")
+        finally:
+            if dut:
+                try:
+                    dut.close()
+                except Exception:
+                    pass
+            self.q.put(("done", None))
+
     def run_soak(self):
-        self._start(self._soak_worker)
+        # DUT only — the soak drives load over WiFi and never opens the
+        # emulator, so the EMU monitor keeps logging throughout.
+        self._start(self._soak_worker, needs=("DUT",))
 
     def _soak_worker(self):
         """Hold the device under load and watch heap over TIME, not passes.
@@ -693,6 +952,10 @@ class TimingRigGUI:
                                    command=self.run_soak)
         self.btn_soak.pack(side="left", padx=6)
 
+        self.btn_fanout = ttk.Button(f, text="6. Fanout Probe",
+                                     command=self.run_fanout)
+        self.btn_fanout.pack(side="left", padx=6)
+
         ttk.Label(f, text="mins:").pack(side="left", padx=(8, 2))
         self.soak_mins = tk.StringVar(value="5")
         ttk.Entry(f, textvariable=self.soak_mins, width=5).pack(side="left")
@@ -707,7 +970,13 @@ class TimingRigGUI:
         f = ttk.LabelFrame(root, text="Results", padding=6)
         f.pack(fill="both", expand=True, padx=10, pady=(4, 10))
 
-        self.out = scrolledtext.ScrolledText(f, wrap="word", height=24,
+        # height is a FLOOR, not a target.  This is the only widget packed with
+        # expand=True, so it absorbs whatever the window has left after the
+        # fixed rows above it — which is how the pane grows to ~48 rows on the
+        # desktop and shrinks gracefully on a laptop.  Requesting 48 here
+        # instead would make the window's own requested size exceed a small
+        # screen, and Tk would then clip the button row rather than the pane.
+        self.out = scrolledtext.ScrolledText(f, wrap="word", height=12,
                                              font=("Consolas", 9))
         self.out.pack(fill="both", expand=True)
         self.out.tag_config("head", font=("Consolas", 10, "bold"))
@@ -918,12 +1187,21 @@ class TimingRigGUI:
         else:
             self._stop_monitor()
 
-    def _start_monitor(self):
+    def _start_monitor(self, watch=("DUT", "EMU"), quiet=False):
+        """Start the raw-serial monitor over `watch` ports only.
+
+        `watch` exists so a test that claims one port does not silence the
+        other.  The soak and the fanout probe only ever open the DUT, so the
+        emulator has no reason to go dark for five minutes — and a gap in the
+        EMU log during a run is exactly when you want to know whether the
+        emulator was still alive.
+        """
         if self._mon_thread and self._mon_thread.is_alive():
             return
-        if self.worker and self.worker.is_alive():
-            self.log("Cannot monitor while a test is running.\n", "warn")
-            self.monitor_on.set(False)
+        if not watch:
+            return
+        if self.worker and self.worker.is_alive() and set(watch) & self._mon_claimed:
+            self.log("Cannot monitor a port a running test has claimed.\n", "warn")
             return
         ports = self._links()
         if not ports:
@@ -932,8 +1210,20 @@ class TimingRigGUI:
         emu_p, dut_p = ports
         self._mon_stop.clear()
         self._mon_thread = threading.Thread(
-            target=self._monitor_worker, args=(emu_p, dut_p), daemon=True)
+            target=self._monitor_worker, args=(emu_p, dut_p, tuple(watch)),
+            daemon=True)
         self._mon_thread.start()
+        if quiet:
+            # _stop_monitor() unticked the box on its way out.  Re-tick it:
+            # the monitor IS running, just on fewer ports, and a checkbox
+            # reading "off" while the EMU pane fills up is worse than useless.
+            # Same programmatic .set() the done-handler already relies on, so
+            # it does not re-enter the widget command.
+            self.monitor_on.set(True)
+            names = ", ".join(sorted(watch))
+            self.log(f"  Live monitor continues on {names} "
+                     f"(the other port is held by the test).\n", "dim")
+            return
         self.log(f"Live monitor ON — FPVRaceOne {dut_p}, emulator {emu_p}. "
                  f"Raw output, nothing filtered.\n"
                  f"  Open 'Log Panel' to view it. The ports are held while "
@@ -948,8 +1238,8 @@ class TimingRigGUI:
         self._mon_thread = None
         self.monitor_on.set(False)
 
-    def _monitor_worker(self, emu_p, dut_p):
-        """Read both ports raw and stream them to the log panel.
+    def _monitor_worker(self, emu_p, dut_p, watch=("DUT", "EMU")):
+        """Read the watched ports raw and stream them to the log panel.
 
         Deliberately does NOT parse or filter.  Every diagnostic gap this
         session came from a filter dropping the one line that mattered — the
@@ -960,10 +1250,11 @@ class TimingRigGUI:
         opened — and a monitor that gave up on the first read error would go
         silent precisely when something interesting had just happened.
         """
-        targets = {"DUT": dut_p, "EMU": emu_p}
+        all_targets = {"DUT": dut_p, "EMU": emu_p}
+        targets = {k: v for k, v in all_targets.items() if k in watch}
         handles = {}          # name -> serial handle (absent = needs opening)
-        buffers = {"DUT": "", "EMU": ""}
-        next_try = {"DUT": 0.0, "EMU": 0.0}
+        buffers = {k: "" for k in targets}
+        next_try = {k: 0.0 for k in targets}
         announced = set()
 
         def _open(name):
@@ -992,7 +1283,7 @@ class TimingRigGUI:
 
         try:
             while not self._mon_stop.is_set():
-                for name in ("DUT", "EMU"):
+                for name in targets:
                     if name not in handles:
                         _open(name)
                         continue
@@ -1107,7 +1398,7 @@ class TimingRigGUI:
     def _busy(self, busy):
         state = "disabled" if busy else "normal"
         for b in (self.btn_level, self.btn_thresh, self.btn_interval,
-                  self.btn_sweep, self.btn_soak):
+                  self.btn_sweep, self.btn_soak, self.btn_fanout):
             b.config(state=state)
         self.btn_stop.config(state="normal" if busy else "disabled")
         self.status.config(text="Running…" if busy else "Ready")
@@ -1160,17 +1451,26 @@ class TimingRigGUI:
         self.cancel.set()
         self.status.config(text="Stopping…")
 
-    def _start(self, fn, *a):
+    def _start(self, fn, *a, needs=("DUT", "EMU")):
         if self.worker and self.worker.is_alive():
+            # Silently ignoring this read as a hang: the button simply did
+            # nothing and the results pane stayed empty.
+            self.log("A test is already running — stop it first.\n", "warn")
             return
-        # A test needs exclusive access to both ports, so the monitor must
-        # release them first.  Remember to bring it back afterwards so the
-        # operator does not have to notice and re-tick it every run.
+        # Release ONLY the ports this test actually opens.  Stopping the whole
+        # monitor left the emulator unlogged for the entire run, so a five
+        # minute soak showed a five minute hole in the EMU capture — precisely
+        # the window where you want to know the emulator was still alive.
+        self._mon_claimed = set(needs)
+        keep = tuple(n for n in ("DUT", "EMU") if n not in self._mon_claimed)
         if self._mon_thread and self._mon_thread.is_alive():
-            self.log("Live monitor paused for the test; it will resume after.\n",
-                     "dim")
             self._mon_resume_after_test = True
             self._stop_monitor()
+            if keep:
+                self._start_monitor(watch=keep, quiet=True)
+            else:
+                self.log("Live monitor paused for the test; it will resume "
+                         "after.\n", "dim")
         self.cancel.clear()
         self._busy(True)
         self.worker = threading.Thread(target=fn, args=a, daemon=True)
@@ -1189,8 +1489,12 @@ class TimingRigGUI:
                     self._log_write(name, text, tag)
                 elif kind == "done":
                     self._busy(False)
+                    # Release the claim BEFORE restarting, or _start_monitor
+                    # refuses the ports the finished test was holding.
+                    self._mon_claimed = set()
                     if self._mon_resume_after_test:
                         self._mon_resume_after_test = False
+                        self._stop_monitor()          # drop any partial watch
                         self.monitor_on.set(True)
                         self._start_monitor()
         except queue.Empty:
@@ -1285,7 +1589,10 @@ class TimingRigGUI:
 
         win = tk.Toplevel(self.root)
         win.title("Raw serial — FPVRaceOne / emulator")
-        win.geometry(self._dock_geometry() if dock else "980x760")
+        # Undocked was a hardcoded 980x760, which overhangs a 1366x768 laptop.
+        # _dock_geometry() already clamps itself; this is the other path.
+        win.geometry(self._dock_geometry() if dock
+                     else fit_to_screen(win, 980, 760, min_w=640, min_h=400))
         # Docked, but not always-on-top: it must be possible to put another
         # window over it without the panel fighting back.
         win.transient(self.root)

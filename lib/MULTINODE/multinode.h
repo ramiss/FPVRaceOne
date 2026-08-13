@@ -47,6 +47,10 @@ struct NodeInfo {
     bool     online;
     bool     running                = false;  // true while client's race timer is active
     bool     quitEarly              = false;  // true if pilot stopped during a master-initiated race
+    // Set by removeNode() on async_tcp; the slot is actually erased by
+    // _reapRemovedNodes() on parallelTask.  See removeNode() for why the
+    // erase cannot happen where the request arrives.
+    bool     pendingRemoval         = false;
     bool     independent            = false;  // true when pilot is solo-racing with skip flag enabled
     bool     skipEnabled            = false;  // true when pilot has "ignore race director" config enabled
     bool     excludedFromCurrentRace = false; // true when master chose "ignore solo racers" for this node
@@ -85,10 +89,17 @@ struct NodeInfo {
     uint32_t anchorRttMs = 0xFFFFFFFF;  // best (lowest) RTT seen; lower is less asymmetric
     bool     anchored    = false;       // false for solo/skip nodes — excluded from ordering
 
-    // True once this node has advertised that it consumes lapDeltas (§6.5).
-    // Until EVERY registered node has, the master keeps emitting the legacy
-    // lap arrays as well — see _allNodesLapSyncCapable().
-    bool     lapSyncCapable   = false;
+    // ── §10 capability, as a TRI-STATE ──────────────────────────────────
+    // lapSyncHeard distinguishes the two cases a single bool conflated:
+    //   heard=false                 -> nothing known yet (just registered)
+    //   heard=true,  capable=true   -> consumes lapDeltas
+    //   heard=true,  capable=false  -> pre-protocol firmware, needs the arrays
+    //
+    // Only the third state requires legacy lap arrays.  Treating the FIRST
+    // state as "incapable" is what let a node that had merely not heartbeated
+    // yet hold the fleet-wide gate shut — see anyNodeNeedsLegacyLaps().
+    bool     lapSyncHeard     = false;  // a heartbeat has been processed
+    bool     lapSyncCapable   = false;  // ...and it advertised lapSync
 
     // ── Resync governor (§7) ────────────────────────────────────────────
     uint8_t  resyncState      = 0;      // LapSyncState
@@ -182,21 +193,34 @@ public:
     const std::vector<LapDelta>& getLapDeltas() const { return _lapDeltas; }
     void clearLapDeltas() { _lapDeltas.clear(); }
 
-    // Stage-4 gate (§10).  The lap arrays may only leave the directorState
-    // payload once EVERY registered node consumes lapDeltas instead — a
-    // client that still renders peers from the arrays would show a blank
-    // multi-race tab the moment they disappeared.
+    // Stage-4 gate (§10), stated as the question that actually matters: does
+    // anyone on this fleet still NEED the legacy lap arrays?
     //
-    // Deliberately all-or-nothing rather than per-recipient: seven tailored
-    // payloads would mean seven distinct strings instead of one shared
-    // buffer, which trades the heap win for a heap loss (Rule 3).  One old
-    // node on the field therefore costs performance, never correctness.
-    bool allNodesLapSyncCapable() const {
-        if (_nodes.empty()) return false;
+    // This replaced allNodesLapSyncCapable(), which asked the inverse and was
+    // fail-CLOSED: every node started lapSyncCapable=false, so the arrays kept
+    // shipping until all of them had been positively confirmed.  A node that
+    // had merely registered without heartbeating yet was indistinguishable
+    // from pre-protocol firmware, and held the payload win shut for the whole
+    // fleet — with nothing exposed to say which node was responsible.
+    //
+    // Fail-OPEN instead.  Only a node that has actually been heard from AND
+    // did not advertise lapSync forces the arrays back on.  Absence of the
+    // field in a heartbeat is itself the positive signal for old firmware, so
+    // a genuine legacy client still gets its arrays — from its very first
+    // heartbeat, i.e. within one 2 s interval of joining.
+    //
+    // Worst case is therefore one interval during which a legacy client's
+    // multi-race tab renders empty, self-correcting on its next heartbeat.
+    // The old behaviour's worst case was the heap win never landing at all.
+    //
+    // Still all-or-nothing rather than per-recipient: seven tailored payloads
+    // would mean seven distinct strings instead of one shared buffer, trading
+    // the heap win for a heap loss (Rule 3).
+    bool anyNodeNeedsLegacyLaps() const {
         for (const auto& n : _nodes) {
-            if (n.online && !n.lapSyncCapable) return false;
+            if (n.online && n.lapSyncHeard && !n.lapSyncCapable) return true;
         }
-        return true;
+        return false;
     }
 
     // Master-side: record this node's clock anchor from a start acknowledgement
@@ -526,5 +550,9 @@ private:
     bool _postToMasterWithResponse(const String& endpoint, const String& body, String& response);
     bool _getFromMaster(const String& endpoint, String& response);
     void _checkNodeTimeouts(uint32_t currentTimeMs);
+    // parallelTask ONLY.  Erases slots that removeNode() marked from the
+    // async_tcp task; running it anywhere else reintroduces the iterator
+    // invalidation it exists to prevent.
+    void _reapRemovedNodes();
     void _runRecruitJob(bool force);
 };

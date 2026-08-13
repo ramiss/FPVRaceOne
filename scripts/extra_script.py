@@ -304,8 +304,13 @@ def do_connect_wifi(env):
     return result.returncode == 0
 
 
-FS_OFFSET    = "0x320000"  # spiffs partition in partitions_two_ota_XIAO_ESP32_C6.csv
-FS_SIZE      = 0xE0000     # 917504 bytes
+FS_OFFSET    = "0x380000"  # spiffs partition in partitions_two_ota_XIAO_ESP32_C6.csv
+FS_SIZE      = 0x80000     # 524288 bytes — MUST equal the spiffs partition size
+                           # in partitions_two_ota_XIAO_ESP32_C6.csv.  Too large
+                           # and the image written at FS_OFFSET overruns the
+                           # partition (at 0xE0000 it ran past the end of a 4 MB
+                           # flash entirely); too small and the device mounts a
+                           # filesystem that cannot use its whole partition.
 FS_BLOCK     = 4096
 DISK_VERSION = (2 << 16) | 1  # LittleFS 2.1
 
@@ -622,4 +627,93 @@ env.AddCustomTarget(
     actions=upload_emulator,
     title="Upload RX5808 Emulator (Test Rig)",
     description="Build + upload the bench RX5808 emulator to the attached WROOM-32 — refuses to target a FPVRaceOne unit"
+)
+
+# ── Bench test rig: timing harness GUI ──────────────────────────────────────
+#
+# Launches tools/timing-harness/gui.py — the rig that drives lap injection
+# across the node fleet and reports lap-time jitter.
+#
+# It deliberately does NOT run under $PYTHONEXE.  PlatformIO's penv is a
+# stripped virtualenv with no tkinter (verified: `import tkinter` raises
+# ModuleNotFoundError there), and the harness GUI is a tkinter app, so the
+# task has to find a real system interpreter.  harness.py additionally needs
+# pyserial for open_port_no_reset().
+#
+# Set HARNESS_PYTHON to override the probe if you keep the rig's dependencies
+# in a specific interpreter or virtualenv.
+
+# _root, not __file__: SCons exec()s this script, so __file__ is undefined here.
+_HARNESS_DIR = _root / "tools" / "timing-harness"
+
+
+def _find_harness_python():
+    """First interpreter on PATH that can actually import what the GUI needs.
+
+    Returns (path, None) on success or (None, reason) so the caller can print
+    something more useful than a traceback from a half-working interpreter.
+    """
+    candidates = []
+    override = os.environ.get("HARNESS_PYTHON", "").strip().strip('"')
+    if override:
+        candidates.append(override)
+    for name in ("python", "python3", "py"):
+        found = shutil.which(name)
+        if found and found not in candidates:
+            candidates.append(found)
+
+    if not candidates:
+        return None, "no python/python3/py found on PATH"
+
+    missing = {}
+    for cand in candidates:
+        try:
+            probe = subprocess.run(
+                [cand, "-c", "import tkinter, serial"],
+                capture_output=True, text=True, timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as e:
+            missing[cand] = str(e)
+            continue
+        if probe.returncode == 0:
+            return cand, None
+        missing[cand] = (probe.stderr or "").strip().splitlines()[-1:] or ["unknown error"]
+
+    detail = "; ".join("{}: {}".format(c, m if isinstance(m, str) else m[0])
+                       for c, m in missing.items())
+    return None, "no interpreter with tkinter + pyserial ({})".format(detail)
+
+
+def test_rig(source, target, env):
+    gui = _HARNESS_DIR / "gui.py"
+    if not gui.is_file():
+        print("  ERROR: harness GUI not found at {}".format(gui))
+        raise SystemExit(1)
+
+    python, why = _find_harness_python()
+    if not python:
+        print("  ERROR: cannot launch the test rig — {}.".format(why))
+        print("  The harness needs tkinter and pyserial. Install pyserial with")
+        print("    pip install pyserial")
+        print("  or point HARNESS_PYTHON at an interpreter that already has both.")
+        raise SystemExit(1)
+
+    print("[Rig] Interpreter: {}".format(python))
+    print("[Rig] Working dir: {}".format(_HARNESS_DIR))
+    print("[Rig] Close the harness window to return to PlatformIO.\n")
+
+    # cwd MUST be the harness directory: gui.py does a bare `from harness
+    # import ...`, which only resolves when that directory is the script's
+    # own location on sys.path.
+    result = subprocess.run([python, "-u", str(gui)], cwd=str(_HARNESS_DIR))
+    if result.returncode != 0:
+        raise SystemExit(result.returncode)
+
+
+env.AddCustomTarget(
+    name="test_rig",
+    dependencies=None,
+    actions=test_rig,
+    title="Run Test Rig (Timing Harness)",
+    description="Launch the bench timing-harness GUI that drives lap injection across the node fleet and reports jitter"
 )
