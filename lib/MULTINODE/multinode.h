@@ -1,6 +1,7 @@
 #pragma once
 #include <Arduino.h>
 #include <WiFi.h>
+#include <AsyncUDP.h>
 #include <vector>
 #include "lapsync.h"
 
@@ -83,11 +84,46 @@ struct NodeInfo {
 
     // ── Clock anchor (§8) ───────────────────────────────────────────────
     // Master-time instant at which THIS node's race clock read zero.
-    // orderMs = anchorMs + lap.raceElapsedMs.  Absorbs both the clock offset
-    // and the Start All spread in one value.
-    uint32_t anchorMs    = 0;
-    uint32_t anchorRttMs = 0xFFFFFFFF;  // best (lowest) RTT seen; lower is less asymmetric
+    // orderUs = anchorUs + elapsed (drift-corrected).  Absorbs both the clock
+    // offset and the Start All spread in one value.
+    //
+    // Held in µs because the offset behind it is measured in µs; rounding to
+    // ms happens once, at the point orderMs is published.
+    int64_t  anchorUs    = 0;
+    uint32_t anchorRttMs = 0xFFFFFFFF;  // fallback path only: best RTT seen
     bool     anchored    = false;       // false for solo/skip nodes — excluded from ordering
+
+    // ── Clock sync (§8) ─────────────────────────────────────────────────
+    // Offset of this node's µs clock relative to the master's, such that
+    //     master_us = client_us - clockOffsetUs
+    // Measured by a four-timestamp exchange against /timer/clockProbe, best
+    // sample (lowest round-trip delay) kept — least queueing means least path
+    // asymmetry, which is the assumption the NTP formula rests on.
+    int64_t  clockOffsetUs   = 0;
+    uint32_t clockDelayUs    = 0xFFFFFFFF;  // delay of the sample we kept
+    uint16_t clockSamples    = 0;           // probes landed since the last resync burst
+    bool     clockValid      = false;
+
+    // Set when this node acknowledges its GO datagram (§8).  Cleared at each
+    // race start, so it answers "did this pilot get THIS race's start?".
+    bool     startAcked      = false;
+    // How late this pilot's race clock actually began, in ms.  0 = on time.
+    // Reported by the client after a backdated start so the director can see
+    // that a pilot may have missed their first gate even though the rest of
+    // the race is perfectly aligned.
+    uint32_t startLateMs     = 0;
+
+    // Drift history: (master timestamp, offset) pairs for the slope fit.
+    // A sliding window rather than the whole race, because a unit warming up
+    // in the sun drifts NON-linearly — a rate fitted across the full race
+    // would be a stale average that is wrong at both ends.
+    static constexpr uint8_t CLOCK_DRIFT_SAMPLES = 8;
+    int64_t  driftAtUs[CLOCK_DRIFT_SAMPLES]  = {0};  // master µs of each sample
+    int64_t  driftOffUs[CLOCK_DRIFT_SAMPLES] = {0};  // offset µs of each sample
+    uint8_t  driftCount      = 0;   // valid entries (saturates at window size)
+    uint8_t  driftHead       = 0;   // next write position (ring)
+    int32_t  driftPpm        = 0;   // fitted rate; >0 means this node runs fast
+    bool     driftValid      = false;
 
     // ── §10 capability, as a TRI-STATE ──────────────────────────────────
     // lapSyncHeard distinguishes the two cases a single bool conflated:
@@ -187,7 +223,7 @@ public:
         uint32_t seq;
         uint32_t lapTimeMs;
         uint32_t raceElapsedMs;
-        uint32_t orderMs;      // anchorMs + raceElapsedMs; 0 when unanchored
+        uint32_t orderMs;      // master-time instant of this lap; 0 when unanchored
         bool     ordered;      // false for solo/legacy nodes (§8)
     };
     const std::vector<LapDelta>& getLapDeltas() const { return _lapDeltas; }
@@ -223,10 +259,27 @@ public:
         return false;
     }
 
-    // Master-side: record this node's clock anchor from a start acknowledgement
-    // (§8).  rttMs is the round trip of the ack; the lowest-RTT sample wins
-    // because least queueing means least path asymmetry.
-    void   recordAnchor(uint8_t nodeId, uint32_t masterAckMs, uint32_t rttMs);
+    // Master-side: anchor a node from the race start it REPORTED, converted
+    // with the clock offset measured during pre-arm (§8).  Exact — no
+    // inference.  Returns false when this node has no valid offset, in which
+    // case the caller falls back to recordAnchorFromRtt().
+    bool   recordAnchorFromReport(uint8_t nodeId, int64_t clientRaceStartUs);
+
+    // Fallback anchor for a node that missed the pre-arm sync (registered
+    // during the countdown, or its probes all failed).  This is the old
+    // half-RTT estimate, kept ONLY as a degraded path: it measures the reply
+    // of a handler that clears laps and starts a timer before answering, so
+    // the client's own work lands inside what we call network latency.
+    void   recordAnchorFromRtt(uint8_t nodeId, uint32_t masterAckMs, uint32_t rttMs);
+
+    // Master-side diagnostic: per-node clock sync state as JSON.  Deliberately
+    // its own endpoint rather than fields in directorState — this is
+    // instrumentation, and directorState is on the 2 s fanout path whose size
+    // we just spent a release bounding.
+    String buildClockReport() const;
+
+    // Record how late a client's race clock actually began, from its heartbeat.
+    void   setNodeStartLate(uint8_t nodeId, uint32_t lateMs);
 
     // Master-side: mint a new race epoch.  Returns the new raceId.
     uint32_t beginRaceEpoch();
@@ -522,7 +575,21 @@ private:
     // pin clients in the "Arm your quad" state forever.
     bool              _prearmPhase           = false;
     uint32_t          _prearmPhaseSetAtMs    = 0;
-    static constexpr uint32_t PREARM_PHASE_TIMEOUT_MS = 15000;
+    // LAST-RESORT safety net, not an estimate of countdown length.
+    //
+    // Both real exits from pre-arm are now explicit: race/start clears it, and
+    // race/stop clears it (the cancel path, which used to be missing).  This
+    // only fires when the browser driving the countdown disappears without
+    // sending either — tab closed, device slept, WiFi dropped mid-countdown.
+    //
+    // It was 15000, which was implicitly a guess at how long a countdown runs.
+    // Measured, a countdown can exceed 16 s: _raceCountdown() waits on the Web
+    // Speech API between utterances, and that wait has its own 15 s bail-out
+    // for engines that never report completion.  A timeout shorter than the
+    // thing it is timing meant the banner vanished just before the start it
+    // was announcing.  Duration is not predictable from any setting, so this
+    // deliberately does not try to track it — it just has to outlast it.
+    static constexpr uint32_t PREARM_PHASE_TIMEOUT_MS = 60000;
 
     // "Recruit nearby units" job — flag set by web handler, consumed on Core 0.
     volatile bool     _recruitPending        = false;
@@ -537,6 +604,192 @@ private:
     uint8_t           _savedNodeModeForOta   = 0;
     uint32_t          _pauseExpiresAtMs      = 0;
     static constexpr uint32_t OTA_PAUSE_TIMEOUT_MS = 300000;  // 5 minutes
+
+    // ── Clock sync scheduling (§8, master side) ─────────────────────────
+    // Pre-arm opens a sync window: the countdown that follows it is 6-9 s of
+    // idle network with nobody racing, which is the only quiet, uncontended
+    // moment this system ever gets.  Probing there rather than inside the
+    // Start All fanout is the whole design.
+    uint32_t _clockSyncUntilMs   = 0;   // burst active while millis() < this
+    uint32_t _lastClockProbeMs   = 0;   // spacing between individual probes
+    uint8_t  _clockProbeCursor   = 0;   // round-robin over _nodes
+
+    // Sample COUNT is the lever that matters.  Min-delay filtering is a
+    // tournament — the best sample is only as good as the number of draws.
+    //
+    // This is a SAFETY CAP, not the intended window length.  The burst opens
+    // at pre-arm and closes when _broadcastRaceStart() runs, so it covers the
+    // whole countdown however long that takes; the cap only matters if the
+    // director cancels and the start never comes.
+    //
+    // It was 7000 ms, sized on an assumption that the countdown ran 6-9 s.
+    // Measured, it runs ~18 s — _raceCountdown() waits for TTS to finish
+    // between every utterance.  So the burst stopped 11 s before the anchor
+    // was taken, and those final seconds are the most valuable ones: an offset
+    // measured 11 s before the start is 11 s stale.
+    static constexpr uint32_t CLOCK_SYNC_MAX_MS       = 30000;
+    static constexpr uint32_t CLOCK_PROBE_SPACING_MS  = 60;
+    // Steady state: one node every 25 s, feeding the drift fit.  Deliberately
+    // NOT per-lap — at ±20 ppm two crystals diverge ~60 µs over a 3 s lap,
+    // while a single probe carries 1-3 ms of error, so per-lap resync would
+    // overwrite a good number with a worse one dozens of times a minute.
+    static constexpr uint32_t CLOCK_REPROBE_INTERVAL_MS = 25000;
+    // Sized against the MEASURED round-trip distribution, not an assumption
+    // about what a LAN ought to do.
+    //
+    // A previous revision used 60 ms on the reasoning that a later reply is
+    // lost rather than late.  The data already said otherwise: best-of-ten
+    // delays on this fleet included 19.7, 49.3 and 63.1 ms, so most of four
+    // nodes' distributions sat above the cutoff and the burst landed 1-2
+    // samples per node instead of ~19.  Truncating the distribution does not
+    // bias the minimum — it just starves the tournament that finds it.
+    //
+    // Costs little at 200 ms: replies mostly arrive in 20-40 ms and spacing
+    // gates throughput anyway, so the full timeout is only ever spent on a
+    // datagram that genuinely went missing.
+    static constexpr uint16_t CLOCK_PROBE_TIMEOUT_MS  = 200;
+
+    // UDP, not HTTP — the reason NTP uses UDP.  The first implementation of
+    // this probe bracketed HTTPClient::GET(), which performs a TCP connect
+    // handshake, then the request, then the response.  Measured floor was
+    // 18-22 ms across five independent nodes: systematic, so min-delay
+    // filtering could not touch it.  Worse, the handshake happens BEFORE the
+    // client's handler exists, so none of it falls between t2 and t3 and all
+    // of it lands on the outbound leg — a bias in the offset, not just noise.
+    //
+    // A datagram has no handshake, no retransmit, no Nagle, no delayed ACK and
+    // no socket lifecycle, and both ends stamp inside the LwIP task rather
+    // than an async HTTP handler.
+    static constexpr uint16_t CLOCK_PROBE_UDP_PORT    = 5808;
+    static constexpr uint32_t CLOCK_PROBE_MAGIC_REQ   = 0x43503151;  // "CP1Q"
+    static constexpr uint32_t CLOCK_PROBE_MAGIC_RSP   = 0x43503152;  // "CP1R"
+    // The GO message: raceId + the instant to start, in the recipient's own
+    // clock.  Unacknowledged by design — it is sent CLOCK_START_REPEATS times
+    // because repeating a 16-byte datagram is cheaper than waiting for an ack,
+    // and losing a start is the one failure a pilot cannot recover from.
+    static constexpr uint32_t CLOCK_START_MAGIC       = 0x43503153;  // "CP1S"
+    static constexpr uint8_t  CLOCK_START_REPEATS     = 3;
+    static constexpr uint32_t CLOCK_START_REPEAT_GAP_US = 3000;      // 3 ms
+    // GO acknowledgement.  Nothing BLOCKS on it — it is a datagram arriving
+    // asynchronously — but it turns "did everyone start?" from a 3-4 s wait on
+    // the heartbeat into a ~50 ms check, which is the difference between a
+    // repaired pilot missing one gate and missing several.
+    static constexpr uint32_t CLOCK_START_ACK_MAGIC   = 0x43503141;  // "CP1A"
+    static constexpr uint32_t START_ACK_WAIT_MS       = 60;
+
+    // ── Start margin: MEASURED, not assumed (§8) ────────────────────────
+    //
+    // How far ahead the common start instant is placed.  It must exceed the
+    // time it takes to distribute the start, or a late client receives a
+    // target that has already passed and falls back to starting on arrival —
+    // reintroducing the spread this exists to remove.
+    //
+    // That duration is a property of the venue, not of the code: RF noise,
+    // distance, how many pilots, what else is on the channel.  A constant
+    // tuned on one bench is wrong everywhere else, so the margin is derived
+    // each race from what this fleet actually did last time:
+    //
+    //   1.5x the measured fanout duration   (how long distribution took)
+    // + 3x the worst measured one-way delay (flight of the last datagram)
+    // + slack                               (scheduling granularity)
+    // + a healing boost                     (raised on a miss, decayed on success)
+    //
+    // The bounds below are limits on that calculation, not estimates of it.
+    static constexpr int64_t START_MARGIN_MIN_US   =   80000LL;   // 80 ms
+    static constexpr int64_t START_MARGIN_MAX_US   = 2500000LL;   // 2.5 s
+    static constexpr int64_t START_MARGIN_SLACK_US =   25000LL;   // 25 ms
+    // First race after boot has no fanout measurement yet.  Per-node, so a
+    // seven-pilot fleet starts more conservatively than a two-pilot one.
+    static constexpr int64_t START_MARGIN_PER_NODE_US = 120000LL; // 120 ms
+    // Healing: a client that missed its target costs this much extra next
+    // race; a clean race gives a little back.  Asymmetric on purpose — being
+    // slightly late is invisible, being early breaks the start.
+    static constexpr int64_t START_BOOST_STEP_US   =  150000LL;   // +150 ms on a miss
+    static constexpr int64_t START_BOOST_DECAY_US  =   25000LL;   // -25 ms on success
+    static constexpr int64_t START_BOOST_MAX_US    = 1000000LL;   // 1 s
+
+    // ── Start verification (§8) ─────────────────────────────────────────
+    // The GO datagram is unacknowledged, so a node that never received it
+    // would simply sit out the race with nothing to notice.  After the target
+    // has passed — plus enough grace for a heartbeat to report the truth — any
+    // node that should be racing and is not gets an HTTP start as repair, and
+    // is counted as a miss so the margin heals upward.
+    uint32_t _startVerifyAtMs = 0;   // 0 = nothing to verify
+    int64_t  _lastStartTargetUs = 0; // master-time instant the fleet was told to start
+    static constexpr uint32_t START_VERIFY_GRACE_MS = 3000;  // > heartbeat interval
+    void _verifyRaceStarts();
+
+    int64_t  _lastFanoutUs   = 0;   // measured duration of the last start fanout
+    int64_t  _startBoostUs   = 0;   // healing term, grown on misses
+    int64_t  _lastStartMarginUs = 0;// what we used last race, for the report
+    int64_t _computeStartMarginUs() const;
+
+    // Drift is MEASURED and REPORTED but not yet APPLIED.
+    //
+    // Your own data is what gates this.  Across 600 s the raw offsets moved by
+    // at most ~5 ms; a real ±100 ppm would have moved them 60 ms, which would
+    // have been unmissable even through the probe noise.  So true drift is
+    // bounded below ~10 ppm, and the fit reporting -100/-35/+25 is measuring
+    // its own jitter.  Applying that would inject up to 30 ms of error across
+    // a 5-minute race to correct a few hundred µs of reality.
+    //
+    // Flip to true once the UDP probe brings sigma down and _fitClockDrift()
+    // gates on residual rather than sample count.
+    static constexpr bool     CLOCK_APPLY_DRIFT       = false;
+    // Anything past this is measurement noise, not a real crystal.  Without
+    // the clamp one bad probe under contention can inject a rate that
+    // corrupts every subsequent lap in the race.
+    static constexpr int32_t  CLOCK_MAX_DRIFT_PPM     = 100;
+    // A slope fitted over a short span is dominated by per-sample noise.
+    static constexpr uint8_t  CLOCK_DRIFT_MIN_SAMPLES = 4;
+    static constexpr int64_t  CLOCK_DRIFT_MIN_SPAN_US = 20000000LL;  // 20 s
+    // Minimum spacing between drift-window entries.  Keeps the pre-arm burst
+    // (a probe every 60 ms) from flushing the window and collapsing its
+    // baseline right when a race is about to start.  See _recordClockSample().
+    static constexpr int64_t  CLOCK_DRIFT_SPACING_US  = 5000000LL;   // 5 s
+
+    // Quality gate on what may enter the drift window.  The window was
+    // accepting EVERY sample, including 49-63 ms ones — which is precisely the
+    // sigma the slope fit is trying to see through.  A sample is admitted only
+    // if its round trip is within 3x this node's best and under an absolute
+    // ceiling, so one node with a poor link cannot quietly widen its own bar.
+    // 25 ms rather than 15: at the delays this fleet currently produces, a
+    // 15 ms ceiling rejected nearly everything and driftSamples fell to 0-2,
+    // so the window learned nothing.  Drift is measured but not applied
+    // (CLOCK_APPLY_DRIFT), so letting the window fill costs nothing and
+    // starving it costs the only data that would justify turning it on.
+    static constexpr uint32_t CLOCK_DRIFT_DELAY_MULT  = 3;
+    static constexpr uint32_t CLOCK_DRIFT_MAX_DELAY_US = 25000;      // 25 ms
+
+    // ── Clock probe transport (UDP) ─────────────────────────────────────
+    // One socket, both roles.  A master sends REQ and consumes RSP; a client
+    // receives REQ and answers RSP.  Symmetric, so a unit that changes role
+    // needs no re-plumbing.
+    AsyncUDP          _clockUdp;
+    bool              _clockUdpReady   = false;
+    // Written by the AsyncUDP callback (LwIP task), read by parallelTask.
+    // The callback stamps t4 the instant the datagram lands — that is the
+    // whole reason for using the async socket rather than polling one, since
+    // poll granularity would otherwise quantize t4.
+    volatile uint32_t _probeSeq        = 0;   // sequence we are waiting on
+    volatile bool     _probeReady      = false;
+    volatile int64_t  _probeT2         = 0;
+    volatile int64_t  _probeT3         = 0;
+    volatile int64_t  _probeT4         = 0;
+    void _initClockUdp();
+
+    // One four-timestamp exchange against a node.  Returns true if a sample
+    // landed (whether or not it beat the stored best).  parallelTask only.
+    bool _probeNodeClock(NodeInfo& n);
+    // Advance the probe schedule; called once per process() tick.
+    void _runClockSync(uint32_t nowMs);
+    // Fold a fresh sample into a node's best-offset and drift window.
+    void _recordClockSample(NodeInfo& n, int64_t offsetUs, int64_t delayUs);
+    // Least-squares slope over the sliding window, clamped and gated.
+    void _fitClockDrift(NodeInfo& n);
+    // Master-time µs of a lap, drift-corrected.  The single place the whole
+    // chain converges.
+    int64_t _lapOrderUs(const NodeInfo& n, uint32_t raceElapsedMs) const;
 
     void _sendRegistration();
     void _sendHeartbeat();

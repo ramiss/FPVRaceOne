@@ -2,6 +2,7 @@
 #include "webhook.h"
 
 #include "debug.h"
+#include "esp_timer.h"   // esp_timer_get_time() — µs race-start capture (§8)
 
 #ifdef ESP32S3
 #include "rgbled.h"
@@ -122,7 +123,9 @@ void LapTimer::init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, Webh
 #endif
 }
 
-void LapTimer::start() {
+void LapTimer::start() { startAt(esp_timer_get_time()); }
+
+void LapTimer::startAt(int64_t originUs) {
     DEBUG("\n=== RACE STARTED ===\n");
     DEBUG("Current Thresholds:\n");
     DEBUG("  Enter RSSI: %u\n", conf->getEnterRssi());
@@ -150,8 +153,26 @@ void LapTimer::start() {
     _lapCrc = 0;
     lapSyncSummaryReset(_summary);
 
-    raceStartTimeMs = millis();
+    // An explicit start supersedes anything armed — otherwise a scheduled
+    // start left over from an aborted countdown would restart the race a
+    // second or two after the director started it manually.
+    scheduledStartUs = 0;
+
+    // The race clock's origin.  Normally "now"; for a backdated start it is
+    // the instant we were TOLD to begin, so getElapsedMs() is immediately
+    // correct and every lap's raceElapsedMs is measured from the same zero the
+    // rest of the field is using.
+    const int64_t nowUs   = esp_timer_get_time();
+    const int64_t behindUs = (originUs > 0 && originUs < nowUs) ? (nowUs - originUs) : 0;
+    raceStartTimeUs = (originUs > 0) ? originUs : nowUs;
+    raceStartTimeMs = millis() - (uint32_t)(behindUs / 1000);
     startTimeMs = raceStartTimeMs;
+    startLateMs     = (uint32_t)(behindUs / 1000);
+    finalElapsedMs  = 0;          // a new race has no result yet
+    if (startLateMs > 0) {
+        DEBUG("Race clock backdated %u ms — joined the field's timeline late; "
+              "any gate crossing in that window was NOT recorded\n", startLateMs);
+    }
     state = RUNNING;
 
     rssiPeak = 0;
@@ -284,8 +305,33 @@ void LapTimer::appendRestoredLap(const LapSyncRecord& lap) {
     if (lap.seq + 1 > lapTotal) lapTotal = (uint16_t)(lap.seq + 1);
 }
 
+// Store only — never starts the race inline.
+//
+// This is called from the UDP receive callback, which runs in the LwIP task.
+// start() memsets the lap arrays and rewrites state that the sampling loop is
+// reading, so doing it there would be a cross-task write to live race data.
+// handleLapTimerUpdate() polls at ~1 kHz and fires an already-due target on its
+// very next tick, so nothing is lost by deferring.
+void LapTimer::scheduleStart(int64_t atUs) {
+    scheduledStartUs = atUs;
+    const int64_t now = esp_timer_get_time();
+    if (atUs <= now) {
+        DEBUG("[CLOCK] Start target already due by %lld us — firing next tick\n",
+              (long long)(now - atUs));
+    } else {
+        DEBUG("[CLOCK] Race start armed for %lld us from now\n", (long long)(atUs - now));
+    }
+}
+
 void LapTimer::stop() {
     DEBUG("LapTimer stopped\n");
+    // Disarm: a stop arriving between the schedule and its target is the
+    // cancel path for an aborted countdown.  Without this the race would start
+    // on its own, seconds after the director stopped it.
+    scheduledStartUs = 0;
+    // Capture the finishing time BEFORE clearing state — once state is
+    // STOPPED, getElapsedMs() returns 0 and the duration is gone.
+    if (isRunning()) finalElapsedMs = millis() - raceStartTimeMs;
     state = STOPPED;
     rssiCount = 0;
 
@@ -314,6 +360,27 @@ void LapTimer::stop() {
 }
 
 void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
+    // Armed start (§8) — checked FIRST, before any early return below.  A
+    // mid-tune RX5808 must not be able to defer the start of a race: the
+    // scheduled instant is the one thing in this function that is not about
+    // sampling.
+    if (scheduledStartUs != 0) {
+        const int64_t nowUs = esp_timer_get_time();
+        if (nowUs >= scheduledStartUs) {
+            const int64_t intended = scheduledStartUs;
+            scheduledStartUs = 0;
+            // Origin is the COMMANDED instant, not the moment the poll noticed.
+            // Whatever lateness there was stays out of the race clock entirely.
+            startAt(intended);
+            // ...but is still measured, because it is the honest figure for how
+            // well this device honours a schedule.
+            startResidualUs   = nowUs - intended;
+            startEventPending = true;      // main loop tells the UI, now
+            DEBUG("[CLOCK] Scheduled start fired, residual %+lld us\n",
+                  (long long)startResidualUs);
+        }
+    }
+
 #if RSSI_LOGGING_ENABLED
     snapshot.lapEvent = false;
 #endif

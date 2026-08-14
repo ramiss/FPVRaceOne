@@ -205,6 +205,22 @@ async function fetchWithRetry(url, options, maxAttempts = 3, delayMs = 1000) {
 
 var timerInterval;
 var lapTimerStartMs = 0;            // Start time for current lap timer
+// Race-relative time of the last gate crossing, and the Date.now() reference
+// for race zero.  Together these let the current-lap clock be DERIVED rather
+// than stamped, which is what makes it survive being recomputed.
+//
+// startRaceDisplayOnly() is called more than once on a page load — once by the
+// /api/mode restore and again by the SSE onConnect replay of "started:<ms>" —
+// so anything it stamps directly gets clobbered by whichever call lands last.
+// That ordering race is why the lap clock first read 00:00 on refresh and then,
+// once it was anchored to race start instead, read the whole race.
+var lastCrossingRaceMs = 0;         // race-relative ms of the last lap crossing
+var raceDisplayStartMs = 0;         // Date.now() corresponding to race elapsed 0
+var raceReanchorTimer  = null;      // periodic device re-anchor while racing
+// Date.now() reference for THIS device's own race start, published by
+// startRaceDisplayOnly() and cleared by stopRaceDisplayOnly().  0 = our own
+// timer is not running (e.g. a pilot ignoring the race director).
+var rvOwnRaceStartMs = 0;
 const timer = document.getElementById("timer");
 const lapCounter = document.getElementById("lapCounter");
 const startRaceButton = document.getElementById("startRaceButton");
@@ -467,7 +483,14 @@ async function onWiFiReconnect() {
       try {
         const lr = await fetchWithRetry('/api/laps/current', {}, 3, 1500);
         const ld = await lr.json();
-        if (ld.laps && ld.laps.length > 0) _restoreInProgressLaps(ld.laps);
+        if (ld.laps && ld.laps.length > 0) {
+          _restoreInProgressLaps(ld.laps);
+          // Record where the last crossing was.  Safe to run before OR after
+          // startRaceDisplayOnly() — both derive the lap clock from the same
+          // two values rather than stamping it, so the SSE onConnect replay
+          // can no longer undo this.
+          setLapTimerFromLastLap(ld.laps);
+        }
       } catch (_) {}
     }
 
@@ -620,6 +643,26 @@ function setupWiFiEvents() {
         startRaceButton.disabled = true;
         stopRaceButton.disabled = false;
         addLapButton.disabled = false;
+        // Master: this is where the host's race clock and the GO cue belong.
+        // The fleet start is scheduled ahead so every unit begins on one
+        // instant (§8), and the firmware emits this event when that instant
+        // arrives — so the host lands with the clients instead of starting
+        // when Start All was pressed.
+        //
+        // It has to live INSIDE this early-return block: master and client
+        // modes never reach the multi-tab logic below.
+        if (mnNodeMode === 1 && !mnRaceTimerIntervalId) {
+          let _off = 0;
+          const _c = e.data.indexOf(':');
+          if (_c > 0) {
+            const _p = parseInt(e.data.substring(_c + 1), 10);
+            if (!isNaN(_p) && _p >= 0) _off = _p;
+          }
+          _mnStartTimer(_off);
+          beep(1, 1, "square");
+          beep(500, 880, "square");
+          if (navigator.vibrate) navigator.vibrate(500);
+        }
       } else if (e.data === "stopped") {
         stopRaceButton.disabled = true;
         startRaceButton.disabled = false;
@@ -641,6 +684,7 @@ function setupWiFiEvents() {
         const hdr = lapTable ? lapTable.rows.length : 0;
         for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
         lapNo = -1; lapTimes = [];
+      lastCrossingRaceMs = 0;   // clean slate: current lap begins at race zero
         updateLapCounter();
       }
     } else if (e.data === "started" || e.data.indexOf("started:") === 0) {
@@ -684,6 +728,7 @@ function setupWiFiEvents() {
       const hdr = lapTable ? lapTable.rows.length : 0;
       for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
       lapNo = -1; lapTimes = [];
+      lastCrossingRaceMs = 0;   // clean slate: current lap begins at race zero
       updateLapCounter();
       if (typeof updateAnalysisView === 'function') updateAnalysisView();
     }
@@ -765,6 +810,7 @@ function setupWiFiEvents() {
       const hdr = lapTable ? lapTable.rows.length : 0;
       for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
       lapNo = -1; lapTimes = [];
+      lastCrossingRaceMs = 0;   // clean slate: current lap begins at race zero
       updateLapCounter();
     } else if (e.data === "started") {
       if (mnClientSkipEnabled) return;
@@ -3354,6 +3400,9 @@ function addLap(lapStr) {
   lapTimes.push(newLap);
 
   lapTimerStartMs = Date.now();         // Reset lap timer
+  // Remember WHERE in the race this crossing happened, so a later refresh (or
+  // a repeated startRaceDisplayOnly) can re-derive the same lap origin.
+  if (raceDisplayStartMs > 0) lastCrossingRaceMs = Date.now() - raceDisplayStartMs;
 
   // Calculate total time so far
   const totalMs = Math.round(lapTimes.reduce((sum, time) => sum + time, 0) * 1000);
@@ -3538,6 +3587,21 @@ function startRaceDisplayOnly(offsetMs = 0) {
 
   clearInterval(timerInterval);
   const _timerStart = Date.now() - offsetMs;
+  // Published so the Race View can render from OUR OWN race clock rather than
+  // from a directorState push that is up to ~1 s old by the time it lands (the
+  // payload is built up to 250 ms before the fanout runs, and the fanout is
+  // sequential, so a client late in the order receives it ~500 ms later still).
+  // Extrapolating from the push cannot recover that — it has no idea how old
+  // the payload was.  Our own timer is exact, and with scheduled starts it
+  // agrees with the master by construction.
+  rvOwnRaceStartMs = _timerStart;
+  // ...and start ticking immediately.  rvStartTicker() was only being driven
+  // by the directorState push, so the Race View clock did not begin updating
+  // until that arrived — up to a full broadcast interval after we had actually
+  // started racing.
+  rvStartTicker();
+  rvUpdateBanner();
+  _startRaceReanchor();
   timerInterval = setInterval(function () {
     const elapsed = Date.now() - _timerStart;
     const minutes = Math.floor(elapsed / 60000);
@@ -3549,15 +3613,100 @@ function startRaceDisplayOnly(offsetMs = 0) {
     timer.innerHTML = `${m}:${s}:${ms}s`;
   }, 10);
 
-  lapTimerStartMs      = Date.now();
+  // DERIVED, not stamped — so it is identical no matter how many times this
+  // runs or in what order relative to the lap restore.  lastCrossingRaceMs is
+  // 0 until laps are known, which is exactly right: with no crossing yet, the
+  // current lap did begin at race start.
+  raceDisplayStartMs   = _timerStart;
+  lapTimerStartMs      = _timerStart + lastCrossingRaceMs;
   startLapTimerDisplay();
+}
+
+// Record where the last crossing sat in the race, from restored lap data, and
+// re-derive the current-lap clock from it.
+//
+// Uses the lap's own raceElapsedMs rather than summing lap times: once the ring
+// has evicted (100 laps), the retained times no longer add up to the elapsed
+// race, and the sum would silently drift by however much was dropped.
+function setLapTimerFromLastLap(laps) {
+  lastCrossingRaceMs = 0;
+  if (Array.isArray(laps) && laps.length) {
+    const last = laps[laps.length - 1];
+    if (typeof last?.raceElapsedMs === 'number') lastCrossingRaceMs = last.raceElapsedMs;
+  }
+  // Only meaningful once we know where race zero is.  If the race display has
+  // not been started yet, startRaceDisplayOnly() will derive this itself.
+  if (raceDisplayStartMs > 0) lapTimerStartMs = raceDisplayStartMs + lastCrossingRaceMs;
 }
 
 // Stop the visual race display without sending /timer/stop to the server.
 // Used when the master remotely stops the race on this client node.
+// Re-anchor the browser's race clock to THIS DEVICE's own elapsed.
+//
+// Every display anchor in this page is ultimately set when a message arrived —
+// an SSE "started", a restore fetch — and message arrival is not the same
+// instant on two machines.  The devices themselves are synced to a few ms (§8),
+// so any visible disagreement between the master's window and a client's is
+// introduced entirely by that transit difference, not by the timers.
+//
+// Same half-RTT correction the firmware uses for its clock probes: ask the
+// device what its elapsed is, assume the reply describes the midpoint of the
+// round trip, and re-derive the anchor from it.  Both browsers converge on
+// their own device's truth, and because the devices agree with each other, the
+// two windows then agree too.
+//
+// Corrections are single-digit milliseconds and applied to the ANCHOR, so the
+// clock never jumps backwards on screen — it just stops drifting apart.
+async function _reanchorRaceClockFromDevice() {
+  try {
+    const t0 = Date.now();
+    const r  = await fetch('/api/mode');
+    if (!r.ok) return;
+    const t1 = Date.now();
+    const d  = await r.json();
+    if (!d.timerRunning) return;
+    const elapsed = d.raceElapsedMs || 0;
+    // The device observed `elapsed` at roughly the midpoint of the round trip.
+    const observedAt = t0 + Math.round((t1 - t0) / 2);
+    const anchor     = observedAt - elapsed;
+
+    if (mnNodeMode === 1) {
+      if (mnRaceTimerIntervalId) mnRaceStartMs = anchor;
+    } else {
+      // Shift the lap clock by the same correction so the current lap keeps
+      // its position within the race rather than jumping by the adjustment.
+      const delta = anchor - raceDisplayStartMs;
+      raceDisplayStartMs = anchor;
+      if (rvOwnRaceStartMs > 0) rvOwnRaceStartMs += delta;
+      lapTimerStartMs = raceDisplayStartMs + lastCrossingRaceMs;
+    }
+  } catch (_) { /* transient — the next tick tries again */ }
+}
+
+function _startRaceReanchor() {
+  if (raceReanchorTimer) return;
+  // First correction shortly after the start, then slowly — this is trimming
+  // milliseconds, not chasing anything that moves.
+  setTimeout(_reanchorRaceClockFromDevice, 1500);
+  raceReanchorTimer = setInterval(_reanchorRaceClockFromDevice, 20000);
+}
+
+function _stopRaceReanchor() {
+  if (raceReanchorTimer) { clearInterval(raceReanchorTimer); raceReanchorTimer = null; }
+}
+
 function stopRaceDisplayOnly() {
+  _stopRaceReanchor();
   clearInterval(timerInterval);
-  timer.innerHTML = '00:00:00s';
+  rvOwnRaceStartMs = 0;   // fall the Race View back to the pushed elapsed
+  // The final time STAYS on screen, exactly as it does on the master — whose
+  // _mnStopTimer() only clears its interval and leaves the last painted value.
+  // Blanking here meant a pilot's own display went to 00:00:00 the instant the
+  // director stopped the race, discarding the one number they wanted to read.
+  //
+  // Nothing is lost by not clearing: both pre-arm handlers already zero this
+  // element at the start of the next countdown, which is the right moment for
+  // a clean slate.
   stopRaceButton.disabled  = true;
   startRaceButton.disabled = false;
   startRaceButton.classList.remove('active');
@@ -4198,7 +4347,10 @@ async function startRace() {
   stopRaceButton.disabled = false;
   addLapButton.disabled = false;
 
-  lapTimerStartMs = Date.now();
+  // A fresh race: no crossing yet, so the current lap begins at race zero.
+  raceDisplayStartMs = Date.now();
+  lastCrossingRaceMs = 0;
+  lapTimerStartMs    = raceDisplayStartMs;
 
   startLapTimerDisplay();
 }
@@ -9621,13 +9773,22 @@ function _mnFormatRaceTimer(ms) {
 
 function _mnStartTimer(offsetMs = 0) {
   mnRaceStartMs = Date.now() - offsetMs;
+  // 10 ms, matching the client's single-race timer.
+  //
+  // This display shows centiseconds but only repainted every 100 ms, so at any
+  // instant it could read up to a full centisecond-and-a-half stale — enough on
+  // its own to make a correctly synced fleet look 30-50 ms out when two windows
+  // are compared side by side.  A display's refresh rate should not be coarser
+  // than the units it prints.
   mnRaceTimerIntervalId = setInterval(() => {
     const el = document.getElementById('mn-race-timer');
     if (el) el.textContent = _mnFormatRaceTimer(Date.now() - mnRaceStartMs);
-  }, 100);
+  }, 10);
+  _startRaceReanchor();
 }
 
 function _mnStopTimer() {
+  _stopRaceReanchor();
   clearInterval(mnRaceTimerIntervalId);
   mnRaceTimerIntervalId = null;
 }
@@ -9680,6 +9841,19 @@ function rvFormatTimer(ms) {
 function rvUpdateTimerDisplay() {
   const el = document.getElementById('rv-race-timer');
   if (!el) return;
+  // Prefer this device's own race clock.  It is exact and needs no
+  // extrapolation; the pushed value is only a fallback for a pilot who is
+  // ignoring the race director (skipEnabled), whose own timer never started.
+  //
+  // Deliberately NOT gated on rvRaceRunning.  That flag arrives from the
+  // directorState push, which can be a couple of seconds behind our own start
+  // — and while we waited for it the clock sat frozen at 00:00.00 and then
+  // jumped.  Our own timer starting IS the authoritative signal that we are
+  // racing; nothing needs to confirm it from outside.
+  if (rvOwnRaceStartMs > 0) {
+    el.textContent = rvFormatTimer(Math.max(0, Date.now() - rvOwnRaceStartMs));
+    return;
+  }
   const baseMs = rvElapsedAtPushMs;
   const extrapolateMs = rvRaceRunning ? Math.max(0, Date.now() - rvLocalReceiveMs) : 0;
   el.textContent = rvFormatTimer(baseMs + extrapolateMs);
@@ -9703,10 +9877,13 @@ function rvUpdateBanner() {
     banner.style.background = '#c0392b';
     return;
   }
-  if (rvPrearmActive) {
+  // Our own timer running outranks a pushed prearm flag.  A payload built
+  // during the countdown can still be in flight when the race begins, and
+  // "Arm your quad" must never reappear over a race that is already under way.
+  if (rvPrearmActive && rvOwnRaceStartMs === 0) {
     banner.textContent = 'Arm your quad';
     banner.style.background = '#e67e22';   // orange — "act now"
-  } else if (rvRaceRunning) {
+  } else if (rvRaceRunning || rvOwnRaceStartMs > 0) {
     banner.textContent = 'Race in progress';
     banner.style.background = '#2e7d32';
   } else {
@@ -9815,6 +9992,22 @@ function rvMaybeBackfill(node, cached, raceId) {
     .finally(() => { rvBackfillBusy = false; });
 }
 
+// Is this pilot's lack of a clock anchor an ACTUAL problem worth telling the
+// director about?
+//
+// Only when they have laps that cannot be placed on the field's timeline.
+// `anchored` is false by default — before any race, after a Clear, during
+// pre-arm, and for a pilot who sat this one out — and in every one of those
+// cases there is nothing to misorder and nothing to warn about.  Showing the
+// badge for the default state made a healthy, freshly booted fleet look broken,
+// which is worse than saying nothing: a warning that is usually wrong trains
+// people to ignore it when it is finally right.
+function rvIsUnanchored(n) {
+  if (n.anchored !== false) return false;
+  if (n.excludedFromCurrentRace) return false;
+  return (Number(n.lapCount) || 0) > 0;
+}
+
 function rvMergeNodes(nodes, deltas, raceId) {
   // A new epoch invalidates everything: laps from a previous race must never
   // merge into this one's standings.
@@ -9845,14 +10038,14 @@ function rvMergeNodes(nodes, deltas, raceId) {
     // better source.  Once the gate flips they stop arriving and the cache
     // takes over. Handle both without the UI needing to know which.
     if (Array.isArray(n.laps) && n.laps.length) {
-      return { ...n, lapsStale: 0, unanchored: n.anchored === false };
+      return { ...n, lapsStale: 0, unanchored: rvIsUnanchored(n) };
     }
 
     const cached = (mnMyNodeId > 0 && n.nodeId === mnMyNodeId)
                  ? null                       // our own row is rendered from local data
                  : (rvLapCache[n.nodeId] || []);
 
-    if (!cached) return { ...n, lapsStale: 0, unanchored: n.anchored === false };
+    if (!cached) return { ...n, lapsStale: 0, unanchored: rvIsUnanchored(n) };
 
     // Digest comparison (§6.5).  lapCount is the authoritative total; anything
     // we are missing was dropped by the delta cap or arrived while we were away.
@@ -9869,7 +10062,7 @@ function rvMergeNodes(nodes, deltas, raceId) {
       ...n,
       laps: cached.map(l => ({ lapNumber: l.seq, lapTimeMs: l.lapTimeMs })),
       lapsStale:  missing,
-      unanchored: n.anchored === false
+      unanchored: rvIsUnanchored(n)
     };
   });
 }
@@ -10129,12 +10322,13 @@ async function mnStartRace() {
     return;
   }
 
-  // Beep, start master timer, then broadcast GO to clients — all at the same moment.
-  beep(1, 1, "square");
-  beep(500, 880, "square");
-  if (navigator.vibrate) navigator.vibrate(500);
-
-  _mnStartTimer();
+  // The GO cue and the master's clock are NOT fired here any more.
+  //
+  // The fleet start is scheduled ~1.2 s ahead so every unit begins on one
+  // instant (§8).  Starting the host's display when the POST goes out put it
+  // that full margin ahead of every client it had just told to wait — measured
+  // at 1.18 s of disagreement between the two browsers.  Both now hang off the
+  // raceState "started" event, which the firmware emits at the real start.
   try {
     const excludeParam = (window._mnExcludeNodes && window._mnExcludeNodes.length > 0)
       ? '?exclude=' + window._mnExcludeNodes.join(',')
@@ -10390,7 +10584,14 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
           const lr = await fetchWithRetry('/api/laps/current', {}, 3, 1500);
           const ld = await lr.json();
-          if (ld.laps && ld.laps.length > 0) _restoreInProgressLaps(ld.laps);
+          if (ld.laps && ld.laps.length > 0) {
+            _restoreInProgressLaps(ld.laps);
+            // This is the PAGE LOAD path; the copy near the top of the file is
+            // the SSE-reconnect path.  Both restore laps, so both have to
+            // re-anchor the current-lap clock — fixing only one left a plain
+            // browser refresh still showing the whole race as the current lap.
+            setLapTimerFromLastLap(ld.laps);
+          }
         } catch (_) {}
       }
       onRaceTabOpen();

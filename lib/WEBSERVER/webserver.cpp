@@ -26,6 +26,7 @@ extern "C" {
   #include "lwip/netif.h"
 }
 #include "esp_netif.h"
+#include "esp_timer.h"   // clock probe + anchor reporting (§8)
 #include "debug.h"
 #include "config.h"
 
@@ -444,7 +445,9 @@ static void _buildDirectorStatePayloadInto(String& out,
     uint16_t masterFreq    = conf ? conf->getFrequency()         : 0;
     bool     masterSkip    = conf ? conf->getMnSkipMasterStart() : false;
 
-    uint32_t elapsedMs     = timer ? timer->getElapsedMs() : 0;
+    // Holds the finishing time after a stop rather than snapping to zero, so a
+    // client's Race View still shows the result the director just produced.
+    uint32_t elapsedMs     = timer ? timer->getLastElapsedMs() : 0;
     bool     prearmActive  = multiNode && multiNode->getPrearmPhase();
 
     // Pre-size.  This used to include `laps * 40` and grew without bound as a
@@ -1680,15 +1683,108 @@ EEPROM:\n";
         request->send(200, "application/json", "{\"status\": \"OK\"}");
     });
 
+    // /timer/clockProbe — MANUAL DIAGNOSTIC ONLY (§8).
+    //
+    // The master no longer uses this: bracketing an HTTPClient GET measured a
+    // TCP connect handshake plus the request plus the response, which put a
+    // systematic 18-22 ms floor under every sample and biased the offset,
+    // because the handshake happens before this handler exists and so falls
+    // outside t2..t3 entirely.  The live probe is UDP (see _probeNodeClock).
+    // Kept because `curl` against it is a quick way to confirm a client's
+    // clock is sane without a serial cable.
+    //
+    // The master computes
+    //     offset = ((t2 - t1) + (t3 - t4)) / 2      (client ahead of master)
+    //     delay  = (t4 - t1) - (t3 - t2)            (round trip, less our work)
+    // where t1/t4 are its own send/receive stamps.  Subtracting (t3 - t2) is
+    // the whole point: it removes THIS device's processing time from the
+    // estimate, which is the error that made the old half-RTT anchor (measured
+    // on the masterStart command, a handler that clears laps and starts a
+    // timer before answering) unusable.
+    //
+    // t2 is taken first, t3 as late as the API allows.  Whatever serialization
+    // happens after t3 is misattributed to the network, which inflates `delay`
+    // slightly — that is the safe direction, because the master keeps the
+    // LOWEST-delay sample and a sample inflated by our own jitter simply loses.
+    server.on("/timer/clockProbe", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        const int64_t t2 = esp_timer_get_time();
+        char body[96];
+        const int64_t t3 = esp_timer_get_time();
+        snprintf(body, sizeof(body), "{\"t2\":%lld,\"t3\":%lld}",
+                 (long long)t2, (long long)t3);
+        request->send(200, "application/json", body);
+    });
+
+    // /timer/masterArm — everything expensive about starting a race, done
+    // during the countdown instead of at GO (§8).
+    //
+    // The countdown is 6-18 s of otherwise idle time.  Doing the setup here
+    // means the only thing that has to travel at GO is an 8-byte timestamp,
+    // which collapses the start margin from "six sequential HTTP round trips"
+    // to "one datagram" — and a datagram is cheap enough to send three times.
+    //
+    // Deliberately does NOT start the timer.  A race that is armed but never
+    // told to go simply never starts, and the next pre-arm re-arms it.
+    server.on("/timer/masterArm", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        if (multiNode && multiNode->isClientMode() && conf->getMnSkipMasterStart()) {
+            request->send(200, "application/json", "{\"status\":\"SKIPPED\"}");
+            return;
+        }
+        timer->clearLapData();   // wipe any solo-race data before the master race
+        if (multiNode && multiNode->isClientMode() && request->hasParam("raceId")) {
+            // Adopting the epoch now is what lets the UDP start message be
+            // trusted: it carries the same raceId, and a datagram that does
+            // not match the epoch we armed for is ignored.
+            multiNode->setRaceId((uint32_t)strtoul(
+                request->getParam("raceId")->value().c_str(), nullptr, 10));
+        }
+        request->send(200, "application/json", "{\"status\":\"OK\"}");
+    });
+
     // /timer/masterStart — called by master broadcast; respects client skip toggle
     server.on("/timer/masterStart", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (multiNode && multiNode->isClientMode() && conf->getMnSkipMasterStart()) {
             request->send(200, "application/json", "{\"status\": \"SKIPPED\"}");
             return;
         }
+        // Idempotency guard.  This endpoint is also the REPAIR path (§8): the
+        // master sends it when a heartbeat suggests we missed the GO.  If that
+        // heartbeat was merely stale and we are in fact racing, clearing and
+        // restarting would destroy a pilot's laps mid-race — so a request for
+        // the epoch we are already running under is acknowledged and ignored.
+        if (timer->isRunning() && multiNode && multiNode->isClientMode() &&
+            request->hasParam("raceId")) {
+            const uint32_t reqRaceId = (uint32_t)strtoul(
+                request->getParam("raceId")->value().c_str(), nullptr, 10);
+            if (reqRaceId != 0 && reqRaceId == multiNode->getRaceId()) {
+                char b[96];
+                snprintf(b, sizeof(b),
+                         "{\"status\":\"ALREADY_RUNNING\",\"raceStartUs\":%lld}",
+                         (long long)timer->getRaceStartUs());
+                request->send(200, "application/json", b);
+                return;
+            }
+        }
         timer->clearLapData();  // wipe any solo-race data before master race begins
-        timer->start();
-        if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
+        // Scheduled start (§8): the master converts one common target instant
+        // into THIS device's clock domain using the offset measured during
+        // pre-arm, so every unit begins together rather than whenever its own
+        // POST happened to land.  Absent (older master, or no valid offset for
+        // us) falls back to starting on arrival, exactly as before.
+        if (request->hasParam("startAtUs")) {
+            timer->scheduleStart(strtoll(
+                request->getParam("startAtUs")->value().c_str(), nullptr, 10));
+        } else {
+            timer->start();
+        }
+        // Only announce immediately when the race is actually running now.
+        // A scheduled start announces itself from the main loop when it fires
+        // (see LapTimer::consumeStartEvent) — announcing here would anchor this
+        // pilot's display up to 1.2 s early, and by a different amount than
+        // every other pilot, which is the UI half of the spread we just removed
+        // from the timers.
+        const bool startedNow = !timer->hasScheduledStart();
+        if (startedNow && transportMgr) transportMgr->broadcastRaceStateEvent("started");
         if (multiNode && multiNode->isClientMode()) {
             // Adopt the epoch in the SAME request that starts the clock (§5).
             // Learning the two separately leaves a window in which laps are
@@ -1700,9 +1796,32 @@ EEPROM:\n";
             }
             multiNode->setTimerRunning(true);
             multiNode->setMasterRaceActive(true);
-            events.send("started", "masterRaceState");
+            // Same reasoning as above: this event calls startRaceDisplayOnly()
+            // in the browser, so it must not fire until the race is genuinely
+            // under way.  The main loop sends it when the schedule fires.
+            if (startedNow) events.send("started", "masterRaceState");
         }
-        request->send(200, "application/json", "{\"status\": \"OK\"}");
+        // Report the exact instant our race clock hit zero, in our own µs
+        // domain (§8).  The master converts it with the offset measured during
+        // pre-arm to get our anchor on ITS timeline.
+        //
+        // This is what retires the old inference.  Previously the master
+        // GUESSED our start from when this reply landed (t4 - rtt/2), so the
+        // anchor carried the offset error PLUS the guess error.  We know the
+        // answer exactly; there was never a reason to make it guess.
+        // When a start is ARMED the race has not begun yet, so getRaceStartUs()
+        // still holds the previous race — report the instant we committed to
+        // instead.  When it is not armed we either started on arrival or the
+        // target was already past, and the actual value is the truthful one.
+        const int64_t reportUs = timer->hasScheduledStart()
+                               ? timer->getScheduledStartUs()
+                               : timer->getRaceStartUs();
+        char body[128];
+        snprintf(body, sizeof(body),
+                 "{\"status\":\"OK\",\"raceStartUs\":%lld,\"scheduled\":%s}",
+                 (long long)reportUs,
+                 timer->hasScheduledStart() ? "true" : "false");
+        request->send(200, "application/json", body);
     });
 
     // /timer/masterStop — called by master broadcast; clears masterRaceActive (no quit)
@@ -2850,12 +2969,15 @@ EEPROM:\n";
         doc["truncated"] = (held < total);
         JsonArray arr = doc.createNestedArray("laps");
         for (uint16_t i = 0; i < held; i++) {
-            uint16_t lapNumber = 0;
-            uint32_t lapTimeMs = 0;
-            if (!timer->getRetainedLap(i, &lapNumber, &lapTimeMs)) break;
+            LapSyncRecord rec;
+            if (!timer->getRetainedRecord(i, &rec)) break;
             JsonObject lap = arr.createNestedObject();
-            lap["lapNumber"] = lapNumber;
-            lap["lapTimeMs"] = lapTimeMs;
+            lap["lapNumber"] = (uint16_t)rec.seq;
+            lap["lapTimeMs"] = rec.lapTimeMs;
+            // Race-relative timestamp of the crossing.  Lets a reloading
+            // browser re-anchor its current-lap clock exactly, instead of
+            // summing lap times — which stops adding up once the ring evicts.
+            lap["raceElapsedMs"] = rec.raceElapsedMs;
         }
         String out; serializeJson(doc, out);
         request->send(200, "application/json", out);
@@ -2870,6 +2992,18 @@ EEPROM:\n";
             return;
         }
         request->send(200, "application/json", _buildDirectorStatePayload(multiNode, timer, conf));
+    });
+
+    // /api/multinode/clocks — clock-sync instrumentation (§8).  Read-only.
+    // Its own endpoint rather than extra fields in directorState: this is
+    // diagnostics, and directorState rides the 2 s fanout whose size we just
+    // spent a release bounding.
+    server.on("/api/multinode/clocks", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        if (!multiNode || !multiNode->isMasterMode()) {
+            request->send(403, "application/json", "{\"error\":\"not master\"}");
+            return;
+        }
+        request->send(200, "application/json", multiNode->buildClockReport());
     });
 
     // /api/multinode/clearLaps — master clears all stored laps for all nodes
@@ -3128,6 +3262,12 @@ EEPROM:\n";
             // isNull() keeps a genuinely absent field meaning "legacy".
             JsonVariantConst lapSyncVar = obj["lapSync"];
             const bool lapSyncCapable = !lapSyncVar.isNull() && lapSyncVar.as<bool>();
+
+            // A pilot whose clock had to be backdated started racing after the
+            // instant it counts from, so any gate crossing in that window went
+            // unrecorded.  Carry it to the director rather than leaving them to
+            // wonder why one pilot's first lap looks wrong (§8).
+            multiNode->setNodeStartLate(nodeId, obj["startLateMs"] | 0u);
 
             MultiNodeManager::HeartbeatSyncReply rep;
             multiNode->handleHeartbeatSync(nodeId,
@@ -3682,8 +3822,16 @@ EEPROM:\n";
             multiNode->setExcludeNodes(excludeIds);
         }
         multiNode->setPrearmPhase(false);  // race actually started — leave prearm
-        if (timer) timer->start();
-        if (transportMgr) transportMgr->broadcastRaceStateEvent("started");  // also fires pushMultiNodeState() via sendRaceStateEvent
+        // NOTE: neither the host's timer NOR the "started" announcement belongs
+        // here (§8).  _broadcastRaceStart() picks one fleet-wide instant and
+        // schedules the host onto it alongside the clients; the announcement
+        // is released from the main loop when that instant actually arrives.
+        //
+        // Removing only the timer start was not enough: the browser anchors its
+        // race clock to this event, so leaving it here kept the host's DISPLAY
+        // a full start-margin ahead of the race it was displaying — measured at
+        // 1.23 s against a client.  The timer and the announcement have to move
+        // together, because the announcement is what the UI actually listens to.
         multiNode->queueRaceStart();
         request->send(200, "application/json", "{\"status\":\"OK\"}");
     });
@@ -3694,6 +3842,14 @@ EEPROM:\n";
             request->send(503, "application/json", "{\"error\":\"multinode disabled\"}");
             return;
         }
+        // Leaving pre-arm on stop is the CANCEL path, and it was missing.
+        // Without it a countdown the director aborted left every client's
+        // "Arm your quad" banner up until PREARM_PHASE_TIMEOUT_MS expired —
+        // which is the only reason that timeout had to be short, and why it
+        // then cut the banner off ~3 s before a normal race actually started.
+        // Clearing it here lets the timeout go back to being a genuine
+        // last-resort safety net.
+        multiNode->setPrearmPhase(false);
         if (timer) timer->stop();
         if (transportMgr) transportMgr->broadcastRaceStateEvent("stopped");
         multiNode->queueRaceStop();

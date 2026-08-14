@@ -8,6 +8,8 @@
 #include <HTTPClient.h>
 #include <esp_wifi.h>
 #include <esp_mac.h>
+#include "esp_timer.h"   // µs clock domain for the sync probes (§8)
+#include <math.h>        // llround() for the drift slope fit
 #include "mac_util.h"
 
 // Defined in webserver.cpp.  Format: "FPVRaceOne_<6-hex>".
@@ -90,6 +92,13 @@ void MultiNodeManager::init(Config* config, Led* led, Webserver* webserver) {
     // failure is std::terminate, not a catchable error, so the fix is to never
     // allocate late rather than to handle the failure.
     _lapDeltas.reserve(LAPSYNC_MAX_LAP_DELTAS);
+
+    // NOTE: the clock-probe UDP socket is deliberately NOT opened here.
+    // init() runs before ws.init() brings WiFi up, and AsyncUDP::listen()
+    // reaches into LwIP through the tcpip task — which does not exist yet at
+    // this point in boot.  Opening it here posts to an uncreated mailbox and
+    // asserts inside xQueueGenericSend, boot-looping the device.
+    // process() opens it lazily once the stack is actually up.
 }
 
 void MultiNodeManager::process(uint32_t currentTimeMs) {
@@ -106,6 +115,11 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             return;
         }
     }
+
+    // Clock-probe socket (§8), opened lazily and for BOTH roles: a master
+    // consumes replies, a client answers requests.  Gated on the WiFi stack
+    // existing — see the note in init() for the boot loop this avoids.
+    if (!_clockUdpReady && WiFi.getMode() != WIFI_MODE_NULL) _initClockUdp();
 
     if (isClientMode()) {
         bool prevConnected = _masterConnected;
@@ -241,7 +255,21 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         // _directorStatePayload is what actually ships, so coalesced bursts
         // still publish the final state without burning Core 0 on every
         // one of them.
-        if (_directorStateBroadcastPending &&
+        //
+        // ...and held off entirely while the clock-sync window is open (§8).
+        // The fanout blocks this task for 400-900 ms per cycle and fires ~3
+        // times across a 7 s countdown, so up to half of the "quiet" window
+        // was not quiet — and probes issued alongside it were contended by
+        // the very traffic that made the old measurements unusable.  A
+        // countdown has nothing new to broadcast anyway.
+        //
+        // _directorStateBroadcastPending is deliberately LEFT SET: the payload
+        // is not dropped, just deferred, and the first tick after the window
+        // closes ships it.  Race-critical broadcasts (pre-arm, start, stop) do
+        // not come through here at all, so none of them is delayed by this.
+        const bool clockSyncOpen = ((int32_t)(_clockSyncUntilMs - currentTimeMs) > 0);
+        if (!clockSyncOpen &&
+            _directorStateBroadcastPending &&
             (currentTimeMs - _lastDirectorBroadcastMs) >= MIN_DIRECTOR_BROADCAST_INTERVAL_MS) {
             _directorStateBroadcastPending = false;
             _lastDirectorBroadcastMs       = currentTimeMs;
@@ -252,6 +280,49 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             bool force = _recruitForce;
             _runRecruitJob(force);
         }
+        // Did everyone actually start?  (§8 — the GO datagram has no ack.)
+        if (_startVerifyAtMs != 0 &&
+            (int32_t)(currentTimeMs - _startVerifyAtMs) >= 0) {
+            _verifyRaceStarts();
+        }
+        // Clock sync (§8).  Last in the tick, and at most one probe per tick,
+        // so it can never be the thing that delays a race command.
+        _runClockSync(currentTimeMs);
+    }
+}
+
+// Probe scheduling.  Two cadences, one mechanism:
+//
+//   burst    — during the pre-arm countdown, every CLOCK_PROBE_SPACING_MS.
+//              ~8 samples per node across 7 s of idle network, which is the
+//              only uncontended window this system gets.
+//   steady   — otherwise, one node every CLOCK_REPROBE_INTERVAL_MS.  Keeps
+//              offsets warm between races and, more importantly, accumulates
+//              the drift window so a slope is already fitted by the time a
+//              race starts.
+//
+// One probe per tick either way.  Seven nodes × one small GET is still seven
+// sequential HTTP round trips if you let them stack up, and sequential HTTP on
+// this task is exactly what starved SSE the last time.
+void MultiNodeManager::_runClockSync(uint32_t nowMs) {
+    if (_nodes.empty()) return;
+
+    const bool burst = ((int32_t)(_clockSyncUntilMs - nowMs) > 0);
+    const uint32_t spacing = burst ? CLOCK_PROBE_SPACING_MS
+                                   : CLOCK_REPROBE_INTERVAL_MS;
+    if ((uint32_t)(nowMs - _lastClockProbeMs) < spacing) return;
+    _lastClockProbeMs = nowMs;
+
+    // Round-robin so no node is starved when one is unreachable.  Safe to hold
+    // a reference across the probe: _nodes is reserved to MULTINODE_MAX_NODES
+    // and only ever erased by _reapRemovedNodes(), which runs on this task.
+    for (size_t tries = 0; tries < _nodes.size(); tries++) {
+        if (_clockProbeCursor >= _nodes.size()) _clockProbeCursor = 0;
+        NodeInfo& n = _nodes[_clockProbeCursor];
+        _clockProbeCursor++;
+        if (n.pendingRemoval || !n.online || n.staIP.isEmpty()) continue;
+        _probeNodeClock(n);
+        return;
     }
 }
 
@@ -437,6 +508,10 @@ void MultiNodeManager::_sendHeartbeat() {
         doc["crc"]       = (uint32_t)_timer->getLapCrc();
         doc["oldestSeq"] = (uint32_t)_timer->getOldestSeq();
         doc["nextSeq"]   = (uint32_t)_timer->getLapTotal();
+        // How late this pilot's clock actually began (§8).  Only sent when it
+        // is non-zero, so a healthy fleet pays nothing for it.
+        const uint32_t lateMs = _timer->getStartLateMs();
+        if (lateMs > 0) doc["startLateMs"] = lateMs;
     }
 
     String body;
@@ -1335,7 +1410,10 @@ void MultiNodeManager::clearAllLaps() {
         n.quitEarly              = false;
         n.excludedFromCurrentRace = false;
         // Anchors belong to a race, not to a node — a cleared race has none.
+        // The measured clock offset and drift fit are NOT cleared: those
+        // describe the crystals, not the race.
         n.anchored               = false;
+        n.anchorUs               = 0;
         n.anchorRttMs            = 0xFFFFFFFF;
     }
     _excludeNodes.clear();
@@ -1360,28 +1438,315 @@ uint32_t MultiNodeManager::beginRaceEpoch() {
         n.reportedOldest = 0;
         n.resyncState    = LAPSYNC_IDLE;
         n.resyncAttempts = 0;
+        // The ANCHOR belongs to a race and is re-derived at each start.  The
+        // clock OFFSET and drift fit do not — they are properties of the two
+        // crystals and survive across races, which is what lets a node that
+        // misses one pre-arm still be reasonably placed.
         n.anchored       = false;
+        n.anchorUs       = 0;
         n.anchorRttMs    = 0xFFFFFFFF;
+        // Per-race start bookkeeping: last race's ack must not vouch for this
+        // one, and last race's lateness must not be reported against it.
+        n.startAcked     = false;
+        n.startLateMs    = 0;
     }
     _lapDeltas.clear();
     DEBUG("[LAPSYNC] Race epoch %u begun\n", _masterRaceId);
     return _masterRaceId;
 }
 
-void MultiNodeManager::recordAnchor(uint8_t nodeId, uint32_t masterAckMs, uint32_t rttMs) {
+// ── Clock sync (§8) ─────────────────────────────────────────────────────
+//
+// One four-timestamp exchange, the NTP way:
+//
+//   t1  master sends          t2  client receives
+//   t4  master receives       t3  client replies
+//
+//   offset = ((t2 - t1) + (t3 - t4)) / 2     client's clock, ahead of ours
+//   delay  = (t4 - t1) - (t3 - t2)           round trip, client's work removed
+//
+// Subtracting (t3 - t2) is what makes this worth building.  The previous
+// anchor measured the reply of /timer/masterStart — a handler that clears lap
+// data, starts a timer and fires an SSE broadcast before answering — so all of
+// that landed inside the number being called network latency.
+// Wire format, deliberately fixed-width and tiny:
+//   REQ  [magic:4][seq:4]                        = 8 bytes
+//   RSP  [magic:4][seq:4][t2:8][t3:8]            = 24 bytes
+struct ClockProbeReq { uint32_t magic; uint32_t seq; } __attribute__((packed));
+struct ClockProbeRsp { uint32_t magic; uint32_t seq; int64_t t2; int64_t t3; } __attribute__((packed));
+//   GO   [magic:4][raceId:4][startAtUs:8]         = 16 bytes
+struct ClockStartMsg { uint32_t magic; uint32_t raceId; int64_t startAtUs; } __attribute__((packed));
+//   ACK  [magic:4][raceId:4][nodeId:1]                = 9 bytes
+struct ClockStartAck { uint32_t magic; uint32_t raceId; uint8_t nodeId; } __attribute__((packed));
+
+void MultiNodeManager::_initClockUdp() {
+    if (_clockUdpReady) return;
+    if (!_clockUdp.listen(CLOCK_PROBE_UDP_PORT)) {
+        DEBUG("[CLOCK] UDP listen on %u failed — probes disabled\n", CLOCK_PROBE_UDP_PORT);
+        return;
+    }
+    _clockUdp.onPacket([this](AsyncUDPPacket packet) {
+        // Runs in the LwIP task.  Stamp FIRST, think second — every
+        // instruction before the stamp is error attributed to the network.
+        const int64_t stamp = esp_timer_get_time();
+        const size_t  len   = packet.length();
+        if (len < sizeof(ClockProbeReq)) return;
+
+        uint32_t magic;
+        memcpy(&magic, packet.data(), sizeof(magic));
+
+        if (magic == CLOCK_PROBE_MAGIC_REQ && len >= sizeof(ClockProbeReq)) {
+            // Client role: answer immediately, in this callback.  Nothing
+            // else may be added here — the gap between t2 and t3 is time the
+            // master subtracts out, but only if we report it honestly.
+            ClockProbeReq req;
+            memcpy(&req, packet.data(), sizeof(req));
+            ClockProbeRsp rsp;
+            rsp.magic = CLOCK_PROBE_MAGIC_RSP;
+            rsp.seq   = req.seq;
+            rsp.t2    = stamp;
+            rsp.t3    = esp_timer_get_time();
+            _clockUdp.writeTo((const uint8_t*)&rsp, sizeof(rsp),
+                              packet.remoteIP(), packet.remotePort());
+            return;
+        }
+
+        if (magic == CLOCK_START_MAGIC && len >= sizeof(ClockStartMsg)) {
+            // Client role: GO.  The only work done here is storing a target —
+            // scheduleStart() never starts inline, precisely so this callback
+            // stays safe to run in the LwIP task.
+            ClockStartMsg msg;
+            memcpy(&msg, packet.data(), sizeof(msg));
+            // Trust it only if it belongs to the epoch we were armed for.  A
+            // stray or replayed datagram from a previous race is ignored, and
+            // an unarmed node (raceId 0) accepts nothing at all.
+            if (_raceId == 0 || msg.raceId != _raceId) return;
+            if (!_timer) return;
+            // Repeats are expected: three copies of the same GO arrive ~3 ms
+            // apart.  Re-arming the same instant is idempotent, and once the
+            // race is running a later copy must not restart it.
+            if (!_timer->isRunning()) _timer->scheduleStart(msg.startAtUs);
+            // Acknowledge every copy, including duplicates — the master is
+            // listening for ANY ack, and answering all of them costs 9 bytes
+            // while raising the odds that at least one gets home.
+            ClockStartAck ack;
+            ack.magic  = CLOCK_START_ACK_MAGIC;
+            ack.raceId = msg.raceId;
+            ack.nodeId = _myNodeId;
+            _clockUdp.writeTo((const uint8_t*)&ack, sizeof(ack),
+                              packet.remoteIP(), packet.remotePort());
+            return;
+        }
+
+        if (magic == CLOCK_START_ACK_MAGIC && len >= sizeof(ClockStartAck)) {
+            // Master role: mark this node as having received its GO.
+            ClockStartAck ack;
+            memcpy(&ack, packet.data(), sizeof(ack));
+            if (ack.raceId != _masterRaceId) return;
+            for (auto& n : _nodes) {
+                if (n.nodeId == ack.nodeId) { n.startAcked = true; break; }
+            }
+            return;
+        }
+
+        if (magic == CLOCK_PROBE_MAGIC_RSP && len >= sizeof(ClockProbeRsp)) {
+            // Master role: t4 is `stamp`, taken before any parsing.
+            ClockProbeRsp rsp;
+            memcpy(&rsp, packet.data(), sizeof(rsp));
+            if (rsp.seq != _probeSeq) return;   // stale reply from a timed-out probe
+            _probeT2 = rsp.t2;
+            _probeT3 = rsp.t3;
+            _probeT4 = stamp;
+            _probeReady = true;                 // set LAST — publishes the three above
+        }
+    });
+    _clockUdpReady = true;
+    DEBUG("[CLOCK] UDP probe socket listening on %u\n", CLOCK_PROBE_UDP_PORT);
+}
+
+bool MultiNodeManager::_probeNodeClock(NodeInfo& n) {
+    if (!n.online || n.staIP.isEmpty()) return false;
+    if (!_clockUdpReady) return false;
+
+    IPAddress dst;
+    if (!dst.fromString(n.staIP)) return false;
+
+    // Bump the sequence before arming so a late reply to the PREVIOUS probe
+    // can't be mistaken for this one's.
+    const uint32_t seq = _probeSeq + 1;
+    _probeSeq   = seq;
+    _probeReady = false;
+
+    ClockProbeReq req;
+    req.magic = CLOCK_PROBE_MAGIC_REQ;
+    req.seq   = seq;
+
+    const int64_t t1 = esp_timer_get_time();
+    if (!_clockUdp.writeTo((const uint8_t*)&req, sizeof(req), dst, CLOCK_PROBE_UDP_PORT)) {
+        return false;
+    }
+
+    // Poll for the callback's flag.  Poll granularity costs nothing here:
+    // t4 was already stamped in the LwIP task the moment the datagram landed.
+    const uint32_t deadline = millis() + CLOCK_PROBE_TIMEOUT_MS;
+    while (!_probeReady && (int32_t)(millis() - deadline) < 0) vTaskDelay(1);
+    if (!_probeReady) return false;
+
+    const int64_t t2 = _probeT2, t3 = _probeT3, t4 = _probeT4;
+    if (t2 <= 0 || t3 < t2) return false;
+
+    const int64_t offsetUs = ((t2 - t1) + (t3 - t4)) / 2;
+    const int64_t delayUs  = (t4 - t1) - (t3 - t2);
+    // A negative delay is arithmetically impossible and means one of the two
+    // clocks jumped mid-exchange.  Discard rather than reason about it.
+    if (delayUs < 0) return false;
+
+    _recordClockSample(n, offsetUs, delayUs);
+    return true;
+}
+
+void MultiNodeManager::_recordClockSample(NodeInfo& n, int64_t offsetUs, int64_t delayUs) {
+    n.clockSamples++;
+
+    // Keep the least-queued sample.  The NTP formula assumes the outbound and
+    // return legs took equal time; that assumption is least wrong when the
+    // round trip was shortest, so min-delay is the filter that matters.
+    if (!n.clockValid || (uint32_t)delayUs < n.clockDelayUs) {
+        n.clockOffsetUs = offsetUs;
+        n.clockDelayUs  = (uint32_t)delayUs;
+        n.clockValid    = true;
+    }
+
+    // Quality gate.  A sample's offset error is roughly half its round trip,
+    // so a 63 ms sample carries ~30 ms of error into a fit that is trying to
+    // resolve single-digit ppm.  Admitting it costs more than the coverage it
+    // adds.  Judged against this node's own best so a good link is not held to
+    // a bad one's standard, with an absolute ceiling so a bad link cannot
+    // quietly raise its own bar.
+    const uint32_t admitUs = (n.clockDelayUs == 0xFFFFFFFF)
+                           ? CLOCK_DRIFT_MAX_DELAY_US
+                           : min(n.clockDelayUs * CLOCK_DRIFT_DELAY_MULT,
+                                 CLOCK_DRIFT_MAX_DELAY_US);
+    if ((uint32_t)delayUs > admitUs) return;
+
+    // The drift window is fed at a RATE LIMIT, not on every sample.
+    //
+    // This matters more than it looks.  The pre-arm burst fires a probe every
+    // 120 ms, so without this guard eight burst samples would flush the entire
+    // window and leave it spanning ~1 s — below CLOCK_DRIFT_MIN_SPAN_US, so
+    // driftValid would drop to false at the exact moment a race starts, having
+    // just discarded a slope built over the previous several minutes.  The
+    // burst is for measuring the OFFSET; the window is for measuring the RATE,
+    // and a rate needs a long baseline.
+    const int64_t nowUs = esp_timer_get_time();
+    const uint8_t last  = (uint8_t)((n.driftHead + NodeInfo::CLOCK_DRIFT_SAMPLES - 1)
+                                    % NodeInfo::CLOCK_DRIFT_SAMPLES);
+    if (n.driftCount > 0 && (nowUs - n.driftAtUs[last]) < CLOCK_DRIFT_SPACING_US) return;
+
+    n.driftAtUs[n.driftHead]  = nowUs;
+    n.driftOffUs[n.driftHead] = offsetUs;
+    n.driftHead = (uint8_t)((n.driftHead + 1) % NodeInfo::CLOCK_DRIFT_SAMPLES);
+    if (n.driftCount < NodeInfo::CLOCK_DRIFT_SAMPLES) n.driftCount++;
+
+    _fitClockDrift(n);
+}
+
+// Ordinary least squares on (master time, offset).  Slope is the relative rate
+// between this node's crystal and ours, in ppm.
+void MultiNodeManager::_fitClockDrift(NodeInfo& n) {
+    if (n.driftCount < CLOCK_DRIFT_MIN_SAMPLES) { n.driftValid = false; return; }
+
+    // Work relative to the first sample so the sums stay small — absolute
+    // esp_timer values are ~1e10 µs and squaring them overflows fast.
+    int64_t tMin = INT64_MAX, tMax = INT64_MIN;
+    for (uint8_t i = 0; i < n.driftCount; i++) {
+        if (n.driftAtUs[i] < tMin) tMin = n.driftAtUs[i];
+        if (n.driftAtUs[i] > tMax) tMax = n.driftAtUs[i];
+    }
+    // A slope fitted over a few seconds is noise wearing a trend's clothing.
+    if (tMax - tMin < CLOCK_DRIFT_MIN_SPAN_US) { n.driftValid = false; return; }
+
+    double sx = 0, sy = 0, sxx = 0, sxy = 0;
+    const double nD = (double)n.driftCount;
+    for (uint8_t i = 0; i < n.driftCount; i++) {
+        const double x = (double)(n.driftAtUs[i] - tMin);
+        const double y = (double)n.driftOffUs[i];
+        sx += x; sy += y; sxx += x * x; sxy += x * y;
+    }
+    const double denom = nD * sxx - sx * sx;
+    if (denom == 0.0) { n.driftValid = false; return; }
+
+    // slope is µs of offset per µs of master time — i.e. already a rate.
+    const double slope = (nD * sxy - sx * sy) / denom;
+    int32_t ppm = (int32_t)llround(slope * 1000000.0);
+
+    // Clamp rather than reject: a genuine unit in the sun sits well inside
+    // ±100 ppm, so anything beyond it is a bad probe, and letting a bad probe
+    // set the rate would corrupt every remaining lap of the race.
+    if (ppm >  CLOCK_MAX_DRIFT_PPM) ppm =  CLOCK_MAX_DRIFT_PPM;
+    if (ppm < -CLOCK_MAX_DRIFT_PPM) ppm = -CLOCK_MAX_DRIFT_PPM;
+
+    n.driftPpm   = ppm;
+    n.driftValid = true;
+}
+
+// Master-time µs of a lap that this node timed at raceElapsedMs on its own
+// clock.  Every part of the sync chain converges here.
+//
+//   client_us_at_lap = raceStartUs + elapsed
+//   master_us_at_lap = client_us_at_lap - offset(t)
+//                    = anchorUs + elapsed - elapsed × rate
+//
+// The correction is applied FORWARD only, to laps as they are appended.  A lap
+// already published keeps the orderMs it shipped with: the delta log is
+// append-only and acked, and rewriting history to chase microseconds would
+// break that for no observable gain.  Safe because the corrections (µs) sit
+// three orders of magnitude below lap spacing (seconds), so no adjustment can
+// ever reorder two laps.
+// Note the correction is zero at elapsed == 0 and grows linearly from there.
+// The initial offset is already fully absorbed by anchorUs and is never
+// re-applied here — drift is a RATE, and the constant term would be double
+// counting.  (Which is also why the huge boot-skew offsets — one node showed
+// -1362 s simply because it powered up 22 minutes after the master — cannot
+// leak into the rate: a constant contributes nothing to a slope.)
+int64_t MultiNodeManager::_lapOrderUs(const NodeInfo& n, uint32_t raceElapsedMs) const {
+    const int64_t elapsedUs = (int64_t)raceElapsedMs * 1000LL;
+    int64_t orderUs = n.anchorUs + elapsedUs;
+    if (CLOCK_APPLY_DRIFT && n.driftValid) {
+        orderUs -= (elapsedUs * (int64_t)n.driftPpm) / 1000000LL;
+    }
+    return orderUs;
+}
+
+bool MultiNodeManager::recordAnchorFromReport(uint8_t nodeId, int64_t clientRaceStartUs) {
     for (auto& n : _nodes) {
         if (n.nodeId != nodeId) continue;
+        if (!n.clockValid || clientRaceStartUs <= 0) return false;
 
-        // Keep the LOWEST-RTT sample.  Outbound and return paths queue
-        // differently under load, so half-RTT is only a good estimate of the
-        // one-way delay when there was little queueing to be asymmetric about
-        // (§8).  Later heartbeats can therefore improve the anchor, never
-        // degrade it.
+        // master_us = client_us - offset.  Exact: the client told us when its
+        // clock hit zero, and we measured how far its clock sits from ours.
+        n.anchorUs = clientRaceStartUs - n.clockOffsetUs;
+        n.anchored = true;
+        DEBUG("[CLOCK] Node %c anchored from report: offset=%lld us delay=%u us "
+              "samples=%u drift=%d ppm%s\n",
+              slotLetter(n.nodeId), (long long)n.clockOffsetUs, n.clockDelayUs,
+              n.clockSamples, n.driftPpm, n.driftValid ? "" : " (unfitted)");
+        return true;
+    }
+    return false;
+}
+
+void MultiNodeManager::recordAnchorFromRtt(uint8_t nodeId, uint32_t masterAckMs, uint32_t rttMs) {
+    for (auto& n : _nodes) {
+        if (n.nodeId != nodeId) continue;
         if (n.anchored && rttMs >= n.anchorRttMs) return;
 
-        n.anchorMs    = masterAckMs - (rttMs / 2);
+        n.anchorUs    = (int64_t)(masterAckMs - (rttMs / 2)) * 1000LL;
         n.anchorRttMs = rttMs;
         n.anchored    = true;
+        DEBUG("[CLOCK] Node %c anchored from RTT fallback: rtt=%u ms "
+              "(no clock offset — node missed the pre-arm sync)\n",
+              slotLetter(n.nodeId), rttMs);
         return;
     }
 }
@@ -1402,7 +1767,15 @@ void MultiNodeManager::_queueLapDelta(const NodeInfo& n, const LapSyncRecord& la
     // Unanchored nodes (solo racers, legacy clients) are stored and displayed
     // but cannot be placed on the field's timeline, so they carry no ordering
     // key rather than a fabricated one (§8).
-    d.orderMs       = n.anchored ? (n.anchorMs + lap.raceElapsedMs) : 0u;
+    //
+    // Rounded to ms exactly once, here.  The offset and drift arithmetic
+    // behind _lapOrderUs runs in µs so a 12 ms whole-race drift correction
+    // isn't quantized away before it can be applied — but the published key
+    // stays ms, which is already below the ~1 ms uncertainty of RSSI peak
+    // detection itself.
+    d.orderMs       = n.anchored
+                    ? (uint32_t)(_lapOrderUs(n, lap.raceElapsedMs) / 1000LL)
+                    : 0u;
     _lapDeltas.push_back(d);
 }
 
@@ -1575,6 +1948,13 @@ bool MultiNodeManager::updateNodeChannel(uint8_t nodeId, uint8_t bandIndex, uint
 }
 
 void MultiNodeManager::_broadcastRacePreArm() {
+    // Mint the epoch HERE, not at GO (§5, §8).  Clients adopt it during the
+    // countdown so the UDP start message can be authenticated against it —
+    // and so the expensive setup happens while there is time to spare.
+    // A cancelled countdown simply leaves an unused epoch behind; the next
+    // pre-arm mints another.
+    const uint32_t raceId = beginRaceEpoch();
+
     for (const auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
         bool excluded = false;
@@ -1593,18 +1973,158 @@ void MultiNodeManager::_broadcastRacePreArm() {
             DEBUG("[MULTINODE] Race pre-arm → node %c (%s): HTTP %d\n", slotLetter(n.nodeId), n.staIP.c_str(), code);
         }
         vTaskDelay(1);
+
+        // ARM: clear laps and adopt the epoch now, while the countdown gives
+        // us seconds to do it in.  This is the work that used to happen at GO
+        // and forced the start margin to cover six sequential HTTP round trips.
+        HTTPClient arm;
+        String armUrl = "http://" + n.staIP + "/timer/masterArm?raceId=" + String(raceId);
+        if (arm.begin(armUrl)) {
+            arm.setTimeout(500);
+            arm.setConnectTimeout(500);
+            int code = arm.POST("");
+            arm.end();
+            DEBUG("[MULTINODE] Race arm → node %c: HTTP %d\n", slotLetter(n.nodeId), code);
+        }
+        vTaskDelay(1);
     }
+
+    // Open the clock-sync window (§8).  What follows this broadcast is the
+    // countdown — 6-9 s during which nobody is racing and the network is
+    // otherwise idle.  That is the moment to measure, not the Start All
+    // fanout, where seven sequential POSTs are contending with each other.
+    for (auto& n : _nodes) {
+        // Retire the previous burst's best sample.  An offset measured 20
+        // minutes ago is stale by ~24 ms at ±20 ppm, and the anchor is built
+        // from it — so each race re-establishes the offset from scratch
+        // rather than inheriting a lucky old sample.  clockValid stays set so
+        // a node whose probes all fail still has something to fall back on.
+        n.clockDelayUs = 0xFFFFFFFF;
+        n.clockSamples = 0;
+    }
+    // Ship ONE directorState before going quiet.
+    //
+    // The sync window suppresses the fanout, and "Arm your quad" is carried by
+    // that fanout (race.prearmActive) — so suppressing it for the whole
+    // countdown meant clients never learned they were in pre-arm at all, and
+    // then received the deferred pre-arm payload at GO, showing the banner at
+    // the exact moment the race started.  The banner has to lead the race, not
+    // trail it.
+    //
+    // One fanout costs ~500 ms of a window that is now the entire countdown,
+    // and it is the only state clients genuinely need before the start.
+    if (_webserver) {
+        _webserver->pushMultiNodeState();
+        if (_directorStatePayloadValid) {
+            _directorStateBroadcastPending = false;
+            _lastDirectorBroadcastMs       = millis();
+            _broadcastDirectorState();
+        }
+    }
+
+    // Open-ended: this closes when _broadcastRaceStart() runs, so it covers
+    // the countdown however long the announcer takes.  The constant is only a
+    // safety cap for a countdown that never completes.
+    _clockSyncUntilMs = millis() + CLOCK_SYNC_MAX_MS;
+    _lastClockProbeMs = 0;   // start probing on the very next tick
+    DEBUG("[CLOCK] Pre-arm sync window open (closes at race start, cap %u ms)\n",
+          CLOCK_SYNC_MAX_MS);
 }
 
 void MultiNodeManager::setExcludeNodes(const std::vector<uint8_t>& ids) {
     _excludeNodes = ids;
 }
 
+// Instrumentation for the clock chain (§8).  Everything needed to judge
+// whether a race's ordering can be trusted, without opening a serial monitor:
+//
+//   offsetUs   how far this node's clock sits from ours
+//   delayUs    round trip of the sample that offset came from — the honest
+//              error bar.  A 2 ms delay means roughly ±1 ms of offset error.
+//   samples    probes landed in the current burst; ~8 is a healthy countdown
+//   driftPpm   fitted relative rate; also a hardware canary.  A unit reading
+//              80 ppm while its neighbours read 15 is either cooking in the
+//              sun or has a marginal crystal, and that is worth knowing before
+//              somebody questions the results.
+String MultiNodeManager::buildClockReport() const {
+    String out;
+    out.reserve(160 + _nodes.size() * 180);
+    out  = "{\"masterUs\":"; out += (long long)esp_timer_get_time();
+    out += ",\"syncing\":";  out += ((int32_t)(_clockSyncUntilMs - millis()) > 0) ? "true" : "false";
+    // Start-margin telemetry: what the last race cost, what we allowed for it,
+    // and how much healing headroom is currently being carried.
+    out += ",\"startMarginUs\":"; out += (long long)_lastStartMarginUs;
+    out += ",\"lastFanoutUs\":";  out += (long long)_lastFanoutUs;
+    out += ",\"startBoostUs\":";  out += (long long)_startBoostUs;
+    out += ",\"nextMarginUs\":";  out += (long long)_computeStartMarginUs();
+    out += ",\"nodes\":[";
+    bool first = true;
+    for (const auto& n : _nodes) {
+        if (n.pendingRemoval) continue;
+        if (!first) out += ',';
+        first = false;
+        out += "{\"nodeId\":";      out += (int)n.nodeId;
+        out += ",\"online\":";      out += n.online ? "true" : "false";
+        out += ",\"clockValid\":";  out += n.clockValid ? "true" : "false";
+        out += ",\"offsetUs\":";    out += (long long)n.clockOffsetUs;
+        out += ",\"delayUs\":";     out += (n.clockDelayUs == 0xFFFFFFFF) ? -1 : (int32_t)n.clockDelayUs;
+        out += ",\"samples\":";     out += (int)n.clockSamples;
+        out += ",\"driftPpm\":";    out += (int)n.driftPpm;
+        out += ",\"driftValid\":";  out += n.driftValid ? "true" : "false";
+        out += ",\"driftSamples\":";out += (int)n.driftCount;
+        out += ",\"anchored\":";    out += n.anchored ? "true" : "false";
+        out += ",\"anchorUs\":";    out += (long long)n.anchorUs;
+        out += ",\"startAcked\":";  out += n.startAcked ? "true" : "false";
+        out += ",\"startLateMs\":"; out += (uint32_t)n.startLateMs;
+        out += '}';
+    }
+    out += "]}";
+    return out;
+}
+
 void MultiNodeManager::_broadcastRaceStart() {
-    // New epoch before anything ships (§5).  This is what stops a second race
-    // from inheriting the first one's laps — the regression that started this
-    // work, where run 2's payload was double run 1's and heap min fell to 9 KB.
-    const uint32_t raceId = beginRaceEpoch();
+    // The countdown is over, so the sync burst is over: close the window
+    // explicitly rather than letting it lapse.  Two reasons — the anchor is
+    // taken right here and further burst probes cannot improve it, and the
+    // directorState fanout (suppressed while the window is open) should resume
+    // the instant there is race state worth pushing.  Drift keeps accruing
+    // from the steady-state re-probe.
+    _clockSyncUntilMs = 0;
+
+    // Drop whatever was queued during the countdown.  It was built at pre-arm
+    // and says prearmActive=true — shipping it now, the instant the window
+    // reopens, is what put "Arm your quad" on screen at the moment the race
+    // began.  A fresh payload is pushed from the main loop when the scheduled
+    // start actually fires, and that one describes the race that is running.
+    _directorStateBroadcastPending = false;
+
+    // The epoch was minted at PRE-ARM and the clients adopted it then (§5, §8),
+    // which is what lets the GO datagram be authenticated without a round trip.
+    // A start that somehow arrives without a pre-arm still gets a valid epoch
+    // rather than racing under 0.
+    const uint32_t raceId = (_masterRaceId != 0) ? _masterRaceId : beginRaceEpoch();
+
+    // ONE instant, in master time, that the whole fleet will start at (§8).
+    // Everything below converts this single number into each client's clock.
+    const int64_t marginUs       = _computeStartMarginUs();
+    const int64_t fanoutBeganUs  = esp_timer_get_time();
+    const int64_t targetMasterUs = fanoutBeganUs + marginUs;
+    _lastStartMarginUs  = marginUs;
+    _lastStartTargetUs  = targetMasterUs;   // kept for the repair path
+    DEBUG("[CLOCK] Fleet start target +%lld ms (fanout last time %lld ms, boost %lld ms)\n",
+          (long long)(marginUs / 1000), (long long)(_lastFanoutUs / 1000),
+          (long long)(_startBoostUs / 1000));
+
+    // The master is a pilot too, and it is already IN master time — its target
+    // needs no conversion.  Scheduled before the fanout so that if anything
+    // below stalls, the host still starts on the instant it published.
+    //
+    // This is why /api/multinode/race/start no longer starts the timer itself:
+    // doing so would have put the host a full RACE_START_MARGIN_US ahead of
+    // every client it just told to wait.
+    if (_timer) _timer->scheduleStart(targetMasterUs);
+
+    uint8_t missed = 0;   // clients whose target had already passed on arrival
 
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
@@ -1621,24 +2141,89 @@ void MultiNodeManager::_broadcastRaceStart() {
             DEBUG("[MULTINODE] Race start → node %c (%s): SKIPPED (excluded)\n", slotLetter(n.nodeId), n.staIP.c_str());
             continue;
         }
+        // ── Fast path: GO as a datagram ─────────────────────────────────
+        // The client was armed during the countdown, so all that is left to
+        // send is the instant to start at, expressed in ITS clock:
+        //     master_us = client_us - offset  =>  client_us = target + offset
+        //
+        // Sent CLOCK_START_REPEATS times a few ms apart.  There is no ack —
+        // waiting for one would put us back on round trips, which is the cost
+        // this removes — so redundancy substitutes for acknowledgement.  A
+        // duplicate is harmless: the client ignores a GO once it is running.
+        if (n.clockValid) {
+            IPAddress dst;
+            if (dst.fromString(n.staIP) && _clockUdpReady) {
+                ClockStartMsg msg;
+                msg.magic     = CLOCK_START_MAGIC;
+                msg.raceId    = raceId;
+                msg.startAtUs = targetMasterUs + n.clockOffsetUs;
+                for (uint8_t r = 0; r < CLOCK_START_REPEATS; r++) {
+                    _clockUdp.writeTo((const uint8_t*)&msg, sizeof(msg),
+                                      dst, CLOCK_PROBE_UDP_PORT);
+                    if (r + 1 < CLOCK_START_REPEATS) delayMicroseconds(CLOCK_START_REPEAT_GAP_US);
+                }
+                // Exact by construction: we COMMANDED this node to start at
+                // targetMasterUs in our own time, so that is its anchor.  No
+                // measurement, no inference, no reply needed.
+                n.anchorUs = targetMasterUs;
+                n.anchored = true;
+                n.startAcked = false;   // set by the ack datagram, checked below
+                DEBUG("[MULTINODE] Race GO → node %c (%s): UDP x%u\n",
+                      slotLetter(n.nodeId), n.staIP.c_str(), CLOCK_START_REPEATS);
+                continue;
+            }
+        }
+
+        // ── Fallback: a node with no measured clock offset ───────────────
+        // Registered during the countdown, or its probes all failed.  It gets
+        // the original HTTP start and the accuracy that came with it.
         HTTPClient http;
-        // raceId rides the start so the client adopts the epoch at the same
-        // instant it starts its clock — the two must not be learned separately.
         String url = "http://" + n.staIP + "/timer/masterStart?raceId=" + String(raceId);
+        const bool scheduled = false;
+        int64_t clientStartUs = 0;
         if (http.begin(url)) {
             http.setTimeout(500);
             http.setConnectTimeout(500);
             const uint32_t t1 = millis();
             int code = http.POST("");
             const uint32_t t4 = millis();
+            String reply = (code > 0 && code < 400) ? http.getString() : String();
             http.end();
 
             if (code > 0 && code < 400) {
-                // Anchor this node's race clock into master time (§8).
-                // masterAckMs - rtt/2 estimates the instant the client
-                // actually started, assuming a symmetric path; the estimate is
-                // refined later by keeping the lowest-RTT sample.
-                recordAnchor(n.nodeId, t4, t4 - t1);
+                // Anchor from the start instant the client REPORTED, converted
+                // with the offset measured during pre-arm (§8).  No inference:
+                // when the start was scheduled the client echoes back the
+                // target it committed to, so the anchor is exact by
+                // construction; when it started on arrival it reports the
+                // instant it actually did.
+                bool anchored = false;
+                const int ip = reply.indexOf("\"raceStartUs\":");
+                if (ip >= 0) {
+                    const int64_t reportedUs =
+                        strtoll(reply.c_str() + ip + 14, nullptr, 10);
+                    anchored = recordAnchorFromReport(n.nodeId, reportedUs);
+
+                    // Did the client honour the schedule?  A mismatch means it
+                    // fell back to starting on arrival — the target had already
+                    // passed, i.e. RACE_START_MARGIN_US was too small for this
+                    // fanout.  Worth shouting about: it silently reintroduces
+                    // exactly the start spread this mechanism removes.
+                    if (scheduled) {
+                        const int64_t deltaUs = reportedUs - clientStartUs;
+                        if (reply.indexOf("\"scheduled\":true") < 0) {
+                            missed++;
+                            DEBUG("[CLOCK] Node %c did NOT honour the schedule "
+                                  "(off by %+lld us) — margin too small\n",
+                                  slotLetter(n.nodeId), (long long)deltaUs);
+                        }
+                    }
+                }
+                // Degraded path: a node that registered during the countdown
+                // has no offset yet, and an older client sends no raceStartUs
+                // at all.  Both still race — they just carry the old estimate's
+                // accuracy until the next pre-arm syncs them.
+                if (!anchored) recordAnchorFromRtt(n.nodeId, t4, t4 - t1);
             } else {
                 n.anchored = false;
             }
@@ -1648,6 +2233,156 @@ void MultiNodeManager::_broadcastRaceStart() {
         vTaskDelay(1);  // yield between nodes so async_tcp stays fed
     }
     _excludeNodes.clear();  // consumed — reset for next race
+
+    // ── Fast repair: who did NOT acknowledge? ───────────────────────────
+    // Acks arrive asynchronously on the UDP callback, so a short wait here
+    // costs one delay rather than a round trip per node.  Anyone still silent
+    // gets the GO again immediately — which is far better than discovering it
+    // three seconds later from a heartbeat, by which time they have missed
+    // gates rather than milliseconds.
+    vTaskDelay(pdMS_TO_TICKS(START_ACK_WAIT_MS));
+    for (auto& n : _nodes) {
+        if (n.pendingRemoval || !n.online || n.staIP.isEmpty()) continue;
+        if (n.excludedFromCurrentRace || !n.clockValid || n.startAcked) continue;
+        IPAddress dst;
+        if (!dst.fromString(n.staIP) || !_clockUdpReady) continue;
+        ClockStartMsg msg;
+        msg.magic     = CLOCK_START_MAGIC;
+        msg.raceId    = raceId;
+        msg.startAtUs = targetMasterUs + n.clockOffsetUs;
+        for (uint8_t r = 0; r < CLOCK_START_REPEATS; r++) {
+            _clockUdp.writeTo((const uint8_t*)&msg, sizeof(msg), dst, CLOCK_PROBE_UDP_PORT);
+            if (r + 1 < CLOCK_START_REPEATS) delayMicroseconds(CLOCK_START_REPEAT_GAP_US);
+        }
+        DEBUG("[CLOCK] Node %c did not ack GO — resent\n", slotLetter(n.nodeId));
+    }
+
+    // ── Measure, then heal ──────────────────────────────────────────────
+    // How long distribution ACTUALLY took, at this venue, with this many
+    // pilots, through today's RF.  Next race's margin is computed from it.
+    _lastFanoutUs = esp_timer_get_time() - fanoutBeganUs;
+
+    // Nothing acknowledges a GO datagram, so schedule a check instead: once
+    // the target has passed and a heartbeat has had time to tell us the truth,
+    // anyone who should be racing and is not gets repaired.
+    _startVerifyAtMs = millis() + (uint32_t)(marginUs / 1000) + START_VERIFY_GRACE_MS;
+
+    if (missed > 0) {
+        // Someone got a target that had already passed.  Buy headroom now —
+        // a start that is slightly late is invisible, a start that is missed
+        // puts that pilot back on the old per-node spread.
+        _startBoostUs += START_BOOST_STEP_US;
+        if (_startBoostUs > START_BOOST_MAX_US) _startBoostUs = START_BOOST_MAX_US;
+        DEBUG("[CLOCK] %u node(s) missed the start target — boost now %lld ms\n",
+              missed, (long long)(_startBoostUs / 1000));
+    } else if (_startBoostUs > 0) {
+        // Clean race.  Give a little back so a one-off bad race does not
+        // permanently tax every race after it.
+        _startBoostUs -= START_BOOST_DECAY_US;
+        if (_startBoostUs < 0) _startBoostUs = 0;
+    }
+    DEBUG("[CLOCK] Start fanout took %lld ms (margin allowed %lld ms)\n",
+          (long long)(_lastFanoutUs / 1000), (long long)(_lastStartMarginUs / 1000));
+}
+
+// A GO that never landed is the one failure a pilot cannot recover from, and
+// UDP gives us no ack to notice it.  So we check the outcome instead of the
+// delivery: by now every non-excluded node should be reporting `running`.
+void MultiNodeManager::_verifyRaceStarts() {
+    _startVerifyAtMs = 0;
+
+    uint8_t repaired = 0;
+    for (auto& n : _nodes) {
+        if (n.pendingRemoval || !n.online || n.staIP.isEmpty()) continue;
+        if (n.excludedFromCurrentRace) continue;
+        if (n.running) continue;                 // heartbeat says it is racing
+
+        // It should be racing and it is not.  Start it over HTTP, carrying the
+        // ORIGINAL target — now several seconds in the past.  The client
+        // backdates its race clock to it, so this pilot joins with the same
+        // elapsed as everyone else rather than a clock that reads zero while
+        // the field is at four seconds.
+        //
+        // They genuinely lost those seconds of flying, and their clock says so.
+        // What they keep is comparability: their laps still sit on the field's
+        // timeline, so the anchor set at GO remains true and they stay in the
+        // standings.
+        HTTPClient http;
+        String url = "http://" + n.staIP + "/timer/masterStart?raceId=" + String(_masterRaceId);
+        if (n.clockValid && _lastStartTargetUs != 0) {
+            url += "&startAtUs=" + String((long long)(_lastStartTargetUs + n.clockOffsetUs));
+        }
+        if (http.begin(url)) {
+            http.setTimeout(500);
+            http.setConnectTimeout(500);
+            const int code = http.POST("");
+            http.end();
+            DEBUG("[CLOCK] Node %c missed GO — repaired over HTTP (%d)\n",
+                  slotLetter(n.nodeId), code);
+        }
+        // The anchor stays valid: the client backdates to the same target we
+        // anchored against, so its laps remain comparable.  Only a node with
+        // no clock offset (no target to backdate to) loses its place.
+        if (!n.clockValid || _lastStartTargetUs == 0) n.anchored = false;
+        repaired++;
+        vTaskDelay(1);
+    }
+
+    if (repaired > 0) {
+        // Feed the healing loop: next race buys more headroom.
+        _startBoostUs += START_BOOST_STEP_US;
+        if (_startBoostUs > START_BOOST_MAX_US) _startBoostUs = START_BOOST_MAX_US;
+        DEBUG("[CLOCK] %u node(s) needed start repair — boost now %lld ms\n",
+              repaired, (long long)(_startBoostUs / 1000));
+    }
+}
+
+// Derived entirely from measurement — see the notes on START_MARGIN_MIN_US.
+// The only judgement encoded here is the safety factors, and those are
+// multipliers on measured quantities rather than substitutes for them.
+int64_t MultiNodeManager::_computeStartMarginUs() const {
+    int64_t worstOneWayUs = 0;
+    uint8_t online = 0;
+    for (const auto& n : _nodes) {
+        if (!n.online || n.pendingRemoval) continue;
+        online++;
+        // clockDelayUs is a round trip, and only half of it lies between us
+        // and the client.  This is the same measurement the clock offset is
+        // built from, so it already reflects today's RF conditions.
+        if (n.clockValid) {
+            const int64_t oneWay = (int64_t)n.clockDelayUs / 2;
+            if (oneWay > worstOneWayUs) worstOneWayUs = oneWay;
+        }
+    }
+
+    // First race after boot: nothing measured yet, so scale by fleet size
+    // rather than guessing a single number that is wrong for 2 pilots and
+    // also wrong for 7.
+    const int64_t fanoutUs = (_lastFanoutUs > 0)
+                           ? _lastFanoutUs
+                           : (int64_t)online * START_MARGIN_PER_NODE_US;
+
+    int64_t margin = (fanoutUs * 3) / 2      // distribution, with 50% headroom
+                   + worstOneWayUs * 3       // flight of the last datagram
+                   + START_MARGIN_SLACK_US   // scheduling granularity
+                   + _startBoostUs;          // healing
+
+    if (margin < START_MARGIN_MIN_US) margin = START_MARGIN_MIN_US;
+    if (margin > START_MARGIN_MAX_US) margin = START_MARGIN_MAX_US;
+    return margin;
+}
+
+void MultiNodeManager::setNodeStartLate(uint8_t nodeId, uint32_t lateMs) {
+    for (auto& n : _nodes) {
+        if (n.nodeId != nodeId) continue;
+        if (n.startLateMs != lateMs && lateMs > 0) {
+            DEBUG("[CLOCK] Node %c reports it started %u ms late — gate "
+                  "crossings in that window were not recorded\n",
+                  slotLetter(nodeId), lateMs);
+        }
+        n.startLateMs = lateMs;
+        return;
+    }
 }
 
 void MultiNodeManager::setPrearmPhase(bool active) {
@@ -1884,6 +2619,7 @@ void MultiNodeManager::_broadcastDirectorState() {
 }
 
 void MultiNodeManager::_broadcastRaceStop() {
+    _startVerifyAtMs = 0;   // race is over; nothing left to verify or repair
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) { n.excludedFromCurrentRace = false; continue; }
         if (n.excludedFromCurrentRace) {

@@ -130,9 +130,92 @@ class LapTimer {
    public:
     void init(Config *config, RX5808 *rx5808, Buzzer *buzzer, Led *l, WebhookManager *webhook = nullptr);
     void start();
+
+    // Start with the race clock's origin set to a PAST instant, so elapsed is
+    // already correct at the moment we begin (§8).
+    //
+    // Two uses, both about a pilot keeping their place on the field's timeline:
+    //   - a scheduled start that the ~1 kHz poll fired a fraction late: the
+    //     clock is backdated to the commanded instant, so the lateness leaves
+    //     no trace in the race clock at all
+    //   - a client that missed the GO entirely and is being repaired seconds
+    //     later: it joins with the elapsed everyone else has, so its laps stay
+    //     comparable instead of being offset by however long the repair took
+    //
+    // A pilot repaired 4 s late genuinely lost 4 s of flying, and their clock
+    // says so.  What they do not lose is comparability.
+    void startAt(int64_t originUs);
     void stop();
     bool     isRunning()           const;
     uint32_t getElapsedMs()        const;  // ms since race start (0 if stopped)
+
+    // Elapsed while running, and the FINAL duration once stopped.
+    //
+    // getElapsedMs() deliberately returns 0 when stopped, which is right for
+    // "how long has this race been going" but wrong for anything displaying a
+    // result: the director's stop made every client's Race View snap to
+    // 00:00.00, discarding the finishing time at the moment people wanted to
+    // read it.  A finished race still has a duration.
+    uint32_t getLastElapsedMs()    const { return isRunning() ? getElapsedMs() : finalElapsedMs; }
+
+    // Race start in THIS device's microsecond domain (esp_timer, monotonic
+    // since boot).  Reported to the master on the masterStart acknowledgement
+    // so the master can place this node's race zero on its own timeline by
+    // subtracting the measured clock offset (§8).
+    //
+    // Exists because millis() would reintroduce a full millisecond of
+    // quantization into the anchor after we went to the trouble of measuring
+    // the offset in microseconds.  Lap detection is unaffected and still runs
+    // off raceStartTimeMs — this is the reporting path only.
+    int64_t  getRaceStartUs()      const { return raceStartTimeUs; }
+
+    // ── Scheduled start (§8) ────────────────────────────────────────────
+    // Arm the race to begin when THIS device's µs clock reaches atUs.
+    //
+    // The master fans out masterStart sequentially, so every client used to
+    // start whenever its own POST happened to land — measured at up to 501 ms
+    // of spread across six nodes, which the master then compensated for with
+    // per-node anchors.  Commanding a common instant removes the spread itself
+    // instead of accounting for it: the master converts one target into each
+    // client's clock domain using the offset measured during pre-arm, so every
+    // unit starts together to within that offset's error.
+    //
+    // A target already in the past starts immediately — a late POST must not
+    // silently skip the race.
+    void     scheduleStart(int64_t atUs);
+    void     cancelScheduledStart() { scheduledStartUs = 0; }
+    bool     hasScheduledStart() const { return scheduledStartUs != 0; }
+    int64_t  getScheduledStartUs() const { return scheduledStartUs; }
+
+    // actual - intended, for the last scheduled start that fired.  This is the
+    // honest measure of how well the schedule was honoured locally; combined
+    // with the master's clock offset error it is the total start spread.
+    int64_t  getStartResidualUs() const { return startResidualUs; }
+
+    // How far the race clock was backdated at start, in ms.  Non-zero means
+    // this pilot's timer began AFTER the instant it is counting from — they
+    // were repaired late, and any gate crossing during that window was not
+    // recorded.  Surfaced so nobody has to wonder why a pilot's first lap
+    // looks wrong when the rest of their race is perfectly aligned.
+    uint32_t getStartLateMs() const { return startLateMs; }
+
+    // True once, when a SCHEDULED start actually fires.
+    //
+    // Browsers anchor their race display to whatever message told them the
+    // race began.  With a scheduled start that message arrives up to
+    // RACE_START_MARGIN_US early — and arrives at a different moment on every
+    // node, because the fanout is sequential.  That is precisely the spread
+    // the scheduling removed from the timers, reappearing in the UI: measured
+    // at 590 ms between the host's display and a client's.
+    //
+    // So the "started" event is emitted HERE, at the real start, rather than
+    // when the command lands.  Explicit (unscheduled) starts still emit from
+    // their handlers, where the two instants are the same thing.
+    bool     consumeStartEvent() {
+        if (!startEventPending) return false;
+        startEventPending = false;
+        return true;
+    }
     uint16_t getLapCount()         const;  // ring write position — NOT a lap total, see getLapTotal()
     uint32_t getLapTimeAt(uint16_t index) const;  // lap time at 0-based RING index
 
@@ -226,6 +309,19 @@ class LapTimer {
     WebhookManager *webhooks;
     boolean lapCountWraparound;
     uint32_t raceStartTimeMs;
+    // Same instant as raceStartTimeMs, captured microseconds apart from it.
+    // Never used for lap arithmetic — see getRaceStartUs().
+    int64_t  raceStartTimeUs = 0;
+    // Armed start instant in this device's µs domain; 0 = not armed.
+    // Polled from handleLapTimerUpdate(), which runs at ~1 kHz, so the start
+    // lands within ~1 ms of the target — an order of magnitude below the
+    // clock-offset error it is being scheduled against, and far safer than
+    // calling start() from an esp_timer callback while loop() reads this state.
+    int64_t  scheduledStartUs = 0;
+    int64_t  startResidualUs  = 0;   // actual - intended, last scheduled start
+    uint32_t startLateMs      = 0;   // how far the clock was backdated at start
+    uint32_t finalElapsedMs   = 0;   // duration of the last completed race
+    volatile bool startEventPending = false;  // scheduled start fired, UI not told yet
     uint32_t startTimeMs;
     uint16_t lapCount;     // ring write cursor, wraps at LAPTIMER_LAP_HISTORY
     uint16_t lapTotal;     // monotonic laps this race; never wraps

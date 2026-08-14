@@ -407,6 +407,27 @@ void loop() {
     rssiLogger.log(timer.snapshot);
 #endif
     
+    // A scheduled race start just fired (§8).  Tell the UI at the instant the
+    // race ACTUALLY began, not when the start command arrived — the command
+    // lands up to RACE_START_MARGIN_US early, and at a different moment on
+    // every node because the fanout is sequential.  Emitting here is what
+    // keeps the displays as synchronised as the timers underneath them.
+    if (timer.consumeStartEvent()) {
+        // A GO that arrived over UDP did none of the bookkeeping the old HTTP
+        // masterStart handler used to do — it only carried a timestamp.  All
+        // of it belongs here anyway, at the real start:
+        if (multiNodeManager.isClientMode()) {
+            multiNodeManager.setTimerRunning(true);    // heartbeat now reports racing
+            multiNodeManager.setMasterRaceActive(true);
+            // A client's Race View listens on masterRaceState, not raceState,
+            // so both have to be released or the pilot's own display never
+            // starts at all.
+            ws.getEvents()->send("started", "masterRaceState");
+        }
+        transportManager.broadcastRaceStateEvent("started");
+        ws.pushMultiNodeState();
+    }
+
     // Broadcast lap events to all transports (WiFi + USB)
     if (timer.isLapAvailable()) {
         uint32_t lapTime   = timer.getLapTime();
