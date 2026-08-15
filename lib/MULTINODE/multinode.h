@@ -101,6 +101,26 @@ struct NodeInfo {
     // asymmetry, which is the assumption the NTP formula rests on.
     int64_t  clockOffsetUs   = 0;
     uint32_t clockDelayUs    = 0xFFFFFFFF;  // delay of the sample we kept
+
+    // The MOST RECENT probe, unfiltered — every sample, whether or not it beat
+    // the stored best.
+    //
+    // clockOffsetUs above is min-delay sticky: it only moves when a better
+    // sample arrives, so as a time series it is a step function and fitting a
+    // slope to it measures the filter rather than the crystals.  These two are
+    // what an external logger needs to compute drift independently and check
+    // the firmware's own fit against something.
+    int64_t  rawOffsetUs     = 0;
+    uint32_t rawDelayUs      = 0;
+    // Master time at which that sample was TAKEN, not when it was read back.
+    //
+    // Steady-state probing is round-robin at one node per 25 s, so a given
+    // node produces a fresh sample only every ~150 s on a six-client fleet.
+    // A logger polling faster than that would otherwise both re-count the same
+    // sample (understating its own error bar) and mis-place it in time by up
+    // to a poll period.  Publishing the instant makes the series exact and
+    // makes duplicates trivially detectable.
+    int64_t  rawAtUs         = 0;
     uint16_t clockSamples    = 0;           // probes landed since the last resync burst
     bool     clockValid      = false;
 

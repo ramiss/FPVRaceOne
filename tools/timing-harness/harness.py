@@ -1076,6 +1076,77 @@ def fetch_director_state(master_ip, timeout=4.0):
                 pass
 
 
+def fetch_clock_report(master_ip, timeout=4.0):
+    """Return the master's parsed /api/multinode/clocks payload, or None.
+
+    Clock probing runs continuously in steady state (one node every ~25 s), so
+    this needs no race to be running -- polling the endpoint is the whole
+    experiment.
+    """
+    conn = None
+    try:
+        host, port = _split_host_port(master_ip)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("GET", "/api/multinode/clocks")
+        resp = conn.getresponse()
+        if resp.status != 200:
+            resp.read()
+            return None
+        raw = resp.read()
+        return json.loads(raw.decode("utf-8", "replace"))
+    except Exception:
+        return None
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def fit_drift_ppm(samples):
+    """Least-squares ppm from [(master_us, offset_us)], with a standard error.
+
+    Returns (ppm, stderr_ppm, n) or None when there is not enough spread to
+    say anything.  1 ppm == 1 us of offset per second of elapsed time, so the
+    slope IS the answer once x is expressed in seconds.
+
+    This exists to check the firmware's own estimate against a much longer
+    baseline than its rolling 8-sample window can see -- the whole point of
+    logging rawOffsetUs rather than the min-delay-filtered value, which only
+    steps when a better sample lands and would have us fitting the filter.
+    """
+    pts = [(x, y) for (x, y) in samples if x is not None and y is not None]
+    if len(pts) < 8:
+        return None
+    x0 = pts[0][0]
+    xs = [(x - x0) / 1e6 for (x, _) in pts]          # seconds
+    ys = [float(y) for (_, y) in pts]                 # microseconds
+    span = max(xs) - min(xs)
+    if span < 300.0:                                  # under 5 minutes says nothing
+        return None
+
+    n = len(pts)
+    mx = sum(xs) / n
+    my = sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx <= 0:
+        return None
+    sxy = sum((x - mx) * (y - my) for x, y in zip(xs, ys))
+    slope = sxy / sxx                                 # us per second == ppm
+
+    # Residual scatter about the fit, and from it the slope's standard error.
+    # Without this a confident-looking ppm is indistinguishable from noise --
+    # which is exactly the trap the firmware's 8-sample window fell into.
+    if n > 2:
+        resid = sum((y - (my + slope * (x - mx))) ** 2 for x, y in zip(xs, ys))
+        sigma = math.sqrt(resid / (n - 2))
+        stderr = sigma / math.sqrt(sxx)
+    else:
+        stderr = float("nan")
+    return slope, stderr, n
+
+
 def time_director_post(target_ip, payload, timeout=4.0):
     """POST `payload` to one client's directorState endpoint; return ms.
 

@@ -20,6 +20,7 @@ import json
 import os
 import queue
 import re
+import statistics
 import sys
 import threading
 import time
@@ -41,7 +42,142 @@ from harness import (JsonLink, run_once, summarize, open_port_no_reset,
                      find_min_detectable_width, estimate_search_runs,
                      MultiNodeLoad, probe_master, set_voice_enabled,
                      fetch_director_state, time_director_post, client_targets,
+                     fetch_clock_report, fit_drift_ppm,
                      DIRECTOR_FANOUT_MS, DIRECTOR_INTERVAL_MS)
+
+
+# ── Dark theme ──────────────────────────────────────────────────────────────
+#
+# Picked to sit alongside the product's own dark UI rather than invent a second
+# identity: slate panels, a teal accent, and status colours lifted toward the
+# lighter end because saturated reds and greens that read well on white go muddy
+# on a dark ground.
+BG      = "#1a2226"   # window behind everything
+PANEL   = "#222c31"   # frames and label frames
+FIELD   = "#2a363c"   # entries, buttons, combobox wells
+BORDER  = "#35454c"
+FG      = "#e2e9ec"
+MUTED   = "#93a5ad"
+ACCENT  = "#17a589"   # FPVRaceOne teal
+ACCENT_HI = "#1bbf9c"
+OK_FG   = "#4ade80"
+WARN_FG = "#fbbf24"
+BAD_FG  = "#f87171"
+HEAD_FG = "#ffffff"
+
+
+def apply_dark_theme(root):
+    """Recolour ttk + the classic Tk widgets that ttk styling never reaches."""
+    st = ttk.Style()
+    # 'clam' rather than 'vista': the native Windows themes draw most of their
+    # elements from OS bitmaps and simply ignore background/foreground, so a
+    # dark palette applied to them yields dark text on light chrome.
+    try:
+        st.theme_use("clam")
+    except tk.TclError:
+        pass
+
+    root.configure(bg=BG)
+    st.configure(".", background=PANEL, foreground=FG, fieldbackground=FIELD,
+                 bordercolor=BORDER, lightcolor=PANEL, darkcolor=PANEL,
+                 troughcolor=BG, focuscolor=ACCENT, insertcolor=FG)
+    st.configure("TFrame", background=PANEL)
+    st.configure("TLabel", background=PANEL, foreground=FG)
+    st.configure("TLabelframe", background=PANEL, bordercolor=BORDER)
+    st.configure("TLabelframe.Label", background=PANEL, foreground=ACCENT)
+    st.configure("TButton", background=FIELD, foreground=FG,
+                 bordercolor=BORDER, padding=(10, 5))
+    st.map("TButton",
+           background=[("disabled", PANEL), ("pressed", ACCENT),
+                       ("active", ACCENT_HI)],
+           foreground=[("disabled", MUTED), ("active", "#0f1416")])
+    st.configure("TEntry", fieldbackground=FIELD, foreground=FG,
+                 bordercolor=BORDER)
+    st.configure("TSpinbox", fieldbackground=FIELD, foreground=FG,
+                 arrowcolor=FG, bordercolor=BORDER)
+    st.configure("TCombobox", fieldbackground=FIELD, background=FIELD,
+                 foreground=FG, arrowcolor=FG, bordercolor=BORDER)
+    st.map("TCombobox",
+           fieldbackground=[("readonly", FIELD)],
+           foreground=[("readonly", FG)],
+           background=[("readonly", FIELD)])
+    st.configure("TCheckbutton", background=PANEL, foreground=FG)
+    st.map("TCheckbutton", background=[("active", PANEL)],
+           indicatorcolor=[("selected", ACCENT)])
+    st.configure("TScale", background=PANEL, troughcolor=FIELD)
+    for bar in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+        st.configure(bar, background=FIELD, troughcolor=BG, arrowcolor=FG,
+                     bordercolor=BORDER)
+        st.map(bar, background=[("active", ACCENT)])
+    # The status bar's sunken relief renders as a light bevel unless told
+    # otherwise.
+    st.configure("Status.TLabel", background=FIELD, foreground=MUTED,
+                 padding=(6, 3))
+
+    # A combobox's dropdown is a classic Tk listbox living in its own toplevel,
+    # so no ttk style touches it — it stays glaring white without this.
+    root.option_add("*TCombobox*Listbox.background", FIELD)
+    root.option_add("*TCombobox*Listbox.foreground", FG)
+    root.option_add("*TCombobox*Listbox.selectBackground", ACCENT)
+    root.option_add("*TCombobox*Listbox.selectForeground", HEAD_FG)
+
+
+def style_text_widget(w):
+    """Dark-ground a classic Text/ScrolledText, including its caret+selection."""
+    w.configure(background=BG, foreground=FG, insertbackground=FG,
+                selectbackground=ACCENT, selectforeground=HEAD_FG,
+                highlightthickness=0, borderwidth=0)
+
+
+class FlowFrame(ttk.Frame):
+    """A row of widgets that wraps to further rows as the window narrows.
+
+    Tk has no flow layout: pack(side="left") runs children off the edge, and
+    grid() shares column widths across rows, which makes ragged-width buttons
+    align into gappy columns.  So children are positioned with place() and
+    re-laid out on <Configure>, and the frame reports its own height.
+
+    Needed because the button row alone is wider than the window's 760 px
+    minimum — on a laptop the last tests were simply unreachable.
+    """
+
+    def __init__(self, master, hgap=6, vgap=6, **kw):
+        super().__init__(master, **kw)
+        self._items = []
+        self._hgap = hgap
+        self._vgap = vgap
+        self._last_w = -1
+        self.bind("<Configure>", self._on_configure)
+
+    def add(self, widget, gap_before=0):
+        """Append in flow order.  gap_before separates logical groups."""
+        self._items.append((widget, gap_before))
+        return widget
+
+    def _on_configure(self, ev):
+        # Reflow only on a real width change; <Configure> also fires for the
+        # height changes we ourselves cause, which would recurse.
+        if abs(ev.width - self._last_w) < 2:
+            return
+        self._last_w = ev.width
+        self.reflow(ev.width)
+
+    def reflow(self, width=None):
+        if width is None:
+            width = self.winfo_width()
+        if width <= 1:
+            return
+        x = y = row_h = 0
+        for w, gap_before in self._items:
+            ww, wh = w.winfo_reqwidth(), w.winfo_reqheight()
+            lead = gap_before if x else 0
+            if x and x + lead + ww > width:
+                x, y, row_h = 0, y + row_h + self._vgap, 0
+                lead = 0
+            w.place(x=x + lead, y=y, width=ww, height=wh)
+            x += lead + ww + self._hgap
+            row_h = max(row_h, wh)
+        self.configure(height=y + row_h)
 
 
 # ── Interpretation ──────────────────────────────────────────────────────────
@@ -535,6 +671,199 @@ class TimingRigGUI:
                         variable=self.target_rssi)\
             .grid(row=4, column=0, columnspan=8, sticky="w", padx=(8, 0), pady=(2, 0))
 
+    def run_drift(self):
+        # Needs NOTHING but the network.  Clock probing runs continuously in
+        # steady state, so this neither starts a race nor touches a serial
+        # port — both monitors stay live for the whole run.
+        self._start(self._drift_worker, needs=())
+
+    def _drift_worker(self):
+        """Log every node's raw clock offset, then fit drift over the whole run.
+
+        WHY this exists: the firmware fits drift over a rolling 8-sample window
+        (~1000 s span), which at the probe noise we measure gives a standard
+        error near 6 ppm -- so its readings of -8/-5/+1/-4 ppm are all within
+        1 sigma of zero and cannot be distinguished from no drift at all.
+        A longer baseline shrinks that error as 1/span, so an hour of samples
+        settles in minutes of analysis what the device cannot settle at all.
+
+        Fits rawOffsetUs, never offsetUs: the latter is min-delay filtered and
+        only steps when a better sample lands, so fitting it measures the
+        filter rather than the crystals.
+
+        The question is NOT "what is the drift" to high precision.  It is:
+          1. is each node's value REPEATABLE (a per-unit crystal signature),
+             or does it wander through the same range (noise)?
+          2. does any node exceed ~10 ppm, the point where correcting it moves
+             a lap by more than the offset error already does?
+        """
+        try:
+            master = self.master_ip.get().strip()
+            try:
+                mins = max(1.0, float(self.soak_mins.get()))
+            except (TypeError, ValueError):
+                mins = 60.0
+            period_s = 30.0
+
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("CLOCK DRIFT LOG\n", "head")
+            self.emit("Polls /api/multinode/clocks every %.0f s for %.0f min and fits\n"
+                      "each node's raw offset over the whole run.\n"
+                      "No race required -- drift probing runs continuously.\n\n"
+                      % (period_s, mins), "dim")
+            if mins < 30:
+                self.emit("  NOTE: under 30 min the fit's error bar will still be\n"
+                          "  several ppm, which is the size of the effect. 60+ min\n"
+                          "  is what actually settles the question.\n\n", "warn")
+
+            first = fetch_clock_report(master)
+            if not isinstance(first, dict):
+                self.emit("  Master at %s did not answer /api/multinode/clocks.\n"
+                          "  Needs master mode and firmware with the clock report.\n"
+                          % master, "bad")
+                return
+
+            # Same logs/ directory save_logs() uses, so a drift run lands
+            # alongside the serial captures from the same session.
+            out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+            os.makedirs(out_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            csv_path = os.path.join(out_dir, "%s-clockdrift.csv" % stamp)
+            series = {}      # nodeId -> [(rawAtUs, rawOffsetUs)] -- DEDUPED
+            ppm_hist = {}    # nodeId -> [firmware driftPpm readings]
+            delays = {}      # nodeId -> [rawDelayUs]
+            last_at = {}     # nodeId -> rawAtUs of the sample already recorded
+            dupes = 0
+
+            deadline = time.time() + mins * 60.0
+            polls = 0
+            with open(csv_path, "w", encoding="utf-8", newline="") as fh:
+                fh.write("wallClock,masterUs,rawAtUs,nodeId,rawOffsetUs,rawDelayUs,"
+                         "offsetUs,delayUs,driftPpm,driftValid,driftSamples,samples\n")
+                while time.time() < deadline and not self.cancel.is_set():
+                    rep = fetch_clock_report(master)
+                    if isinstance(rep, dict):
+                        polls += 1
+                        m_us = rep.get("masterUs")
+                        wall = time.strftime("%H:%M:%S")
+                        for n in rep.get("nodes", []) or []:
+                            if not isinstance(n, dict) or not n.get("online"):
+                                continue
+                            nid = n.get("nodeId")
+                            raw = n.get("rawOffsetUs")
+                            at  = n.get("rawAtUs")
+                            if nid is None or raw is None:
+                                continue
+                            fh.write("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" % (
+                                wall, m_us, at, nid, raw, n.get("rawDelayUs"),
+                                n.get("offsetUs"), n.get("delayUs"),
+                                n.get("driftPpm"), n.get("driftValid"),
+                                n.get("driftSamples"), n.get("samples")))
+                            if n.get("driftValid"):
+                                ppm_hist.setdefault(nid, []).append(n.get("driftPpm"))
+
+                            # DEDUPE, and use the probe's OWN timestamp.
+                            #
+                            # Probing is round-robin at one node per 25 s, so on
+                            # a six-client fleet each node yields a fresh sample
+                            # only every ~150 s -- far slower than we poll.
+                            # Counting the same sample five times would inflate
+                            # n without adding information and shrink the error
+                            # bar by ~sqrt(5), producing a confident number
+                            # built on correlated points.  That is the exact
+                            # mistake this tool exists to detect.
+                            if at is None or last_at.get(nid) == at:
+                                if at is not None:
+                                    dupes += 1
+                                continue
+                            last_at[nid] = at
+                            series.setdefault(nid, []).append((at, raw))
+                            rd = n.get("rawDelayUs")
+                            if rd:
+                                delays.setdefault(nid, []).append(rd)
+                        fh.flush()
+                        if polls % 10 == 0:
+                            left = max(0, deadline - time.time())
+                            self.emit("    %d polls, %.0f min left\n" % (polls, left / 60.0),
+                                      "dim")
+                    # Interruptible sleep: Stop takes effect within the poll,
+                    # not at the end of a 30 s nap.
+                    self.cancel.wait(period_s)
+
+            got = sum(len(v) for v in series.values())
+            self.emit("\n  Wrote %s\n" % csv_path, "head")
+            self.emit("  %d polls -> %d independent samples (%d repeat reads "
+                      "discarded)\n" % (polls, got, dupes), "dim")
+            self._report_drift(series, ppm_hist, delays)
+        except Exception as e:
+            self.emit("  Drift log failed: %s\n" % e, "bad")
+
+    def _report_drift(self, series, ppm_hist, delays):
+        """Independent fit + the repeatability test, side by side."""
+        self.emit("\n  What this means\n", "head")
+        if not series:
+            self.emit("  - No samples collected. Are clients online?\n", "bad")
+            return
+
+        MATERIAL_PPM = 10.0     # below this, correcting moves a lap < 3 ms / 5 min
+        fits = {}
+        for nid in sorted(series):
+            fit = fit_drift_ppm(series[nid])
+            med_delay = statistics.median(delays.get(nid, [0])) if delays.get(nid) else 0
+            if fit is None:
+                self.emit("    node %-2s  not enough spread yet "
+                          "(%d samples)\n" % (nid, len(series[nid])), "warn")
+                continue
+            ppm, se, n = fit
+            fits[nid] = (ppm, se)
+            fw = ppm_hist.get(nid) or []
+            fw_txt = ""
+            if fw:
+                fw_txt = "   firmware %+.0f..%+.0f ppm" % (min(fw), max(fw))
+            self.emit("    node %-2s  %+7.2f +/- %.2f ppm  (n=%d, delay med %.1f ms)%s\n"
+                      % (nid, ppm, se, n, med_delay / 1000.0, fw_txt), "ok")
+
+        if not fits:
+            self.emit("  - Run longer: a fit needs >= 8 samples spanning >= 5 min.\n", "warn")
+            return
+
+        # 1. Is any node's drift big enough to be worth correcting at all?
+        worst = max(abs(p) for p, _ in fits.values())
+        # 2. Is any node's drift resolved -- i.e. bigger than its own error bar?
+        resolved = [nid for nid, (p, se) in fits.items()
+                    if se == se and se > 0 and abs(p) > 2 * se]
+
+        self.emit("\n", "dim")
+        if resolved:
+            self.emit("  - RESOLVED: node(s) %s show drift larger than twice their\n"
+                      "    own error bar, so this is a real per-unit crystal rate,\n"
+                      "    not noise.\n"
+                      % ", ".join(str(x) for x in resolved), "ok")
+        else:
+            self.emit("  - NOT RESOLVED: every node's drift is within 2x its own\n"
+                      "    error bar, i.e. still indistinguishable from zero.\n", "warn")
+
+        if worst >= MATERIAL_PPM:
+            self.emit("  - MATERIAL: worst node is %.1f ppm, which moves a lap by\n"
+                      "    %.1f ms across a 5-minute race -- above the offset error,\n"
+                      "    so applying the correction is worth it.\n"
+                      "    => gate driftValid on residual, then set CLOCK_APPLY_DRIFT.\n"
+                      % (worst, worst * 0.3), "ok")
+        else:
+            self.emit("  - NOT MATERIAL: worst node is %.1f ppm = %.1f ms across a\n"
+                      "    5-minute race, below the clock-offset error already in\n"
+                      "    the system. Correcting it would add noise, not accuracy.\n"
+                      "    => leave CLOCK_APPLY_DRIFT off; keep driftPpm as a\n"
+                      "       hardware canary only.\n"
+                      % (worst, worst * 0.3), "warn")
+
+        self.emit("\n  This run was at ONE temperature. A null result here does not\n"
+                  "  license disabling drift correction for good -- crystals are\n"
+                  "  cut for ~25 C and a unit baking in the sun is the case that\n"
+                  "  motivated the feature. Repeat with one node warmed and compare\n"
+                  "  its ppm against its neighbours before deciding for the season.\n",
+                  "dim")
+
     def run_fanout(self):
         # DUT only — the probe POSTs over WiFi and reads the master's serial;
         # the emulator is untouched, so its monitor stays live.
@@ -929,42 +1258,41 @@ class TimingRigGUI:
             self.q.put(("done", None))
 
     def _build_buttons(self, root):
-        f = ttk.Frame(root, padding=(10, 4))
-        f.pack(fill="x")
+        # Wrapping row: seven test buttons plus the run controls are wider than
+        # the window's own minimum, so on anything but a wide desktop the later
+        # tests used to sit off-screen with no scrollbar to reach them.
+        # Outer spacing via pack rather than ttk padding: place() coordinates
+        # are relative to the widget's own origin and do not account for a ttk
+        # frame's internal padding, so padding here would clip the bottom row
+        # by however much was set.
+        f = FlowFrame(root)
+        f.pack(fill="x", padx=10, pady=4)
+        self.btn_row = f
 
-        self.btn_level = ttk.Button(f, text="1. Check Analog Path",
-                                    command=self.run_level)
-        self.btn_level.pack(side="left", padx=(0, 6))
+        self.btn_level = f.add(ttk.Button(f, text="1. Check Analog Path",
+                                          command=self.run_level))
+        self.btn_thresh = f.add(ttk.Button(f, text="2. Set Thresholds",
+                                           command=self.run_thresholds))
+        self.btn_interval = f.add(ttk.Button(f, text="3. Accuracy + Consistency",
+                                             command=self.run_interval))
+        self.btn_sweep = f.add(ttk.Button(f, text="4. Min Pass Width (Sweep)",
+                                          command=self.run_sweep))
+        self.btn_soak = f.add(ttk.Button(f, text="5. Heap Soak",
+                                         command=self.run_soak))
+        self.btn_fanout = f.add(ttk.Button(f, text="6. Fanout Probe",
+                                           command=self.run_fanout))
+        self.btn_drift = f.add(ttk.Button(f, text="7. Clock Drift Log",
+                                          command=self.run_drift))
 
-        self.btn_thresh = ttk.Button(f, text="2. Set Thresholds",
-                                     command=self.run_thresholds)
-        self.btn_thresh.pack(side="left", padx=6)
-
-        self.btn_interval = ttk.Button(f, text="3. Accuracy + Consistency",
-                                       command=self.run_interval)
-        self.btn_interval.pack(side="left", padx=6)
-
-        self.btn_sweep = ttk.Button(f, text="4. Min Pass Width (Sweep)",
-                                    command=self.run_sweep)
-        self.btn_sweep.pack(side="left", padx=6)
-
-        self.btn_soak = ttk.Button(f, text="5. Heap Soak",
-                                   command=self.run_soak)
-        self.btn_soak.pack(side="left", padx=6)
-
-        self.btn_fanout = ttk.Button(f, text="6. Fanout Probe",
-                                     command=self.run_fanout)
-        self.btn_fanout.pack(side="left", padx=6)
-
-        ttk.Label(f, text="mins:").pack(side="left", padx=(8, 2))
+        # gap_before marks a group boundary, so when the row wraps it prefers
+        # to break between groups rather than mid-control.
+        f.add(ttk.Label(f, text="mins:"), gap_before=10)
         self.soak_mins = tk.StringVar(value="5")
-        ttk.Entry(f, textvariable=self.soak_mins, width=5).pack(side="left")
+        f.add(ttk.Entry(f, textvariable=self.soak_mins, width=5))
 
-        self.btn_stop = ttk.Button(f, text="Stop", command=self.stop_run,
-                                   state="disabled")
-        self.btn_stop.pack(side="left", padx=6)
-
-        ttk.Button(f, text="Clear", command=self.clear).pack(side="right")
+        self.btn_stop = f.add(ttk.Button(f, text="Stop", command=self.stop_run,
+                                         state="disabled"), gap_before=10)
+        f.add(ttk.Button(f, text="Clear", command=self.clear))
 
     def _build_output(self, root):
         f = ttk.LabelFrame(root, text="Results", padding=6)
@@ -979,13 +1307,20 @@ class TimingRigGUI:
         self.out = scrolledtext.ScrolledText(f, wrap="word", height=12,
                                              font=("Consolas", 9))
         self.out.pack(fill="both", expand=True)
-        self.out.tag_config("head", font=("Consolas", 10, "bold"))
-        self.out.tag_config("good", foreground="#0a7d33")
-        self.out.tag_config("warn", foreground="#b06f00")
-        self.out.tag_config("bad", foreground="#b00020")
-        self.out.tag_config("dim", foreground="#666666")
+        style_text_widget(self.out)
+        # Status colours are lifted toward the light end: the saturated red and
+        # green that read well on white go muddy and low-contrast on a dark
+        # ground, which is exactly where a "bad" line must not be easy to miss.
+        self.out.tag_config("head", font=("Consolas", 10, "bold"),
+                            foreground=HEAD_FG)
+        self.out.tag_config("good", foreground=OK_FG)
+        self.out.tag_config("ok",   foreground=OK_FG)
+        self.out.tag_config("warn", foreground=WARN_FG)
+        self.out.tag_config("bad",  foreground=BAD_FG)
+        self.out.tag_config("dim",  foreground=MUTED)
 
-        self.status = ttk.Label(root, text="Ready", relief="sunken", anchor="w")
+        self.status = ttk.Label(root, text="Ready", style="Status.TLabel",
+                                anchor="w")
         self.status.pack(fill="x", side="bottom")
 
     # -- helpers ------------------------------------------------------------
@@ -1588,6 +1923,9 @@ class TimingRigGUI:
             return
 
         win = tk.Toplevel(self.root)
+        # A Toplevel gets the system background, not the ttk theme's — without
+        # this the log window keeps a light frame around dark panes.
+        win.configure(bg=BG)
         win.title("Raw serial — FPVRaceOne / emulator")
         # Undocked was a hardcoded 980x760, which overhangs a 1366x768 laptop.
         # _dock_geometry() already clamps itself; this is the other path.
@@ -1612,15 +1950,16 @@ class TimingRigGUI:
             ttk.Checkbutton(bar, text="Follow", variable=follow).pack(side="left")
             ttk.Button(bar, text="Clear",
                        command=lambda n=name: self._log_clear(n)).pack(side="left", padx=4)
-            ttk.Label(bar, text="(raw, unfiltered)", foreground="#666",
+            ttk.Label(bar, text="(raw, unfiltered)", foreground=MUTED,
                       font=("", 8)).pack(side="left", padx=6)
 
             txt = scrolledtext.ScrolledText(frame, wrap="none", height=18,
                                             font=("Consolas", 9))
             txt.pack(fill="both", expand=True)
-            txt.tag_config("bad", foreground="#b00020")
-            txt.tag_config("warn", foreground="#b06f00")
-            txt.tag_config("dim", foreground="#333333")
+            style_text_widget(txt)
+            txt.tag_config("bad", foreground=BAD_FG)
+            txt.tag_config("warn", foreground=WARN_FG)
+            txt.tag_config("dim", foreground=MUTED)
             self._log_text[name] = txt
 
         # Backfill whatever the monitor already captured, so opening the panel
@@ -2831,10 +3170,10 @@ class TimingRigGUI:
 
 def main():
     root = tk.Tk()
-    try:
-        ttk.Style().theme_use("vista")   # native-ish on Windows
-    except tk.TclError:
-        pass
+    # Applied BEFORE the widgets are built: ttk reads style settings at widget
+    # creation for some elements, so theming afterwards leaves a few stragglers
+    # in the old palette.
+    apply_dark_theme(root)
     TimingRigGUI(root)
     root.mainloop()
 

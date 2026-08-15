@@ -1607,6 +1607,11 @@ bool MultiNodeManager::_probeNodeClock(NodeInfo& n) {
 
 void MultiNodeManager::_recordClockSample(NodeInfo& n, int64_t offsetUs, int64_t delayUs) {
     n.clockSamples++;
+    // Published unfiltered so an external logger can fit drift over a long
+    // baseline rather than inheriting our 8-sample window.
+    n.rawOffsetUs = offsetUs;
+    n.rawDelayUs  = (uint32_t)delayUs;
+    n.rawAtUs     = esp_timer_get_time();
 
     // Keep the least-queued sample.  The NTP formula assumes the outbound and
     // return legs took equal time; that assumption is least wrong when the
@@ -2068,6 +2073,10 @@ String MultiNodeManager::buildClockReport() const {
         out += ",\"clockValid\":";  out += n.clockValid ? "true" : "false";
         out += ",\"offsetUs\":";    out += (long long)n.clockOffsetUs;
         out += ",\"delayUs\":";     out += (n.clockDelayUs == 0xFFFFFFFF) ? -1 : (int32_t)n.clockDelayUs;
+        // Unfiltered latest sample — the series an external logger fits.
+        out += ",\"rawOffsetUs\":"; out += (long long)n.rawOffsetUs;
+        out += ",\"rawDelayUs\":";  out += (uint32_t)n.rawDelayUs;
+        out += ",\"rawAtUs\":";     out += (long long)n.rawAtUs;
         out += ",\"samples\":";     out += (int)n.clockSamples;
         out += ",\"driftPpm\":";    out += (int)n.driftPpm;
         out += ",\"driftValid\":";  out += n.driftValid ? "true" : "false";
