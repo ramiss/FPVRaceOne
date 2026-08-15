@@ -42,7 +42,8 @@ from harness import (JsonLink, run_once, summarize, open_port_no_reset,
                      find_min_detectable_width, estimate_search_runs,
                      MultiNodeLoad, probe_master, set_voice_enabled,
                      fetch_director_state, time_director_post, client_targets,
-                     fetch_clock_report, fit_drift_ppm,
+                     fetch_clock_report, analyse_drift_series,
+                     race_prearm, race_start, race_stop, fetch_race_clock,
                      DIRECTOR_FANOUT_MS, DIRECTOR_INTERVAL_MS)
 
 
@@ -195,6 +196,21 @@ JITTER_GOOD_MS = 5.0     # stdev below this is inaudible in a lap time
 JITTER_WARN_MS = 15.0
 BIAS_NOTE_MS   = 20.0    # bias worth mentioning for cross-device comparison
 LAT_GOOD_MS    = 30.0
+
+
+def _ms(us):
+    """Microseconds -> a short millisecond string. '?' when the field is absent.
+
+    Every start-path number on the wire is microseconds; every number a human
+    reasons about here is milliseconds.  Converting at the point of display
+    keeps the two from being confused in the same sentence.
+    """
+    if us is None:
+        return "?"
+    try:
+        return "%.0f" % (float(us) / 1000.0)
+    except (TypeError, ValueError):
+        return "?"
 
 
 def interpret_interval(res, st, interval_ms, geo_floor_ms=None):
@@ -677,6 +693,255 @@ class TimingRigGUI:
         # port — both monitors stay live for the whole run.
         self._start(self._drift_worker, needs=())
 
+    # ── Race sync ───────────────────────────────────────────────────────────
+    #
+    # Everything about the start path -- pre-arm, the clock-sync burst, the
+    # scheduled fleet instant, the GO datagram, the ack, the repair pass -- was
+    # built and debugged with no automated coverage, because the rig started
+    # races over SERIAL and serial calls the timer directly.  Every regression
+    # in that work was therefore caught by a human watching two screens.
+    #
+    # This drives the same three endpoints the director's browser drives, so
+    # the real path runs, and then asserts the four things that path promises.
+    RACE_SYNC_TOL_MS = 50.0        # cross-fleet start spread we accept
+    RACE_SYNC_SETTLE_S = 12.0      # pre-arm window before GO; a countdown is ~18 s
+
+    def run_race_sync(self):
+        # Network only.  No serial, so both monitors stay live and the fleet
+        # under test is the real one, not an emulator.
+        self._start(self._race_sync_worker, needs=())
+
+    def _race_sync_worker(self):
+        try:
+            master = self.master_ip.get().strip()
+            try:
+                rounds = max(1, int(self.sync_rounds.get()))
+            except (TypeError, ValueError):
+                rounds = 3
+
+            self.emit("\n" + "=" * 66 + "\n", "dim")
+            self.emit("RACE SYNC\n", "head")
+            self.emit("Drives prearm -> GO -> stop over HTTP, %d time(s), and checks:\n"
+                      "  1. every client acknowledged the GO datagram\n"
+                      "  2. the fleet's race clocks agree within %.0f ms\n"
+                      "  3. the start margin does NOT ratchet race over race\n"
+                      "  4. a start with no pre-arm mints a FRESH race epoch\n"
+                      "No quad required -- this measures the start path, not laps.\n\n"
+                      % (rounds, self.RACE_SYNC_TOL_MS), "dim")
+
+            nodes = probe_master(master)
+            if not isinstance(nodes, dict):
+                self.emit("  Master at %s did not answer. Needs master mode.\n"
+                          % master, "bad")
+                return
+            targets = client_targets(nodes)
+            if not targets:
+                self.emit("  No online clients. This test needs at least one.\n", "bad")
+                return
+            self.emit("  %d client(s): %s\n\n"
+                      % (len(targets),
+                         ", ".join("%s(%s)" % (t[2], t[0]) for t in targets)), "dim")
+
+            # Clean slate: a race left running from a previous session would
+            # make round 1 measure a stop, not a start.
+            race_stop(master)
+            self.cancel.wait(1.5)
+
+            boosts = []
+            worst_spread = 0.0
+            failures = []
+            seen_race_ids = []
+
+            for r in range(1, rounds + 1):
+                if self.cancel.is_set():
+                    break
+                self.emit("  -- round %d --\n" % r, "head")
+                st, _ = race_prearm(master)
+                if st != 200:
+                    failures.append("round %d: prearm returned %s" % (r, st))
+                    self.emit("    prearm FAILED (%s)\n" % st, "bad")
+                    break
+
+                # Let the sync burst run.  Cutting this short does not just make
+                # the test unrealistic -- it starves the very measurement the
+                # start instant is computed from.
+                self._await_sync(master, self.RACE_SYNC_SETTLE_S)
+
+                st, _ = race_start(master)
+                if st != 200:
+                    failures.append("round %d: start returned %s" % (r, st))
+                    self.emit("    start FAILED (%s)\n" % st, "bad")
+                    break
+
+                # Past the start margin (max 2.5 s) plus the verify grace, so
+                # acks have landed and any repair has already happened.
+                self.cancel.wait(4.0)
+
+                spread, det = self._measure_start_spread(master, targets)
+                rep = fetch_clock_report(master) or {}
+                boost = rep.get("startBoostUs")
+                if boost is not None:
+                    boosts.append(boost)
+
+                unacked = [n.get("nodeId") for n in rep.get("nodes", []) or []
+                           if n.get("online") and n.get("clockValid")
+                           and not n.get("startAcked")]
+                late = [(n.get("nodeId"), n.get("startLateMs"))
+                        for n in rep.get("nodes", []) or []
+                        if (n.get("startLateMs") or 0) > 0]
+
+                for line, tag in det:
+                    self.emit(line, tag)
+                if spread is not None:
+                    worst_spread = max(worst_spread, spread)
+                    self.emit("    start spread %.1f ms  (margin %s ms, boost %s ms)\n"
+                              % (spread,
+                                 _ms(rep.get("startMarginUs")), _ms(boost)),
+                              "ok" if spread <= self.RACE_SYNC_TOL_MS else "bad")
+                    if spread > self.RACE_SYNC_TOL_MS:
+                        failures.append("round %d: start spread %.1f ms" % (r, spread))
+                else:
+                    failures.append("round %d: could not measure spread" % r)
+                    self.emit("    could not read every node's clock\n", "bad")
+
+                if unacked:
+                    failures.append("round %d: no GO ack from node(s) %s"
+                                    % (r, unacked))
+                    self.emit("    NO GO ACK from node(s) %s -- these fell back to\n"
+                              "    the HTTP repair path\n"
+                              % ", ".join(str(x) for x in unacked), "bad")
+                if late:
+                    self.emit("    started late: %s\n"
+                              % ", ".join("node %s +%s ms" % (a, b) for a, b in late),
+                              "warn")
+
+                ds = fetch_director_state(master)[1] or {}
+                rid = (ds.get("race") or {}).get("raceId")
+                seen_race_ids.append(rid)
+
+                race_stop(master)
+                self.cancel.wait(1.0)
+
+                # After a stop the fleet must HOLD its final time, not zero it.
+                ds = fetch_director_state(master)[1] or {}
+                final = (ds.get("race") or {}).get("elapsedMs")
+                if not final:
+                    failures.append("round %d: master zeroed its clock on stop" % r)
+                    self.emit("    master's clock reset to 0 on stop (should hold "
+                              "the final time)\n", "bad")
+                else:
+                    self.emit("    final time held at %.2f s\n" % (final / 1000.0), "ok")
+                self.cancel.wait(2.0)
+
+            self._race_sync_epoch_check(master, seen_race_ids, failures)
+            self._race_sync_verdict(boosts, worst_spread, failures)
+        except Exception as e:
+            self.emit("  Race sync failed: %s\n" % e, "bad")
+        finally:
+            try:
+                race_stop(self.master_ip.get().strip())
+            except Exception:
+                pass
+
+    def _await_sync(self, master, seconds):
+        """Hold open the pre-arm window and report what the burst achieved."""
+        deadline = time.time() + seconds
+        best = {}
+        while time.time() < deadline and not self.cancel.is_set():
+            rep = fetch_clock_report(master)
+            for n in (rep or {}).get("nodes", []) or []:
+                if n.get("online") and n.get("clockValid"):
+                    d = n.get("delayUs")
+                    if d and d > 0:
+                        nid = n.get("nodeId")
+                        best[nid] = min(best.get(nid, d), d)
+            self.cancel.wait(1.0)
+        if best:
+            self.emit("    synced %d node(s), best delay %.1f-%.1f ms\n"
+                      % (len(best), min(best.values()) / 1000.0,
+                         max(best.values()) / 1000.0), "dim")
+        else:
+            self.emit("    NO node reported a valid clock offset after %.0f s\n"
+                      "    -- every start below will use the degraded HTTP path\n"
+                      % seconds, "warn")
+
+    def _measure_start_spread(self, master, targets):
+        """Largest disagreement between any two race clocks, in ms.
+
+        Each device is asked for its own elapsed, and each answer is corrected
+        back to a common PC-clock instant.  A device that started early reads
+        HIGH once corrected, so the spread across the fleet IS the start spread
+        -- no device has to know about any other for this to work.
+        """
+        ref = time.time() + 0.001
+        readings = []
+        detail = []
+        for ip, label in [(master, "master")] + [(t[1], "node %s" % t[0]) for t in targets]:
+            ms, running, t_mid = fetch_race_clock(ip)
+            if ms is None or not running:
+                detail.append(("    %s: not running (%s)\n" % (label, ms), "bad"))
+                continue
+            corrected = ms - (t_mid - ref) * 1000.0
+            readings.append((label, corrected))
+        if len(readings) < 2:
+            return None, detail
+        lo = min(v for _, v in readings)
+        for label, v in readings:
+            detail.append(("    %-9s %8.0f ms  (%+6.1f ms)\n" % (label, v, v - lo), "dim"))
+        return max(v for _, v in readings) - lo, detail
+
+    def _race_sync_epoch_check(self, master, seen_race_ids, failures):
+        """A start with NO pre-arm must mint a fresh epoch, not reuse the last.
+
+        Reusing it is exactly the "run 2 inherits run 1's laps" failure the
+        epoch system exists to prevent, and it is reachable in the field: a
+        pre-arm POST that fails while the browser countdown proceeds anyway.
+        """
+        self.emit("\n  -- epoch check (start with no pre-arm) --\n", "head")
+        before = (fetch_director_state(master)[1] or {}).get("race", {}).get("raceId")
+        st, _ = race_start(master)
+        if st != 200:
+            self.emit("    start returned %s -- skipped\n" % st, "warn")
+            return
+        self.cancel.wait(3.5)
+        after = (fetch_director_state(master)[1] or {}).get("race", {}).get("raceId")
+        race_stop(master)
+        if before and after and before == after:
+            failures.append("start without pre-arm reused epoch %s" % before)
+            self.emit("    REUSED epoch %s -- a second race would inherit the\n"
+                      "    first's laps\n" % before, "bad")
+        else:
+            self.emit("    epoch %s -> %s (fresh)\n" % (before, after), "ok")
+
+    def _race_sync_verdict(self, boosts, worst_spread, failures):
+        self.emit("\n  What this means\n", "head")
+        if boosts:
+            self.emit("    start boost across rounds: %s\n"
+                      % " -> ".join(_ms(b) + " ms" for b in boosts), "dim")
+            # The ratchet is the failure that hides: each race that "repairs" a
+            # node adds 150 ms and only a perfectly clean race gives 25 ms back.
+            # A pilot with "ignore race director" set made a clean race
+            # impossible, so the margin climbed to its 1 s cap and stayed there.
+            if len(boosts) >= 2 and boosts[-1] > boosts[0]:
+                failures.append("start margin ratcheted: %s -> %s us"
+                                % (boosts[0], boosts[-1]))
+                self.emit("    RATCHETING: the boost grew across rounds, so some\n"
+                          "    node is being counted as a missed start every race.\n"
+                          "    Check for a client with 'ignore race director' set.\n",
+                          "bad")
+            else:
+                self.emit("    boost is flat or decaying -- no phantom repairs.\n", "ok")
+
+        if failures:
+            self.emit("\n  FAILED (%d):\n" % len(failures), "bad")
+            for f in failures:
+                self.emit("    - %s\n" % f, "bad")
+        else:
+            self.emit("\n  PASS: every client acked GO, clocks agreed within\n"
+                      "  %.1f ms (worst %.1f ms), the margin did not ratchet, and\n"
+                      "  each race got its own epoch.\n"
+                      % (self.RACE_SYNC_TOL_MS, worst_spread), "ok")
+
     def _drift_worker(self):
         """Log every node's raw clock offset, then fit drift over the whole run.
 
@@ -700,7 +965,7 @@ class TimingRigGUI:
         try:
             master = self.master_ip.get().strip()
             try:
-                mins = max(1.0, float(self.soak_mins.get()))
+                mins = max(1.0, float(self.drift_mins.get()))
             except (TypeError, ValueError):
                 mins = 60.0
             period_s = 30.0
@@ -729,9 +994,15 @@ class TimingRigGUI:
             os.makedirs(out_dir, exist_ok=True)
             stamp = time.strftime("%Y%m%d-%H%M%S")
             csv_path = os.path.join(out_dir, "%s-clockdrift.csv" % stamp)
-            series = {}      # nodeId -> [(rawAtUs, rawOffsetUs)] -- DEDUPED
+            # (rawAtUs, rawOffsetUs, rawDelayUs, bootId) -- DEDUPED.  delay and
+            # bootId travel WITH each sample rather than in a parallel list:
+            # the analysis filters and segments on them, so they have to stay
+            # aligned to the point they describe.
+            series = {}      # nodeId -> [(at, off, delay, bootId)]
             ppm_hist = {}    # nodeId -> [firmware driftPpm readings]
-            delays = {}      # nodeId -> [rawDelayUs]
+            clamped = set()  # nodeIds whose firmware fit hit the +/-100 ppm rail
+            reboots = {}     # nodeId -> count of bootId changes seen
+            last_boot = {}   # nodeId -> last bootId seen
             last_at = {}     # nodeId -> rawAtUs of the sample already recorded
             dupes = 0
 
@@ -739,7 +1010,8 @@ class TimingRigGUI:
             polls = 0
             with open(csv_path, "w", encoding="utf-8", newline="") as fh:
                 fh.write("wallClock,masterUs,rawAtUs,nodeId,rawOffsetUs,rawDelayUs,"
-                         "offsetUs,delayUs,driftPpm,driftValid,driftSamples,samples\n")
+                         "offsetUs,delayUs,driftPpm,driftValid,driftClamped,"
+                         "driftSamples,samples,bootId\n")
                 while time.time() < deadline and not self.cancel.is_set():
                     rep = fetch_clock_report(master)
                     if isinstance(rep, dict):
@@ -754,13 +1026,30 @@ class TimingRigGUI:
                             at  = n.get("rawAtUs")
                             if nid is None or raw is None:
                                 continue
-                            fh.write("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" % (
+                            boot = n.get("bootId")
+                            fh.write("%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s\n" % (
                                 wall, m_us, at, nid, raw, n.get("rawDelayUs"),
                                 n.get("offsetUs"), n.get("delayUs"),
                                 n.get("driftPpm"), n.get("driftValid"),
-                                n.get("driftSamples"), n.get("samples")))
+                                n.get("driftClamped"),
+                                n.get("driftSamples"), n.get("samples"), boot))
                             if n.get("driftValid"):
                                 ppm_hist.setdefault(nid, []).append(n.get("driftPpm"))
+                            # A clamped fit is the firmware saying "this reading
+                            # ran away", not "this node drifts at 100 ppm".
+                            if n.get("driftClamped"):
+                                clamped.add(nid)
+                            # Reboots are reported live: two clients restarting
+                            # during an idle hour is its own defect, and burying
+                            # it in the summary is how it went unnoticed before.
+                            if boot and last_boot.get(nid) not in (None, boot):
+                                reboots.setdefault(nid, []).append(
+                                    n.get("resetReason") or "UNKNOWN")
+                                self.emit("    node %s REBOOTED: %s  (bootId %s -> %s)\n"
+                                          % (nid, n.get("resetReason") or "?",
+                                             last_boot[nid], boot), "warn")
+                            if boot:
+                                last_boot[nid] = boot
 
                             # DEDUPE, and use the probe's OWN timestamp.
                             #
@@ -777,10 +1066,8 @@ class TimingRigGUI:
                                     dupes += 1
                                 continue
                             last_at[nid] = at
-                            series.setdefault(nid, []).append((at, raw))
-                            rd = n.get("rawDelayUs")
-                            if rd:
-                                delays.setdefault(nid, []).append(rd)
+                            series.setdefault(nid, []).append(
+                                (at, raw, n.get("rawDelayUs"), boot))
                         fh.flush()
                         if polls % 10 == 0:
                             left = max(0, deadline - time.time())
@@ -794,12 +1081,20 @@ class TimingRigGUI:
             self.emit("\n  Wrote %s\n" % csv_path, "head")
             self.emit("  %d polls -> %d independent samples (%d repeat reads "
                       "discarded)\n" % (polls, got, dupes), "dim")
-            self._report_drift(series, ppm_hist, delays)
+            self._report_drift(series, ppm_hist, clamped, reboots)
         except Exception as e:
             self.emit("  Drift log failed: %s\n" % e, "bad")
 
-    def _report_drift(self, series, ppm_hist, delays):
-        """Independent fit + the repeatability test, side by side."""
+    def _report_drift(self, series, ppm_hist, clamped, reboots):
+        """Independent fit + the repeatability test, side by side.
+
+        Only nodes whose series is CLEAN reach `fits`.  A node that restarted
+        mid-run is excluded outright rather than fitted: its esp_timer drops by
+        its whole prior uptime, and a line through that step reports the uptime
+        as a rate.  That is not a conservative reading, it is a wrong one, and
+        it previously dominated the worst-case figure by five orders of
+        magnitude.
+        """
         self.emit("\n  What this means\n", "head")
         if not series:
             self.emit("  - No samples collected. Are clients online?\n", "bad")
@@ -807,55 +1102,144 @@ class TimingRigGUI:
 
         MATERIAL_PPM = 10.0     # below this, correcting moves a lap < 3 ms / 5 min
         fits = {}
+        excluded = []
         for nid in sorted(series):
-            fit = fit_drift_ppm(series[nid])
-            med_delay = statistics.median(delays.get(nid, [0])) if delays.get(nid) else 0
-            if fit is None:
-                self.emit("    node %-2s  not enough spread yet "
-                          "(%d samples)\n" % (nid, len(series[nid])), "warn")
-                continue
-            ppm, se, n = fit
-            fits[nid] = (ppm, se)
+            pts = series[nid]
+            res = analyse_drift_series(pts)
             fw = ppm_hist.get(nid) or []
             fw_txt = ""
             if fw:
                 fw_txt = "   firmware %+.0f..%+.0f ppm" % (min(fw), max(fw))
-            self.emit("    node %-2s  %+7.2f +/- %.2f ppm  (n=%d, delay med %.1f ms)%s\n"
-                      % (nid, ppm, se, n, med_delay / 1000.0, fw_txt), "ok")
+                if nid in clamped:
+                    fw_txt += " (CLAMPED - not a measurement)"
+
+            delays = [p[2] for p in pts if p[2]]
+            med_delay = statistics.median(delays) if delays else 0
+
+            if res["status"] == "discontinuity":
+                excluded.append(nid)
+                why = res["breaks"][0] if res["breaks"] else "series is not continuous"
+                self.emit("    node %-2s  EXCLUDED - %s\n" % (nid, why), "bad")
+                self.emit("              a fit across this would report the node's\n"
+                          "              uptime as a drift rate, not its crystal.\n", "dim")
+                continue
+            if res["status"] == "implausible":
+                excluded.append(nid)
+                self.emit("    node %-2s  EXCLUDED - fit came out %+.0f ppm, beyond\n"
+                          "              anything quartz does. Bad probes or an\n"
+                          "              undetected restart.\n" % (nid, res["ppm"]), "bad")
+                continue
+            if res["status"] != "ok":
+                self.emit("    node %-2s  not enough spread yet "
+                          "(%d samples, %.0f min)\n"
+                          % (nid, res["total_samples"], res["span_s"] / 60.0), "warn")
+                continue
+
+            ppm, se, n = res["ppm"], res["stderr"], res["n"]
+            fits[nid] = (ppm, se)
+            note = ""
+            if res["segments"] > 1:
+                note = "  [longest of %d segments]" % res["segments"]
+            self.emit("    node %-2s  %+7.2f +/- %.2f ppm  (n=%d, delay med %.1f ms)%s%s\n"
+                      % (nid, ppm, se, n, med_delay / 1000.0, fw_txt, note), "ok")
+
+        if reboots:
+            self.emit("\n  - %d node(s) RESTARTED during this run:\n" % len(reboots), "bad")
+            for nid, why in sorted(reboots.items()):
+                self.emit("      node %s x%d  %s\n"
+                          % (nid, len(why), ", ".join(why)), "bad")
+            # SW_RESTART on an idle fleet is the heap guard firing; PANIC and
+            # TASK_WDT are crashes; BROWNOUT is the power rail, not the code.
+            # Each points somewhere different, which is the whole reason the
+            # reason is now carried on the heartbeat.
+            self.emit("    Nothing was racing, so this is its own defect and worth\n"
+                      "    chasing independently of drift. SW_RESTART = the heap\n"
+                      "    guard; PANIC/TASK_WDT = a crash; BROWNOUT = power.\n", "dim")
 
         if not fits:
-            self.emit("  - Run longer: a fit needs >= 8 samples spanning >= 5 min.\n", "warn")
+            self.emit("  - No clean series to fit. Need >= 8 samples spanning\n"
+                      "    >= 5 min with no restart in the middle.\n", "warn")
             return
+        if excluded:
+            self.emit("  - Verdict below covers only the %d clean node(s); %s\n"
+                      "    contributed nothing.\n"
+                      % (len(fits), ", ".join("node %s" % x for x in excluded)), "dim")
 
-        # 1. Is any node's drift big enough to be worth correcting at all?
-        worst = max(abs(p) for p, _ in fits.values())
-        # 2. Is any node's drift resolved -- i.e. bigger than its own error bar?
-        resolved = [nid for nid, (p, se) in fits.items()
-                    if se == se and se > 0 and abs(p) > 2 * se]
+        # ── Separate the COMMON MODE from the per-unit signal ────────────────
+        #
+        # Every ppm here is measured against the MASTER's crystal, so the
+        # master's own rate is present, identically, in all of them.  A run
+        # where all six nodes read -2.5..-6.1 ppm is not six drifting clients;
+        # it is one fast master seen six times.  Reported raw, that common term
+        # exceeds the error bars and gets announced as "RESOLVED: nodes 3, 6, 7
+        # have real crystal drift" -- attributing the master's offset to three
+        # arbitrary clients.
+        #
+        # It also points the MATERIALITY question at the wrong quantity.  A rate
+        # every client shares shifts every lap identically and cancels out of
+        # cross-pilot comparison; what can actually mis-order a race is the
+        # SPREAD between clients.  So judge on residuals about the fleet median
+        # (median, not mean: one genuinely bad crystal must not drag the
+        # reference it is being judged against).
+        common = None
+        if len(fits) >= 3:
+            common = statistics.median([p for p, _ in fits.values()])
+            resid = {nid: p - common for nid, (p, _) in fits.items()}
+            self.emit("\n  - COMMON MODE: every node reads %+.2f ppm against the\n"
+                      "    master. That is the MASTER's crystal, not theirs --\n"
+                      "    one fast master is a far likelier explanation than %d\n"
+                      "    independent crystals all off by the same amount.\n"
+                      "    Removing it leaves each node's own rate:\n"
+                      % (common, len(fits)), "head")
+            for nid in sorted(resid):
+                se = fits[nid][1]
+                sig = (abs(resid[nid]) / se) if (se == se and se > 0) else 0.0
+                self.emit("        node %-2s  %+6.2f ppm  (%.2f sigma)\n"
+                          % (nid, resid[nid], sig), "dim")
+        else:
+            resid = {nid: p for nid, (p, _) in fits.items()}
+            self.emit("\n  - Only %d node(s): too few to separate the master's own\n"
+                      "    rate from theirs, so the figures below still contain it.\n"
+                      % len(fits), "warn")
+
+        # Resolution and materiality are both judged on the RESIDUAL now.
+        worst = max(abs(v) for v in resid.values())
+        spread = max(resid.values()) - min(resid.values()) if len(resid) > 1 else 0.0
+        resolved = [nid for nid, v in resid.items()
+                    if fits[nid][1] == fits[nid][1] and fits[nid][1] > 0
+                    and abs(v) > 2 * fits[nid][1]]
 
         self.emit("\n", "dim")
         if resolved:
-            self.emit("  - RESOLVED: node(s) %s show drift larger than twice their\n"
-                      "    own error bar, so this is a real per-unit crystal rate,\n"
-                      "    not noise.\n"
+            self.emit("  - RESOLVED: node(s) %s differ from the fleet by more than\n"
+                      "    twice their own error bar, so that IS a per-unit crystal\n"
+                      "    rate rather than noise.\n"
                       % ", ".join(str(x) for x in resolved), "ok")
         else:
-            self.emit("  - NOT RESOLVED: every node's drift is within 2x its own\n"
-                      "    error bar, i.e. still indistinguishable from zero.\n", "warn")
+            self.emit("  - NOT RESOLVED: once the master's common rate is removed,\n"
+                      "    every node sits inside its own error bar. The fleet's\n"
+                      "    crystals are indistinguishable from each other.\n", "warn")
 
+        # Inter-pilot spread is the number that can actually mis-order a race.
         if worst >= MATERIAL_PPM:
-            self.emit("  - MATERIAL: worst node is %.1f ppm, which moves a lap by\n"
-                      "    %.1f ms across a 5-minute race -- above the offset error,\n"
-                      "    so applying the correction is worth it.\n"
+            self.emit("  - MATERIAL: worst node is %.1f ppm from the fleet, moving\n"
+                      "    its laps %.1f ms against its rivals across a 5-minute\n"
+                      "    race -- above the offset error, so correcting is worth it.\n"
                       "    => gate driftValid on residual, then set CLOCK_APPLY_DRIFT.\n"
                       % (worst, worst * 0.3), "ok")
         else:
-            self.emit("  - NOT MATERIAL: worst node is %.1f ppm = %.1f ms across a\n"
-                      "    5-minute race, below the clock-offset error already in\n"
-                      "    the system. Correcting it would add noise, not accuracy.\n"
+            self.emit("  - NOT MATERIAL: the whole fleet spans %.1f ppm = %.1f ms of\n"
+                      "    inter-pilot skew across a 5-minute race, below the\n"
+                      "    clock-offset error already in the system. Correcting it\n"
+                      "    would add noise, not accuracy.\n"
                       "    => leave CLOCK_APPLY_DRIFT off; keep driftPpm as a\n"
                       "       hardware canary only.\n"
-                      % (worst, worst * 0.3), "warn")
+                      % (spread, spread * 0.3), "warn")
+        if common is not None:
+            self.emit("    (master vs clients carries the full %+.1f ppm = %.1f ms,\n"
+                      "     and only within one race -- the anchor is re-taken at\n"
+                      "     every start, so nothing accumulates across a session.)\n"
+                      % (common, abs(common) * 0.3), "dim")
 
         self.emit("\n  This run was at ONE temperature. A null result here does not\n"
                   "  license disabling drift correction for good -- crystals are\n"
@@ -1283,12 +1667,26 @@ class TimingRigGUI:
                                            command=self.run_fanout))
         self.btn_drift = f.add(ttk.Button(f, text="7. Clock Drift Log",
                                           command=self.run_drift))
+        self.btn_sync = f.add(ttk.Button(f, text="8. Race Sync",
+                                         command=self.run_race_sync))
+
+        f.add(ttk.Label(f, text="sync rounds:"), gap_before=10)
+        self.sync_rounds = tk.StringVar(value="3")
+        f.add(ttk.Entry(f, textvariable=self.sync_rounds, width=4))
 
         # gap_before marks a group boundary, so when the row wraps it prefers
         # to break between groups rather than mid-control.
-        f.add(ttk.Label(f, text="mins:"), gap_before=10)
+        f.add(ttk.Label(f, text="soak mins:"), gap_before=10)
         self.soak_mins = tk.StringVar(value="5")
         f.add(ttk.Entry(f, textvariable=self.soak_mins, width=5))
+
+        # Drift needs its OWN duration.  It used to share the soak's box, which
+        # defaults to 5 -- and a 5-minute drift run yields ~2 samples per node,
+        # below the 8-sample floor, so the tool simply refused to answer.  The
+        # two runs want opposite defaults: a soak is short, a drift fit is long.
+        f.add(ttk.Label(f, text="drift mins:"), gap_before=10)
+        self.drift_mins = tk.StringVar(value="60")
+        f.add(ttk.Entry(f, textvariable=self.drift_mins, width=5))
 
         self.btn_stop = f.add(ttk.Button(f, text="Stop", command=self.stop_run,
                                          state="disabled"), gap_before=10)
@@ -1733,7 +2131,8 @@ class TimingRigGUI:
     def _busy(self, busy):
         state = "disabled" if busy else "normal"
         for b in (self.btn_level, self.btn_thresh, self.btn_interval,
-                  self.btn_sweep, self.btn_soak, self.btn_fanout):
+                  self.btn_sweep, self.btn_soak, self.btn_fanout,
+                  self.btn_drift, self.btn_sync):
             b.config(state=state)
         self.btn_stop.config(state="normal" if busy else "disabled")
         self.status.config(text="Running…" if busy else "Ready")

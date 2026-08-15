@@ -53,6 +53,13 @@ void MultiNodeManager::init(Config* config, Led* led, Webserver* webserver) {
     // are otherwise identical (count 0, crc 0) and one of them must not
     // trigger a resync (§5).
     do { _bootId = esp_random(); } while (_bootId == 0);
+    // WHY this boot happened.  The ROM/IDF keeps it across a soft reset, but
+    // only until the next one, so it has to be read here and carried forward.
+    // Without it a restart is visible (bootId changed) but never explicable,
+    // which is precisely the state two idle-hour reboots left us in.
+    _resetReason = (uint8_t)esp_reset_reason();
+    DEBUG("[MULTINODE] Boot id %u, reset reason: %s\n",
+          _bootId, resetReasonName(_resetReason));
     _ackedSeq            = 0;
     _hasAckedSeq         = false;
     _masterOldest        = 0;
@@ -280,6 +287,9 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             bool force = _recruitForce;
             _runRecruitJob(force);
         }
+        // GO acks arrive on the LwIP task, which must not touch _nodes.  This
+        // is where they land in NodeInfo — on the task that owns the vector.
+        _foldStartAcks();
         // Did everyone actually start?  (§8 — the GO datagram has no ack.)
         if (_startVerifyAtMs != 0 &&
             (int32_t)(currentTimeMs - _startVerifyAtMs) >= 0) {
@@ -497,6 +507,7 @@ void MultiNodeManager::_sendHeartbeat() {
     // timer, and the repair channel exists whether or not anything is wrong.
     doc["raceId"]      = _raceId;
     doc["bootId"]      = _bootId;
+    doc["rst"]         = _resetReason;  // why we last restarted — see init()
     // A real BOOLEAN, not 1.  The master reads this with ArduinoJson, whose
     // operator| and is<bool>() are strict about JSON types: an integer 1 is
     // not a boolean, so `obj["lapSync"] | false` silently yielded false and
@@ -1423,11 +1434,20 @@ void MultiNodeManager::clearAllLaps() {
 
 // ── Lap Sync: epochs, anchors and the peer delta feed ───────────────────
 
+// Mint and distribute an epoch id.  NON-destructive: called at pre-arm, where a
+// cancelled countdown must leave the previous race's data intact.
 uint32_t MultiNodeManager::beginRaceEpoch() {
     // A fresh, non-zero id per race.  esp_random() is seeded from hardware, so
     // two masters powering up together do not collide the way millis() would.
     do { _masterRaceId = esp_random(); } while (_masterRaceId == 0);
+    _epochArmed = true;
+    for (auto& n : _nodes) n.raceId = _masterRaceId;
+    DEBUG("[LAPSYNC] Race epoch %u minted\n", _masterRaceId);
+    return _masterRaceId;
+}
 
+// The destructive half, run when a race actually starts.
+void MultiNodeManager::resetEpochLapState() {
     for (auto& n : _nodes) {
         n.raceId         = _masterRaceId;
         n.laps.reset();
@@ -1450,9 +1470,26 @@ uint32_t MultiNodeManager::beginRaceEpoch() {
         n.startAcked     = false;
         n.startLateMs    = 0;
     }
+    _startAckMask = 0;
     _lapDeltas.clear();
-    DEBUG("[LAPSYNC] Race epoch %u begun\n", _masterRaceId);
-    return _masterRaceId;
+    DEBUG("[LAPSYNC] Race epoch %u lap state reset\n", _masterRaceId);
+}
+
+// Fold GO acknowledgements collected by the UDP callback into NodeInfo.
+// parallelTask only — this is the task that owns _nodes.
+void MultiNodeManager::_foldStartAcks() {
+    if (_startAckMask == 0) return;
+    // Read-and-clear must be ONE operation.  As two, an ack arriving on the
+    // LwIP task between the read and the write is discarded, and the node then
+    // gets a redundant GO it did not need.  Harmless in effect, but the whole
+    // reason this mask exists is that the callback and parallelTask do not
+    // share a lock, so the handoff has to be correct on its own.
+    const uint8_t mask = __atomic_exchange_n(&_startAckMask, (uint8_t)0,
+                                             __ATOMIC_RELAXED);
+    for (auto& n : _nodes) {
+        if (n.nodeId == 0 || n.nodeId > MULTINODE_MAX_NODES) continue;
+        if (mask & (uint8_t)(1u << (n.nodeId - 1))) n.startAcked = true;
+    }
 }
 
 // ── Clock sync (§8) ─────────────────────────────────────────────────────
@@ -1522,6 +1559,12 @@ void MultiNodeManager::_initClockUdp() {
             // an unarmed node (raceId 0) accepts nothing at all.
             if (_raceId == 0 || msg.raceId != _raceId) return;
             if (!_timer) return;
+            // Honour "ignore race director" EXPLICITLY.  Until now this path
+            // was only saved by accident: /timer/masterArm returns SKIPPED
+            // before adopting the epoch, so the raceId check above happened to
+            // reject the GO.  Any reordering that adopted the epoch first would
+            // have force-started pilots who opted out.
+            if (_conf && _conf->getMnSkipMasterStart()) return;
             // Repeats are expected: three copies of the same GO arrive ~3 ms
             // apart.  Re-arming the same instant is idempotent, and once the
             // race is running a later copy must not restart it.
@@ -1539,12 +1582,24 @@ void MultiNodeManager::_initClockUdp() {
         }
 
         if (magic == CLOCK_START_ACK_MAGIC && len >= sizeof(ClockStartAck)) {
-            // Master role: mark this node as having received its GO.
+            // Master role: record the ack as a BIT, never by walking _nodes.
+            //
+            // This callback runs in the LwIP task.  _nodes carries no mutex —
+            // its safety rests on capacity reserved up front (address
+            // stability) plus erasure happening only on parallelTask, because
+            // that is where every reader lives.  Iterating it from here made
+            // this a reader on a second task, so a _reapRemovedNodes() erase
+            // that preempted mid-walk could shift elements under us.  Exactly
+            // the class of use-after-free the reserve+deferred-reap design was
+            // introduced to eliminate.
+            //
+            // A bitmask needs no iteration and no allocation, and parallelTask
+            // folds it into NodeInfo on its next tick.
             ClockStartAck ack;
             memcpy(&ack, packet.data(), sizeof(ack));
             if (ack.raceId != _masterRaceId) return;
-            for (auto& n : _nodes) {
-                if (n.nodeId == ack.nodeId) { n.startAcked = true; break; }
+            if (ack.nodeId > 0 && ack.nodeId <= MULTINODE_MAX_NODES) {
+                _startAckMask |= (uint8_t)(1u << (ack.nodeId - 1));
             }
             return;
         }
@@ -1628,10 +1683,13 @@ void MultiNodeManager::_recordClockSample(NodeInfo& n, int64_t offsetUs, int64_t
     // adds.  Judged against this node's own best so a good link is not held to
     // a bad one's standard, with an absolute ceiling so a bad link cannot
     // quietly raise its own bar.
+    // The multiply is done in 64 bits: clockDelayUs is a uint32 and 3x it wraps
+    // above ~1.43e9, which would turn a hopeless link into a tiny admit bar.
+    // Unreachable at real delays, but the cost of being wrong is silent.
     const uint32_t admitUs = (n.clockDelayUs == 0xFFFFFFFF)
                            ? CLOCK_DRIFT_MAX_DELAY_US
-                           : min(n.clockDelayUs * CLOCK_DRIFT_DELAY_MULT,
-                                 CLOCK_DRIFT_MAX_DELAY_US);
+                           : (uint32_t)min((uint64_t)n.clockDelayUs * CLOCK_DRIFT_DELAY_MULT,
+                                           (uint64_t)CLOCK_DRIFT_MAX_DELAY_US);
     if ((uint32_t)delayUs > admitUs) return;
 
     // The drift window is fed at a RATE LIMIT, not on every sample.
@@ -1688,11 +1746,18 @@ void MultiNodeManager::_fitClockDrift(NodeInfo& n) {
     // Clamp rather than reject: a genuine unit in the sun sits well inside
     // ±100 ppm, so anything beyond it is a bad probe, and letting a bad probe
     // set the rate would corrupt every remaining lap of the race.
-    if (ppm >  CLOCK_MAX_DRIFT_PPM) ppm =  CLOCK_MAX_DRIFT_PPM;
-    if (ppm < -CLOCK_MAX_DRIFT_PPM) ppm = -CLOCK_MAX_DRIFT_PPM;
+    //
+    // Record the fact of the clamp.  A pinned value is indistinguishable from a
+    // measured one downstream, so a node whose fit ran away reads in the report
+    // as "drifts at 100 ppm" when it actually means "this reading is garbage" —
+    // exactly the misreading that made a rebooted node look like a bad crystal.
+    bool clamped = false;
+    if (ppm >  CLOCK_MAX_DRIFT_PPM) { ppm =  CLOCK_MAX_DRIFT_PPM; clamped = true; }
+    if (ppm < -CLOCK_MAX_DRIFT_PPM) { ppm = -CLOCK_MAX_DRIFT_PPM; clamped = true; }
 
-    n.driftPpm   = ppm;
-    n.driftValid = true;
+    n.driftPpm     = ppm;
+    n.driftClamped = clamped;
+    n.driftValid   = true;
 }
 
 // Master-time µs of a lap that this node timed at raceElapsedMs on its own
@@ -2080,7 +2145,19 @@ String MultiNodeManager::buildClockReport() const {
         out += ",\"samples\":";     out += (int)n.clockSamples;
         out += ",\"driftPpm\":";    out += (int)n.driftPpm;
         out += ",\"driftValid\":";  out += n.driftValid ? "true" : "false";
+        // A clamped fit is not a measurement — see _fitClockDrift().
+        out += ",\"driftClamped\":";out += n.driftClamped ? "true" : "false";
         out += ",\"driftSamples\":";out += (int)n.driftCount;
+        // A changed bootId means this node restarted, which drops its
+        // esp_timer clock by its whole prior uptime.  An external logger MUST
+        // segment its series on this: fitting a slope through a reboot reports
+        // the uptime as a drift rate, which is how a healthy node once read
+        // -790,536 ppm.
+        out += ",\"bootId\":";      out += (uint32_t)n.bootId;
+        // ... and WHY it last restarted, so a reboot in the log is explicable
+        // rather than merely visible.
+        out += ",\"resetReason\":\""; out += resetReasonName(n.resetReason);
+        out += '"';
         out += ",\"anchored\":";    out += n.anchored ? "true" : "false";
         out += ",\"anchorUs\":";    out += (long long)n.anchorUs;
         out += ",\"startAcked\":";  out += n.startAcked ? "true" : "false";
@@ -2109,9 +2186,21 @@ void MultiNodeManager::_broadcastRaceStart() {
 
     // The epoch was minted at PRE-ARM and the clients adopted it then (§5, §8),
     // which is what lets the GO datagram be authenticated without a round trip.
-    // A start that somehow arrives without a pre-arm still gets a valid epoch
-    // rather than racing under 0.
-    const uint32_t raceId = (_masterRaceId != 0) ? _masterRaceId : beginRaceEpoch();
+    //
+    // _epochArmed distinguishes "minted for THIS race and not yet used" from
+    // "left over from the last one".  Testing _masterRaceId != 0 instead meant
+    // a start with no pre-arm silently re-used the previous race's id, so node
+    // lap state was never reset and run 2 inherited run 1's laps.
+    if (!_epochArmed) {
+        DEBUG("[LAPSYNC] Race start with no pre-arm — minting a fresh epoch\n");
+        beginRaceEpoch();
+    }
+    const uint32_t raceId = _masterRaceId;
+    _epochArmed = false;          // this epoch is now spent
+
+    // The destructive half of the epoch, deferred from pre-arm to here so a
+    // cancelled countdown cannot destroy the previous race's laps.
+    resetEpochLapState();
 
     // ONE instant, in master time, that the whole fleet will start at (§8).
     // Everything below converts this single number into each client's clock.
@@ -2133,7 +2222,15 @@ void MultiNodeManager::_broadcastRaceStart() {
     // every client it just told to wait.
     if (_timer) _timer->scheduleStart(targetMasterUs);
 
-    uint8_t missed = 0;   // clients whose target had already passed on arrival
+    // GO repeats are INTERLEAVED, not stacked per node (§8).  Sending a node
+    // its three copies back to back meant delayMicroseconds() between each —
+    // a busy-wait on parallelTask, and ~42 ms of it across a full fleet, all of
+    // which lands between the first node's GO and the last one's.  Instead each
+    // node gets one copy in a tight first pass, and the redundant copies go out
+    // as whole extra passes afterwards, spaced with a yield instead of a spin.
+    IPAddress     goDst[MULTINODE_MAX_NODES];
+    ClockStartMsg goMsg[MULTINODE_MAX_NODES];
+    uint8_t       goCount = 0;
 
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
@@ -2141,6 +2238,14 @@ void MultiNodeManager::_broadcastRaceStart() {
         bool excluded = false;
         for (uint8_t id : _excludeNodes) { if (id == n.nodeId) { excluded = true; break; } }
         n.excludedFromCurrentRace = excluded;
+        // A pilot ignoring the race director is not part of this race at all:
+        // no GO, no anchor, and nothing for the repair pass to "fix" later.
+        if (n.skipEnabled) {
+            n.anchored = false;
+            DEBUG("[MULTINODE] Race start → node %c: SKIPPED (ignores director)\n",
+                  slotLetter(n.nodeId));
+            continue;
+        }
         if (excluded) {
             // No start ack means no anchor, so this node is unanchored for the
             // whole race: stored and displayed, but never placed on the
@@ -2166,10 +2271,12 @@ void MultiNodeManager::_broadcastRaceStart() {
                 msg.magic     = CLOCK_START_MAGIC;
                 msg.raceId    = raceId;
                 msg.startAtUs = targetMasterUs + n.clockOffsetUs;
-                for (uint8_t r = 0; r < CLOCK_START_REPEATS; r++) {
-                    _clockUdp.writeTo((const uint8_t*)&msg, sizeof(msg),
-                                      dst, CLOCK_PROBE_UDP_PORT);
-                    if (r + 1 < CLOCK_START_REPEATS) delayMicroseconds(CLOCK_START_REPEAT_GAP_US);
+                _clockUdp.writeTo((const uint8_t*)&msg, sizeof(msg),
+                                  dst, CLOCK_PROBE_UDP_PORT);
+                if (goCount < MULTINODE_MAX_NODES) {
+                    goDst[goCount] = dst;
+                    goMsg[goCount] = msg;
+                    goCount++;
                 }
                 // Exact by construction: we COMMANDED this node to start at
                 // targetMasterUs in our own time, so that is its anchor.  No
@@ -2188,8 +2295,6 @@ void MultiNodeManager::_broadcastRaceStart() {
         // the original HTTP start and the accuracy that came with it.
         HTTPClient http;
         String url = "http://" + n.staIP + "/timer/masterStart?raceId=" + String(raceId);
-        const bool scheduled = false;
-        int64_t clientStartUs = 0;
         if (http.begin(url)) {
             http.setTimeout(500);
             http.setConnectTimeout(500);
@@ -2212,22 +2317,13 @@ void MultiNodeManager::_broadcastRaceStart() {
                     const int64_t reportedUs =
                         strtoll(reply.c_str() + ip + 14, nullptr, 10);
                     anchored = recordAnchorFromReport(n.nodeId, reportedUs);
-
-                    // Did the client honour the schedule?  A mismatch means it
-                    // fell back to starting on arrival — the target had already
-                    // passed, i.e. RACE_START_MARGIN_US was too small for this
-                    // fanout.  Worth shouting about: it silently reintroduces
-                    // exactly the start spread this mechanism removes.
-                    if (scheduled) {
-                        const int64_t deltaUs = reportedUs - clientStartUs;
-                        if (reply.indexOf("\"scheduled\":true") < 0) {
-                            missed++;
-                            DEBUG("[CLOCK] Node %c did NOT honour the schedule "
-                                  "(off by %+lld us) — margin too small\n",
-                                  slotLetter(n.nodeId), (long long)deltaUs);
-                        }
-                    }
                 }
+                // NOTE: this branch is the no-clock-offset fallback, so it
+                // never sends a startAtUs and there is no schedule for the
+                // client to honour or miss.  A miss-detection block used to sit
+                // here guarded by a `const bool scheduled = false`, i.e. it
+                // could never run — removed rather than left looking live.
+                // Missed starts are detected by _verifyRaceStarts() instead.
                 // Degraded path: a node that registered during the countdown
                 // has no offset yet, and an older client sends no raceStartUs
                 // at all.  Both still race — they just carry the old estimate's
@@ -2243,6 +2339,18 @@ void MultiNodeManager::_broadcastRaceStart() {
     }
     _excludeNodes.clear();  // consumed — reset for next race
 
+    // ── Redundant GO passes ─────────────────────────────────────────────
+    // Every node already holds one copy.  These are the spares that stand in
+    // for an acknowledgement UDP does not give us.  A duplicate is harmless:
+    // the client ignores a GO once it is running.
+    for (uint8_t r = 1; r < CLOCK_START_REPEATS; r++) {
+        vTaskDelay(1);   // yield, not spin — the gap only has to exceed a burst
+        for (uint8_t i = 0; i < goCount; i++) {
+            _clockUdp.writeTo((const uint8_t*)&goMsg[i], sizeof(ClockStartMsg),
+                              goDst[i], CLOCK_PROBE_UDP_PORT);
+        }
+    }
+
     // ── Fast repair: who did NOT acknowledge? ───────────────────────────
     // Acks arrive asynchronously on the UDP callback, so a short wait here
     // costs one delay rather than a round trip per node.  Anyone still silent
@@ -2250,8 +2358,10 @@ void MultiNodeManager::_broadcastRaceStart() {
     // three seconds later from a heartbeat, by which time they have missed
     // gates rather than milliseconds.
     vTaskDelay(pdMS_TO_TICKS(START_ACK_WAIT_MS));
+    _foldStartAcks();   // acks land in a bitmask; this is where they become flags
     for (auto& n : _nodes) {
         if (n.pendingRemoval || !n.online || n.staIP.isEmpty()) continue;
+        if (n.skipEnabled || n.independent) continue;   // never sent a GO
         if (n.excludedFromCurrentRace || !n.clockValid || n.startAcked) continue;
         IPAddress dst;
         if (!dst.fromString(n.staIP) || !_clockUdpReady) continue;
@@ -2276,17 +2386,11 @@ void MultiNodeManager::_broadcastRaceStart() {
     // anyone who should be racing and is not gets repaired.
     _startVerifyAtMs = millis() + (uint32_t)(marginUs / 1000) + START_VERIFY_GRACE_MS;
 
-    if (missed > 0) {
-        // Someone got a target that had already passed.  Buy headroom now —
-        // a start that is slightly late is invisible, a start that is missed
-        // puts that pilot back on the old per-node spread.
-        _startBoostUs += START_BOOST_STEP_US;
-        if (_startBoostUs > START_BOOST_MAX_US) _startBoostUs = START_BOOST_MAX_US;
-        DEBUG("[CLOCK] %u node(s) missed the start target — boost now %lld ms\n",
-              missed, (long long)(_startBoostUs / 1000));
-    } else if (_startBoostUs > 0) {
-        // Clean race.  Give a little back so a one-off bad race does not
-        // permanently tax every race after it.
+    // Decay the healing boost on the way out.  Growth is applied by
+    // _verifyRaceStarts(), which is the only place that can actually observe a
+    // missed start now that GO is a datagram — nothing here can tell.  Giving
+    // a little back each race stops one bad race taxing every race after it.
+    if (_startBoostUs > 0) {
         _startBoostUs -= START_BOOST_DECAY_US;
         if (_startBoostUs < 0) _startBoostUs = 0;
     }
@@ -2304,6 +2408,14 @@ void MultiNodeManager::_verifyRaceStarts() {
     for (auto& n : _nodes) {
         if (n.pendingRemoval || !n.online || n.staIP.isEmpty()) continue;
         if (n.excludedFromCurrentRace) continue;
+        // A pilot who has "ignore race director" set is SUPPOSED to be idle.
+        // Without this they were treated as having missed their GO on every
+        // single race: an HTTP start they answer with SKIPPED, a counted
+        // "repair", and +150 ms of boost.  The 25 ms decay only applies to a
+        // clean race, which is impossible while such a pilot is connected, so
+        // the start margin ratcheted to its 1 s cap and stayed there — quietly
+        // undoing the whole point of distributing GO as a datagram.
+        if (n.skipEnabled || n.independent) continue;
         if (n.running) continue;                 // heartbeat says it is racing
 
         // It should be racing and it is not.  Start it over HTTP, carrying the
@@ -2321,14 +2433,27 @@ void MultiNodeManager::_verifyRaceStarts() {
         if (n.clockValid && _lastStartTargetUs != 0) {
             url += "&startAtUs=" + String((long long)(_lastStartTargetUs + n.clockOffsetUs));
         }
+        bool wasAlreadyRunning = false;
         if (http.begin(url)) {
             http.setTimeout(500);
             http.setConnectTimeout(500);
             const int code = http.POST("");
+            // The client's idempotency guard answers ALREADY_RUNNING when it is
+            // racing under this very epoch — i.e. it heard GO and our `running`
+            // flag was simply a stale heartbeat.  Nothing was missed and nothing
+            // was repaired, so this must not feed the healing loop; counting it
+            // would inflate the margin for a delivery that worked.
+            if (code == 200) {
+                const String body = http.getString();
+                wasAlreadyRunning = (body.indexOf("ALREADY_RUNNING") >= 0);
+            }
             http.end();
-            DEBUG("[CLOCK] Node %c missed GO — repaired over HTTP (%d)\n",
-                  slotLetter(n.nodeId), code);
+            DEBUG("[CLOCK] Node %c %s over HTTP (%d)\n", slotLetter(n.nodeId),
+                  wasAlreadyRunning ? "was already racing — stale heartbeat"
+                                    : "missed GO — repaired",
+                  code);
         }
+        if (wasAlreadyRunning) { vTaskDelay(1); continue; }
         // The anchor stays valid: the client backdates to the same target we
         // anchored against, so its laps remain comparable.  Only a node with
         // no clock offset (no target to backdate to) loses its place.
@@ -2390,6 +2515,39 @@ void MultiNodeManager::setNodeStartLate(uint8_t nodeId, uint32_t lateMs) {
                   slotLetter(nodeId), lateMs);
         }
         n.startLateMs = lateMs;
+        return;
+    }
+}
+
+// Names, not numbers.  A director reading "TASK_WDT" knows something starved
+// the watchdog; a director reading "9" knows nothing.
+const char* MultiNodeManager::resetReasonName(uint8_t reason) {
+    switch ((esp_reset_reason_t)reason) {
+        case ESP_RST_POWERON:   return "POWERON";     // normal cold boot
+        case ESP_RST_EXT:       return "EXT_RESET";   // the reset button
+        case ESP_RST_SW:        return "SW_RESTART";  // ESP.restart() — incl. the heap guard
+        case ESP_RST_PANIC:     return "PANIC";       // crash — check the backtrace
+        case ESP_RST_INT_WDT:   return "INT_WDT";     // interrupt watchdog
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";    // a task starved the WDT
+        case ESP_RST_WDT:       return "OTHER_WDT";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";    // power rail sagged
+        case ESP_RST_SDIO:      return "SDIO";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        default:                return "UNKNOWN";
+    }
+}
+
+void MultiNodeManager::setNodeResetReason(uint8_t nodeId, uint8_t reason) {
+    for (auto& n : _nodes) {
+        if (n.nodeId != nodeId) continue;
+        // Only shout when it CHANGES, and never for a plain power-on: a fleet
+        // being switched on would otherwise fill the log with non-events.
+        if (n.resetReason != reason && reason != 0 &&
+            reason != (uint8_t)ESP_RST_POWERON) {
+            DEBUG("[MULTINODE] Node %c last restart: %s\n",
+                  slotLetter(nodeId), resetReasonName(reason));
+        }
+        n.resetReason = reason;
         return;
     }
 }
@@ -2629,6 +2787,21 @@ void MultiNodeManager::_broadcastDirectorState() {
 
 void MultiNodeManager::_broadcastRaceStop() {
     _startVerifyAtMs = 0;   // race is over; nothing left to verify or repair
+    // Close the clock-sync window.  Only _broadcastRaceStart() used to do this,
+    // so cancelling a countdown left the directorState fanout suppressed for
+    // the full CLOCK_SYNC_MAX_MS (30 s) — clients stuck on a stale pilot list,
+    // stale banner and stale lap counts with no idea the race had been called
+    // off.  A stop ends the countdown just as surely as a start does.
+    _clockSyncUntilMs = 0;
+    _epochArmed       = false;   // a cancelled countdown does not hold an epoch
+    if (_webserver) {
+        _webserver->pushMultiNodeState();
+        if (_directorStatePayloadValid) {
+            _directorStateBroadcastPending = false;
+            _lastDirectorBroadcastMs       = millis();
+            _broadcastDirectorState();
+        }
+    }
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) { n.excludedFromCurrentRace = false; continue; }
         if (n.excludedFromCurrentRace) {

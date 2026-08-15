@@ -884,6 +884,10 @@ void LapTimer::clearLapData() {
     memset(lapTimes, 0, sizeof(lapTimes));
     memset(lapRaceElapsedMs, 0, sizeof(lapRaceElapsedMs));
     _lapCrc = 0;
+    // The last race's duration is part of the data being cleared.  directorState
+    // publishes getLastElapsedMs(), so leaving it set made a cleared Race View
+    // show the previous race's final time instead of 00:00.
+    finalElapsedMs = 0;
     lapSyncSummaryReset(_summary);
 }
 

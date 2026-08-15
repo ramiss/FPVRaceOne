@@ -3268,6 +3268,10 @@ EEPROM:\n";
             // unrecorded.  Carry it to the director rather than leaving them to
             // wonder why one pilot's first lap looks wrong (§8).
             multiNode->setNodeStartLate(nodeId, obj["startLateMs"] | 0u);
+            // Why this node last rebooted (§P0.5).  Carried on the heartbeat so
+            // the answer arrives with the node rather than having to be chased
+            // over serial after the fact.
+            multiNode->setNodeResetReason(nodeId, (uint8_t)(obj["rst"] | 0u));
 
             MultiNodeManager::HeartbeatSyncReply rep;
             multiNode->handleHeartbeatSync(nodeId,

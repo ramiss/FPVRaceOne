@@ -133,6 +133,9 @@ struct NodeInfo {
     // the race is perfectly aligned.
     uint32_t startLateMs     = 0;
 
+    // esp_reset_reason() as this node last reported it.  0 == not yet known.
+    uint8_t  resetReason     = 0;
+
     // Drift history: (master timestamp, offset) pairs for the slope fit.
     // A sliding window rather than the whole race, because a unit warming up
     // in the sun drifts NON-linearly — a rate fitted across the full race
@@ -144,6 +147,7 @@ struct NodeInfo {
     uint8_t  driftHead       = 0;   // next write position (ring)
     int32_t  driftPpm        = 0;   // fitted rate; >0 means this node runs fast
     bool     driftValid      = false;
+    bool     driftClamped    = false; // fit hit ±CLOCK_MAX_DRIFT_PPM — not data
 
     // ── §10 capability, as a TRI-STATE ──────────────────────────────────
     // lapSyncHeard distinguishes the two cases a single bool conflated:
@@ -301,8 +305,26 @@ public:
     // Record how late a client's race clock actually began, from its heartbeat.
     void   setNodeStartLate(uint8_t nodeId, uint32_t lateMs);
 
+    // Why this node last restarted (esp_reset_reason(), as reported by the
+    // client on its heartbeat).  A panic, a task watchdog, the heap guard and a
+    // brownout all look identical from the master -- the node simply comes back
+    // with a new bootId -- and each needs a completely different fix.  Two
+    // clients restarting during an idle hour went undiagnosable for exactly
+    // this reason, so the cause now travels with the reboot.
+    void   setNodeResetReason(uint8_t nodeId, uint8_t reason);
+    static const char* resetReasonName(uint8_t reason);
+
     // Master-side: mint a new race epoch.  Returns the new raceId.
+    //
+    // Split in two deliberately.  beginRaceEpoch() only mints and distributes
+    // an id — it is called at PRE-ARM so the GO datagram can be authenticated
+    // against an epoch the clients already hold.  resetEpochLapState() is the
+    // DESTRUCTIVE half and runs at the actual start.
+    //
+    // They used to be one call, which meant pre-arming and then cancelling
+    // destroyed the previous race's stored laps without a race having run.
     uint32_t beginRaceEpoch();
+    void     resetEpochLapState();
 
     // Queue race start/stop from the AsyncWebServer handler (non-blocking).
     // process() will execute the actual HTTP POSTs on the next Core 0 tick.
@@ -496,6 +518,11 @@ private:
     // Master's own race epoch.  Clients echo it; a mismatch invalidates every
     // digest comparison rather than silently merging two races (§5).
     uint32_t _masterRaceId = 0;
+    // True from pre-arm until the start that consumes the epoch.  Without it,
+    // a start arriving with no pre-arm re-used the previous race's id — so its
+    // laps were never reset and run 2 inherited run 1's, which is the exact
+    // regression the epoch system exists to prevent.
+    bool     _epochArmed   = false;
 
     // Client state
     bool     _masterConnected    = false;
@@ -528,6 +555,7 @@ private:
     // Epoch identity (§5)
     uint32_t  _raceId       = 0;      // minted by master, echoed by us
     uint32_t  _bootId       = 0;      // random at boot; a change means "I rebooted"
+    uint8_t   _resetReason  = 0;      // esp_reset_reason() at boot; rides the heartbeat
 
     // Set when the master asks for laps we have (wantFrom >= 0), cleared when
     // the gap closes.  Distinct from a resync: this is the fast path catching
@@ -791,6 +819,13 @@ private:
     // The callback stamps t4 the instant the datagram lands — that is the
     // whole reason for using the async socket rather than polling one, since
     // poll granularity would otherwise quantize t4.
+    // GO acknowledgements, one bit per slot (nodeId 1..7).  Written by the
+    // UDP callback on the LwIP task, folded into NodeInfo::startAcked by
+    // parallelTask — see the note in the ack handler for why this may not be
+    // a walk over _nodes.
+    volatile uint8_t  _startAckMask    = 0;
+    void _foldStartAcks();
+
     volatile uint32_t _probeSeq        = 0;   // sequence we are waiting on
     volatile bool     _probeReady      = false;
     volatile int64_t  _probeT2         = 0;

@@ -1076,6 +1076,98 @@ def fetch_director_state(master_ip, timeout=4.0):
                 pass
 
 
+# ── Race control over HTTP ──────────────────────────────────────────────────
+#
+# The rig has always started races over SERIAL, which calls the timer directly
+# and bypasses pre-arm, the clock-sync burst, the scheduled start instant and
+# the GO datagram entirely.  In other words the whole start path -- the part
+# that has churned most and broken most -- had no automated coverage at all.
+#
+# These three endpoints are exactly what the director's browser calls, so
+# driving them from here exercises the real path with no manual intervention.
+def _master_post(master_ip, path, timeout=6.0):
+    """POST to the master and return (status, body_text). status None on error."""
+    conn = None
+    try:
+        host, port = _split_host_port(master_ip)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("POST", path, body="", headers={"Content-Length": "0"})
+        resp = conn.getresponse()
+        return resp.status, resp.read().decode("utf-8", "replace")
+    except Exception as e:
+        return None, str(e)
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def race_prearm(master_ip, exclude=None, timeout=6.0):
+    """Broadcast pre-arm: mints the race epoch and opens the clock-sync window.
+
+    This is what a countdown does.  The sync burst runs for as long as the
+    window is open, so a test must leave real time between this and the start
+    or it measures a fleet that never got to sync.
+    """
+    path = "/api/multinode/race/prearm"
+    if exclude:
+        path += "?exclude=" + ",".join(str(x) for x in exclude)
+    return _master_post(master_ip, path, timeout)
+
+
+def race_start(master_ip, exclude=None, timeout=6.0):
+    """Broadcast GO.  Picks the fleet-wide start instant and distributes it."""
+    path = "/api/multinode/race/start"
+    if exclude:
+        path += "?exclude=" + ",".join(str(x) for x in exclude)
+    return _master_post(master_ip, path, timeout)
+
+
+def race_stop(master_ip, timeout=6.0):
+    return _master_post(master_ip, "/api/multinode/race/stop", timeout)
+
+
+def fetch_race_clock(ip, timeout=3.0):
+    """Sample one device's race clock.  Returns (elapsed_ms, running, t_mid).
+
+    /api/mode answers on EVERY node regardless of role and carries both
+    timerRunning and raceElapsedMs, which is what makes a cross-fleet start
+    spread measurable from the bench at all.
+
+    t_mid is the PC-clock midpoint of the request.  The device read its own
+    clock somewhere inside that window, so the midpoint is the best estimate of
+    WHEN the returned elapsed was true -- and it is the common reference that
+    lets two devices' clocks be compared without either of them talking to the
+    other.  Uncertainty is half the round trip, single-digit ms on a quiet LAN,
+    which is far below the 500 ms spread this exists to catch.
+
+    Returns (None, None, t_mid) on any failure.
+    """
+    conn = None
+    t0 = time.time()
+    try:
+        host, port = _split_host_port(ip)
+        conn = http.client.HTTPConnection(host, port, timeout=timeout)
+        conn.request("GET", "/api/mode")
+        resp = conn.getresponse()
+        body = resp.read()
+        t1 = time.time()
+        if resp.status != 200:
+            return None, None, (t0 + t1) / 2.0
+        d = json.loads(body.decode("utf-8", "replace"))
+        return d.get("raceElapsedMs"), d.get("timerRunning"), (t0 + t1) / 2.0
+    except Exception:
+        return None, None, (t0 + time.time()) / 2.0
+    finally:
+        if conn:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
 def fetch_clock_report(master_ip, timeout=4.0):
     """Return the master's parsed /api/multinode/clocks payload, or None.
 
@@ -1145,6 +1237,190 @@ def fit_drift_ppm(samples):
     else:
         stderr = float("nan")
     return slope, stderr, n
+
+
+# ---------------------------------------------------------------------------
+# Drift series analysis
+#
+# A straight least-squares fit answers "what line best fits these points", and
+# will answer it just as confidently for points that do not lie on a line at
+# all.  A node that reboots mid-run drops its esp_timer clock by its entire
+# prior uptime, and fitting through that step reports the UPTIME as a rate: a
+# real 60-minute run produced -790,536 ppm for a healthy unit, which is a
+# crystal running at 21% of real speed.  Both guard rails passed it, because a
+# step IS statistically significant -- just not linear.
+#
+# So the series is cleaned before it is fitted, in this order:
+#   1. split on bootId, which is a FACT reported by the device, not an inference
+#   2. split on residual steps, for reboots that slipped past bootId (an old
+#      firmware, or a restart between two polls that also changed nothing else)
+#   3. keep the best half by round-trip delay -- offset error is about half the
+#      round trip, and steady-state probes contend with the directorState fanout
+#   4. fit the longest surviving segment
+#   5. reject a result outside what quartz can physically do
+# ---------------------------------------------------------------------------
+
+# No quartz crystal drifts past a few hundred ppm; even a bad one at 100 degrees
+# C stays inside ~150.  Anything beyond this is a discontinuity or a bad probe,
+# never a measurement, and must never reach a "material" calculation.
+DRIFT_MAX_PLAUSIBLE_PPM = 200.0
+
+# A step is a jump far larger than drift-plus-noise can explain.  Both tests
+# must pass: relative to the series' own scatter (so a quiet link is not held to
+# a noisy one's bar) AND above an absolute floor (so a series that is quiet
+# throughout cannot have ordinary jitter promoted to a "reboot").
+DRIFT_STEP_FACTOR = 10.0
+DRIFT_STEP_MIN_US = 50_000        # 50 ms
+
+# Minimums for a segment to be worth fitting at all.
+DRIFT_MIN_SAMPLES = 8
+DRIFT_MIN_SPAN_S = 300.0
+
+
+def _median(vals):
+    s = sorted(vals)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    return float(s[n // 2]) if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+
+def segment_drift_series(samples):
+    """Split [(at_us, off_us, delay_us, boot_id)] into continuous segments.
+
+    Returns (segments, breaks) where breaks is a list of human-readable reasons,
+    one per split, so the caller can say WHY a series was cut rather than just
+    presenting a shorter answer.
+    """
+    pts = [s for s in samples if s[0] is not None and s[1] is not None]
+    pts.sort(key=lambda s: s[0])
+    if not pts:
+        return [], []
+
+    # Pass 1: bootId.  A changed bootId means the device restarted -- no
+    # interpretation required, and no threshold to get wrong.
+    boot_segs = []
+    cur = [pts[0]]
+    breaks = []
+    for prev, cur_pt in zip(pts, pts[1:]):
+        pb, cb = prev[3], cur_pt[3]
+        if pb and cb and pb != cb:
+            breaks.append("reboot (bootId %s -> %s)" % (pb, cb))
+            boot_segs.append(cur)
+            cur = []
+        cur.append(cur_pt)
+    boot_segs.append(cur)
+
+    # Pass 2: residual steps.  The scatter yardstick is the median absolute
+    # sample-to-sample delta of THIS segment.
+    out = []
+    for seg in boot_segs:
+        if len(seg) < 3:
+            out.append(seg)
+            continue
+        deltas = [abs(b[1] - a[1]) for a, b in zip(seg, seg[1:])]
+        bar = max(DRIFT_STEP_MIN_US, DRIFT_STEP_FACTOR * _median(deltas))
+        piece = [seg[0]]
+        for a, b in zip(seg, seg[1:]):
+            if abs(b[1] - a[1]) > bar:
+                breaks.append("step of %+.1f ms (bar %.1f ms)"
+                              % ((b[1] - a[1]) / 1000.0, bar / 1000.0))
+                out.append(piece)
+                piece = []
+            piece.append(b)
+        out.append(piece)
+
+    return [s for s in out if s], breaks
+
+
+def _filter_by_delay(seg, keep_frac=0.5):
+    """Keep the best `keep_frac` of a segment by round-trip delay.
+
+    A 60 ms sample carries ~30 ms of offset error into a fit trying to resolve
+    single-digit ppm.  Dropping the worst half typically halves the error bar
+    for free -- but only when there is enough left to still span the window, so
+    this backs off rather than starving the fit.
+    """
+    withd = [s for s in seg if s[2] is not None]
+    if len(withd) < DRIFT_MIN_SAMPLES * 2 or len(withd) != len(seg):
+        return seg
+    keep_n = max(DRIFT_MIN_SAMPLES, int(len(seg) * keep_frac))
+    if keep_n >= len(seg):
+        return seg
+    best = sorted(seg, key=lambda s: s[2])[:keep_n]
+    best.sort(key=lambda s: s[0])
+    # Only worth it if the survivors still cover the window -- filtering that
+    # collapses the baseline trades a real error bar for a fake one.
+    span_full = seg[-1][0] - seg[0][0]
+    span_keep = best[-1][0] - best[0][0]
+    if span_full > 0 and span_keep < 0.6 * span_full:
+        return seg
+    return best
+
+
+def analyse_drift_series(samples, keep_frac=0.5):
+    """Fit ppm from a raw offset series, refusing to fit through a break.
+
+    `samples` is [(at_us, off_us, delay_us, boot_id)]; delay_us and boot_id may
+    be None (older firmware).  Returns a dict that always carries `status`:
+
+        ok            -- ppm/stderr/n are a real measurement
+        discontinuity -- the device restarted mid-run; nothing fitted
+        insufficient  -- not enough clean samples or span to say anything
+        implausible   -- the fit came out beyond what a crystal can do
+
+    A caller must treat everything except `ok` as "no reading", NOT as zero and
+    never as an input to a worst-case calculation.
+    """
+    segs, breaks = segment_drift_series(samples)
+    total = sum(len(s) for s in segs)
+    res = {
+        "status": "insufficient", "ppm": None, "stderr": None, "n": 0,
+        "segments": len(segs), "breaks": breaks, "total_samples": total,
+        "span_s": 0.0, "used_frac": 0.0,
+    }
+    if not segs:
+        return res
+
+    # Fit the longest clean stretch by TIME, not by sample count: span is what
+    # sets the error bar (SE ~ sigma / (s_x * sqrt(N)), and s_x ~ span/sqrt(12)).
+    best = None
+    for seg in segs:
+        span = seg[-1][0] - seg[0][0]
+        if best is None or span > (best[-1][0] - best[0][0]):
+            best = seg
+
+    span_s = (best[-1][0] - best[0][0]) / 1e6
+    res["span_s"] = span_s
+
+    if len(segs) > 1 and (len(best) < DRIFT_MIN_SAMPLES or span_s < DRIFT_MIN_SPAN_S):
+        res["status"] = "discontinuity"
+        return res
+
+    # Fit the segment BOTH ways and keep whichever error bar is smaller.
+    # Delay filtering usually helps a lot -- offset error is about half the
+    # round trip -- but not always: when every sample has a similar delay it
+    # only throws away half the baseline and widens the answer.  Choosing on
+    # the measured stderr means the filter can never make the result worse,
+    # and there is no threshold to tune.
+    plain = fit_drift_ppm([(s[0], s[1]) for s in best])
+    used = _filter_by_delay(best, keep_frac)
+    filt = fit_drift_ppm([(s[0], s[1]) for s in used]) if used is not best else None
+
+    fit = plain
+    if filt is not None and (fit is None or
+                             (filt[1] == filt[1] and filt[1] < fit[1])):
+        fit, best = filt, used
+    if fit is None:
+        res["status"] = "discontinuity" if len(segs) > 1 else "insufficient"
+        return res
+    res["used_frac"] = (fit[2] / total) if total else 0.0
+
+    ppm, stderr, n = fit
+    res.update(ppm=ppm, stderr=stderr, n=n,
+               span_s=(used[-1][0] - used[0][0]) / 1e6)
+    res["status"] = "implausible" if abs(ppm) > DRIFT_MAX_PLAUSIBLE_PPM else "ok"
+    return res
 
 
 def time_director_post(target_ip, payload, timeout=4.0):
