@@ -2533,7 +2533,19 @@ const char* MultiNodeManager::resetReasonName(uint8_t reason) {
         case ESP_RST_BROWNOUT:  return "BROWNOUT";    // power rail sagged
         case ESP_RST_SDIO:      return "SDIO";
         case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
-        default:                return "UNKNOWN";
+        // The C6 defines five reasons beyond the classic ESP32 set.  Omitting
+        // them is not cosmetic: USB is what a flash-and-reset looks like (every
+        // node reported "UNKNOWN" on the first build that shipped this), and
+        // PWR_GLITCH and CPU_LOCKUP are exactly the two answers worth having
+        // when a client restarts on its own during an idle hour.  Folding those
+        // into "UNKNOWN" would defeat the reason this function exists.
+        case ESP_RST_USB:       return "USB_RESET";   // host/DTR reset, or a flash
+        case ESP_RST_JTAG:      return "JTAG_RESET";
+        case ESP_RST_EFUSE:     return "EFUSE_ERROR";
+        case ESP_RST_PWR_GLITCH:return "PWR_GLITCH";  // supply glitch — wiring/BEC
+        case ESP_RST_CPU_LOCKUP:return "CPU_LOCKUP";  // double exception
+        case ESP_RST_UNKNOWN:   return "UNKNOWN";
+        default:                return "UNRECOGNISED";
     }
 }
 
@@ -2642,7 +2654,14 @@ void MultiNodeManager::_runRecruitJob(bool force) {
             HTTPClient http;
             String url = "http://" + targetIp + "/api/mode";
             if (http.begin(url)) {
+                // This probe is EXPECTED to fail whenever the target is a
+                // master (it answers on .5.1, not .4.1), and the failure is on
+                // the connect, not the read.  Unbounded, that costs the default
+                // 5 s on every master found — inside a recruit window that has
+                // already dropped the AP and is racing a 60 s budget.  800 ms is
+                // ample for a peer we are directly associated with.
                 http.setTimeout(2000);
+                http.setConnectTimeout(800);
                 int code = http.GET();
                 if (code == 200) {
                     String resp = http.getString();
@@ -2656,6 +2675,7 @@ void MultiNodeManager::_runRecruitJob(bool force) {
                 HTTPClient http2;
                 if (http2.begin("http://" + targetIp + "/api/mode")) {
                     http2.setTimeout(2000);
+                    http2.setConnectTimeout(800);
                     int code = http2.GET();
                     if (code == 200) {
                         String resp = http2.getString();
@@ -2699,7 +2719,9 @@ void MultiNodeManager::_runRecruitJob(bool force) {
             HTTPClient http;
             if (http.begin("http://" + targetIp + "/config")) {
                 http.addHeader("Content-Type", "application/json");
+                // 3 s read: /config persists to NVS before answering.
                 http.setTimeout(3000);
+                http.setConnectTimeout(800);
                 int code = http.POST(body);
                 http.end();
                 configOk = (code == 200);
@@ -2719,6 +2741,7 @@ void MultiNodeManager::_runRecruitJob(bool force) {
             HTTPClient http;
             if (http.begin("http://" + targetIp + "/reboot")) {
                 http.setTimeout(1000);
+                http.setConnectTimeout(800);
                 http.POST("");
                 http.end();
             }

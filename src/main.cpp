@@ -103,6 +103,16 @@ static inline void timeCall(const char* name, void (*invoke)()) {
     (void)name; (void)invoke;
 }
 
+// Bring-up window.  Boot legitimately contains multi-second blocking work that
+// can never happen again: startAP() runs a full WiFi channel scan (~2.5 s,
+// 120 ms x 13 channels), and that scan is load-bearing — clients carry a whole
+// tier-3 reconnect path precisely because the master re-picks its channel every
+// boot.  Reported identically to a mid-race stall, it teaches you to skim past
+// [CORE0] lines, and a 2.5 s stall during a race is a serious event that must
+// not look like routine boot noise.  So it is still printed in full, just
+// labelled for what it is.
+#define CORE0_BOOT_SETTLE_MS 15000
+
 #define CORE0_TIME(NAME, EXPR) do {                                         \
     uint32_t _t0 = millis();                                                \
     EXPR;                                                                   \
@@ -112,7 +122,9 @@ static inline void timeCall(const char* name, void (*invoke)()) {
         worstCallThisWindow.name = NAME;                                    \
     }                                                                       \
     if (_dt >= 100) {                                                       \
-        DEBUG("[CORE0] %s blocked for %u ms\n", NAME, (unsigned)_dt);       \
+        DEBUG("[CORE0] %s blocked for %u ms at t=%us%s\n", NAME,            \
+              (unsigned)_dt, (unsigned)(_t0 / 1000),                        \
+              (_t0 < CORE0_BOOT_SETTLE_MS) ? "  (boot bring-up)" : "");     \
     }                                                                       \
 } while (0)
 

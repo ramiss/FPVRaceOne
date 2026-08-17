@@ -522,6 +522,13 @@ bool OtaManager::checkForUpdate(UpdateInfo& out, String& err) {
     // The earlier 10 s ceiling produced intermittent "JSON parse error:
     // IncompleteInput" when the read window expired mid-stream.
     http.setTimeout(20000);
+    // NO setConnectTimeout here, deliberately.  Everywhere else in this project
+    // an unpaired setTimeout() is a bug, because the 5000 ms default connect
+    // stalls a task against a LAN peer that is simply gone.  This call is the
+    // exception: it crosses the WAN to GitHub, where DNS plus a TLS handshake on
+    // a weak link legitimately takes seconds, and it runs in OtaManager::loop()
+    // on Core 0 rather than on async_tcp.  Shortening it would turn slow links
+    // into failed update checks.
 
     // Always hit the array endpoint; we apply the channel filter (Published
     // vs Pre-release) ourselves below.  GitHub's /releases/latest endpoint
@@ -983,6 +990,8 @@ bool OtaManager::preflightCheck(const String& fwUrl, const String& fsUrl, String
         HTTPClient http;
         http.setUserAgent("FPVRaceOne-OTA");
         http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);   // GitHub → CDN redirect
+        // Connect timeout left at the 5000 ms default on purpose — WAN + TLS,
+        // off async_tcp.  See the note in checkForUpdate().
         http.setTimeout(10000);
         if (!http.begin(client, t.url)) {
             err = String("Pre-flight: HTTP init failed for ") + t.label + " asset";

@@ -101,6 +101,10 @@ static bool     _htmlGz  = false;   // _htmlBuf holds gzip bytes; needs Content-
 // couldn't run (e.g. LittleFS not yet mounted).  Idempotent — no-op if the
 // cache is already built.  Chunked reads via a stack buffer avoid the silent
 // truncation that f.readString() suffers on large files.
+// Defined further down with the rest of the service bring-up; declared here
+// because init() has to mount the filesystem before it can cache anything.
+static bool startLittleFS();
+
 static void _buildHtmlCache(const char* callerTag) {
     if (_htmlBuf) return;
     // Gzip first: that is what a normally built image contains.
@@ -182,8 +186,23 @@ static uint8_t selectBestWifiChannel() {
     if (bestScore == 0) {
         // Scan saw nothing on {1, 6, 11}.  Spread cold-booting nodes across
         // channels deterministically using the device's MAC.
+        //
+        // esp_read_mac(), NOT WiFi.macAddress().  The Arduino call goes through
+        // the WiFi driver, which was stopped by the WIFI_OFF above, so it
+        // returned 00:00:00:00:00:00 — hash 0, candidates[0], channel 1 on
+        // EVERY unit.  That is precisely the convergence this fallback exists to
+        // prevent, and it was silent: the picked channel is legal and the log
+        // line looked normal unless you read the MAC it printed.  Confirmed in
+        // a 2026-08-15 boot log.  esp_read_mac reads the eFuse directly and does
+        // not care whether the radio is up.
         uint8_t mac[6] = {};
-        WiFi.macAddress(mac);
+        if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
+            // eFuse read should never fail, but a zero MAC here would silently
+            // reintroduce the bug — fall back to something still per-device.
+            uint32_t chipId = (uint32_t)(ESP.getEfuseMac() & 0xFFFFFFFF);
+            mac[0] = (uint8_t)chipId;        mac[1] = (uint8_t)(chipId >> 8);
+            mac[2] = (uint8_t)(chipId >> 16); mac[3] = (uint8_t)(chipId >> 24);
+        }
         uint8_t hash = 0;
         for (uint8_t b : mac) hash ^= b;
         best = candidates[hash % 3];
@@ -321,10 +340,24 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     changeTimeMs = millis() - WIFI_RECONNECT_TIMEOUT_MS;
     lastStatus = WL_DISCONNECTED;
 
-    // Build HTML cache HERE, before WiFi starts.  LittleFS is already mounted by
-    // storage.init() in main.cpp.  By the time startServices() runs, WiFi+LwIP have
-    // consumed ~100 kB of heap and a single 71 kB malloc fails (silently truncating
-    // the string).  Building it now gives us a clean heap.
+    // Build the HTML cache HERE, before WiFi starts.  By the time
+    // startServices() runs, WiFi+LwIP have consumed ~100 kB of heap and the
+    // single ~71 kB malloc either fails outright or has to come out of a
+    // fragmented pool.
+    //
+    // MOUNT THE FILESYSTEM FIRST.  This call used to sit under a comment
+    // asserting that storage.init() had already mounted LittleFS.  It had not —
+    // storage.init() never calls LittleFS.begin(), and nothing else does before
+    // startServices().  So both open() calls in _buildHtmlCache failed, the
+    // cache was left null, and it was really built by the "fallback" call at the
+    // end of startServices() — after WiFi is up, i.e. the exact heap condition
+    // this early build exists to avoid.  The optimisation had been inert since
+    // it was written, and the comment is why nobody noticed.
+    //
+    // Calling startLittleFS() twice is safe: LittleFS::begin() returns true
+    // immediately when the partition is already mounted, so the call in
+    // startServices() becomes a no-op and can never reach the format path.
+    startLittleFS();
     _buildHtmlCache("init");
 }
 
@@ -3370,7 +3403,25 @@ EEPROM:\n";
             if (!staIP.isEmpty()) {
                 HTTPClient http;
                 if (http.begin("http://" + staIP + "/api/multinode/pauseReconnect")) {
+                    // BOTH timeouts, always.  setTimeout() bounds only the READ
+                    // phase; HTTPClient keeps a separate _connectTimeout that
+                    // defaults to 5000 ms, so an unreachable peer costs five
+                    // seconds no matter what is set here.
+                    //
+                    // Every proxy in this file runs inside an AsyncWebServer
+                    // handler, i.e. on the async_tcp task — the task that serves
+                    // every browser request, every SSE push and every client
+                    // heartbeat.  Blocking it for 5 s does not just delay this
+                    // one call, it stalls the whole master.  Kicking a node that
+                    // is already powered off is the everyday way to hit it.
+                    //
+                    // Connect is capped at 800 ms rather than matched to the read
+                    // timeout: on a LAN a connect is ARP + SYN, so a peer that
+                    // has not answered in 800 ms is not going to.  Read timeouts
+                    // stay per-endpoint, because how long a client may
+                    // legitimately take to ANSWER is a different question.
                     http.setTimeout(500);
+                    http.setConnectTimeout(500);
                     http.POST("");
                     http.end();
                 }
@@ -3413,6 +3464,7 @@ EEPROM:\n";
             if (http.begin(url)) {
                 http.addHeader("Content-Type", "application/json");
                 http.setTimeout(2000);
+                http.setConnectTimeout(800);   // async_tcp — see /kick above
                 DynamicJsonDocument body(128);
                 body["pilotName"] = pilotName;
                 String bodyStr;
@@ -3496,6 +3548,7 @@ EEPROM:\n";
             if (http.begin(url)) {
                 http.addHeader("Content-Type", "application/json");
                 http.setTimeout(2000);
+                http.setConnectTimeout(800);   // async_tcp — see /kick above
                 DynamicJsonDocument body(256);
                 // All fields are conditional — the wizard-only RSSI push, for
                 // example, must not blank the pilot's name as a side effect.
@@ -3654,7 +3707,10 @@ EEPROM:\n";
         if (!http.begin(url)) {
             request->send(502, "application/json", "{\"error\":\"proxy begin failed\"}"); return;
         }
+        // Polled at 5 Hz from the Edit Pilot modal, so an unbounded connect here
+        // would stall async_tcp five times a second against a dead client.
         http.setTimeout(800);
+        http.setConnectTimeout(800);
         int code = http.GET();
         String body = (code == 200) ? http.getString() : String("{\"rssi\":0}");
         http.end();
@@ -3695,6 +3751,7 @@ EEPROM:\n";
         int code = 0;
         if (http.begin(url)) {
             http.setTimeout(2000);
+            http.setConnectTimeout(800);   // async_tcp — see /kick above
             code = http.POST("");
             http.end();
         }
@@ -3725,7 +3782,11 @@ EEPROM:\n";
         if (!http.begin(url)) {
             request->send(502, "application/json", "{\"error\":\"proxy begin failed\"}"); return;
         }
+        // 3 s READ is deliberate — a calibration page is a large payload and the
+        // client is slow to build it.  Connect stays at 800 ms: waiting longer
+        // to reach a peer that is gone buys nothing and costs async_tcp.
         http.setTimeout(3000);
+        http.setConnectTimeout(800);
         int code = http.GET();
         String body = (code == 200) ? http.getString() : String("{}");
         http.end();
@@ -3752,6 +3813,7 @@ EEPROM:\n";
         int code = 0;
         if (http.begin(url)) {
             http.setTimeout(2000);
+            http.setConnectTimeout(800);   // async_tcp — see /kick above
             code = http.POST("");
             http.end();
         }

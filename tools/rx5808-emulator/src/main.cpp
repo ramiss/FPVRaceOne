@@ -298,7 +298,17 @@ static const char* resetReasonStr(esp_reset_reason_t r) {
         case ESP_RST_BROWNOUT: return "BROWNOUT";    // power rail sagged
         case ESP_RST_SDIO:     return "SDIO";
         case ESP_RST_DEEPSLEEP:return "DEEPSLEEP";
-        default:               return "UNKNOWN";
+        // C6-specific reasons.  Without these a USB/DTR reset — i.e. the normal
+        // consequence of opening the serial port — reports as "UNKNOWN", which
+        // is the one answer that helps least.  CPU_LOCKUP and PWR_GLITCH matter
+        // too: this emulator's "stalls" turned out to be the C6 rebooting.
+        case ESP_RST_USB:      return "USB_RESET";
+        case ESP_RST_JTAG:     return "JTAG_RESET";
+        case ESP_RST_EFUSE:    return "EFUSE_ERROR";
+        case ESP_RST_PWR_GLITCH:return "PWR_GLITCH";
+        case ESP_RST_CPU_LOCKUP:return "CPU_LOCKUP";
+        case ESP_RST_UNKNOWN:  return "UNKNOWN";
+        default:               return "UNRECOGNISED";
     }
 }
 

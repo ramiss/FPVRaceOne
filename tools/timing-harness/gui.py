@@ -898,13 +898,16 @@ class TimingRigGUI:
         pre-arm POST that fails while the browser countdown proceeds anyway.
         """
         self.emit("\n  -- epoch check (start with no pre-arm) --\n", "head")
-        before = (fetch_director_state(master)[1] or {}).get("race", {}).get("raceId")
+        # `or {}` on the inner get as well: a present-but-null "race" key would
+        # make .get("race", {}) hand back None and crash mid-run, leaving a race
+        # running on the fleet.  Same pattern as the round loop above.
+        before = ((fetch_director_state(master)[1] or {}).get("race") or {}).get("raceId")
         st, _ = race_start(master)
         if st != 200:
             self.emit("    start returned %s -- skipped\n" % st, "warn")
             return
         self.cancel.wait(3.5)
-        after = (fetch_director_state(master)[1] or {}).get("race", {}).get("raceId")
+        after = ((fetch_director_state(master)[1] or {}).get("race") or {}).get("raceId")
         race_stop(master)
         if before and after and before == after:
             failures.append("start without pre-arm reused epoch %s" % before)
