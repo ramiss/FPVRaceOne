@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg"
+     width="282" height="282"
+     viewBox="29 32 282 282">
+  <title>FPVRaceOne square chevron icon</title>
+  <rect x="35" y="38" width="270" height="270" rx="24"
+        fill="#0868E8" stroke="#101010" stroke-width="10"/>
+  <g fill="#FFD31A" stroke="#101010" stroke-width="8" stroke-linejoin="round">
+    <polygon points="73,78 270,127 270,164 73,115"/>
+    <polygon points="73,132 270,181 270,218 73,169"/>
+    <polygon points="73,186 270,235 270,272 73,223"/>
+  </g>
+</svg>

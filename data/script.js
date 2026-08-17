@@ -1253,10 +1253,19 @@ onload = async function (e) {
     if (lapFormatSelect) lapFormatSelect.value = lapFormat;
     if (voiceSelect) voiceSelect.value = selectedVoice;
 
-    // Load and apply theme from device config
+    // Load and apply theme from device config.  resolveTheme() maps a legacy
+    // slug (every unit shipped before the reskin has "oceanic" in NVS) onto a
+    // palette that exists — without it the page renders with no [data-theme]
+    // match at all.  The PICKER is set to the resolved value too, so opening
+    // Settings shows what is actually on screen rather than a stale name.
     if (configData.theme) {
-      const savedTheme = configData.theme;
+      const savedTheme = resolveTheme(configData.theme);
       document.documentElement.setAttribute('data-theme', savedTheme);
+      // Refresh the first-paint mirror the <head> script reads.  This is the
+      // device's authoritative value, already alias-resolved, so the next load
+      // paints the right theme immediately — even if /config cannot be reached
+      // (e.g. the browser reloads while the device is rebooting after a flash).
+      try { localStorage.setItem('theme', savedTheme); } catch (e) { /* storage off */ }
       const themeSelect = document.getElementById('themeSelect');
       if (themeSelect) themeSelect.value = savedTheme;
     }
@@ -2672,7 +2681,7 @@ async function saveConfig() {
     rssiSens: rssiSensitivitySelect ? parseInt(rssiSensitivitySelect.value) : 1,
     name: pilotNameInput.value,
     pilotColor: pilotColorInt,
-    theme: themeSelect ? themeSelect.value : 'oceanic',
+    theme: themeSelect ? themeSelect.value : DEFAULT_THEME,
     selectedVoice: voiceSelect ? voiceSelect.value : 'default',
     lapFormat: lapFormatSelect ? lapFormatSelect.value : 'full',
     ssid: ssidInput ? ssidInput.value : '',
@@ -4533,21 +4542,68 @@ function setBandChannelIndex(freq) {
 
 
 
-// Theme functionality.  Bucket A: setting <html data-theme> and swapping
-// the logo/favicon are visible side effects.  If we applied on change and
-// the user then cancelled Settings, the page would keep the wrong theme
-// until reload — the "applied but not saved" bug.  Defer the DOM apply
+// The theme the firmware ships as its default (lib/CONFIG/config.cpp).  Keep
+// the two in sync — this is the value used when nothing is persisted yet.
+const DEFAULT_THEME = 'fpvraceone';
+
+// Themes that existed before the 12-palette reskin and may still be sitting in
+// a device's NVS.  An unrecognised slug matches no [data-theme] block, so the
+// page would fall through to :root — which used to mean a bare white UI.  Every
+// unit in the field has one of these saved, so they are mapped rather than left
+// to break.  Four were actually selectable in the old picker (oceanic, github,
+// onelight, lightowl); the rest were reachable only by hand-editing config.
+const THEME_ALIASES = {
+  // "Night Gate" was renamed to "FPVRaceOne" when its palette was rebuilt from
+  // the header logo.  Devices that saved the old slug follow the rename.
+  nightgate:      'fpvraceone',
+  oceanic:        DEFAULT_THEME,   // the old default — dark, so → dark default
+  // "Daybright" was renamed "FPVRaceOne Day" when its blue was matched to the
+  // logo.  Devices holding the old slug follow the rename, as do all the legacy
+  // LIGHT themes that already resolved to it.
+  daybright:      'fpvraceoneday',
+  lighter:        'fpvraceoneday', // every legacy LIGHT theme → the new light one
+  github:         'fpvraceoneday',
+  onelight:       'fpvraceoneday',
+  lightowl:       'fpvraceoneday',
+  solarizedlight: 'fpvraceoneday',
+  darker:         DEFAULT_THEME,   // legacy DARK themes → the new dark default
+  palenight:      DEFAULT_THEME,
+  deepocean:      DEFAULT_THEME,
+  forest:         DEFAULT_THEME,
+  skyblue:        DEFAULT_THEME,
+  sandybeach:     DEFAULT_THEME,
+  volcano:        DEFAULT_THEME,
+  space:          DEFAULT_THEME,
+  monokai:        DEFAULT_THEME,
+  dracula:        DEFAULT_THEME,
+  githubdark:     DEFAULT_THEME,
+  arcdark:        DEFAULT_THEME,
+  onedark:        DEFAULT_THEME,
+  solarizeddark:  DEFAULT_THEME,
+  nightowl:       DEFAULT_THEME,
+  moonlight:      DEFAULT_THEME,
+  synthwave:      DEFAULT_THEME,
+};
+
+// Map a stored/selected theme onto one that actually has a CSS block.
+function resolveTheme(theme) {
+  if (!theme) return DEFAULT_THEME;
+  return THEME_ALIASES[theme] || theme;
+}
+
+// Theme functionality.  Bucket A: setting <html data-theme> is a visible side
+// effect (the logo and favicon no longer change with the theme).  If we applied
+// on change and the user then cancelled Settings, the page would keep the wrong
+// theme until reload — the "applied but not saved" bug.  Defer the DOM apply
 // until Apply & Save; the picker itself still shows the pending value.
 function changeTheme() {
-    const theme = document.getElementById('themeSelect').value;
+    const theme = resolveTheme(document.getElementById('themeSelect').value);
 
     // Modal-open hydration: this fires as the form populates from /config.
     // In that case we DO want the visible state to match the persisted
     // value — the theme was previously saved, so applying it is correct.
     if (settingsLoading) {
-      if (theme === 'lighter') document.documentElement.removeAttribute('data-theme');
-      else                     document.documentElement.setAttribute('data-theme', theme);
-      updateThemeLogos(theme);
+      document.documentElement.setAttribute('data-theme', theme);
       return;
     }
 
@@ -4555,38 +4611,40 @@ function changeTheme() {
     // live picker at apply time so a rapid A→B→C sequence collapses to a
     // single "apply theme C" on Save.
     deferApply('theme', async () => {
-      const t = document.getElementById('themeSelect')?.value || 'lighter';
-      if (t === 'lighter') document.documentElement.removeAttribute('data-theme');
-      else                 document.documentElement.setAttribute('data-theme', t);
-      updateThemeLogos(t);
+      const t = resolveTheme(document.getElementById('themeSelect')?.value);
+      document.documentElement.setAttribute('data-theme', t);
+      // Keep the first-paint mirror in step on APPLY, not just on the next
+      // /config load — otherwise a reload immediately after saving would paint
+      // the previous theme.
+      try { localStorage.setItem('theme', t); } catch (e) { /* storage off */ }
     });
     autoSaveConfig();
   }
-  
-  function updateThemeLogos(theme) {
-    // Light themes list
-    const lightThemes = new Set(['lighter','github','onelight','solarizedlight','lightowl']);
-    const isLight = lightThemes.has(theme);
-    const favicon = document.getElementById('favicon');
-    const headerLogo = document.getElementById('headerLogo');
-    const logoPath = isLight ? 'logo-black.svg' : 'logo-white.svg';
-    if (favicon) {
-      favicon.href = logoPath;
-      favicon.type = 'image/svg+xml';
-    }
-    if (headerLogo) headerLogo.src = logoPath;
-  }
+
+  // updateThemeLogos() used to live here.  Nothing in the header is
+  // theme-dependent any more: the brand lockup carries its own colours, and the
+  // favicon is now a single chevron mark shared by all 12 themes.  The function
+  // had no body left once the light/dark favicon swap went away, so it and its
+  // three call sites were removed rather than left as a no-op.
 
 function loadDarkMode() {
-    // Theme is now loaded from device config on page load
-    // This function is kept for compatibility but may not be needed
-    const themeSelect = document.getElementById('themeSelect');
-    if (themeSelect && themeSelect.value) {
-      const theme = themeSelect.value;
-      if (theme !== 'lighter') {
-        document.documentElement.setAttribute('data-theme', theme);
-      }
-      updateThemeLogos(theme);
+    // Runs at onload — BEFORE /config has answered.
+    //
+    // This must NOT read the picker.  At this point <select id="themeSelect">
+    // still holds the `selected` attribute from the HTML, i.e. the DEFAULT
+    // theme, so using it stamped the default over whatever the device had
+    // saved.  Normally the /config load a moment later corrected it, which is
+    // why the bug looked intermittent: when /config was slow or failed — a
+    // re-flash reboot being exactly that — the default stayed put while the
+    // Settings picker showed the real value.
+    //
+    // The localStorage mirror is the authority until /config answers.  Nothing
+    // stored (a genuinely new browser) means no attribute, which falls through
+    // to :root, i.e. the default — the intended behaviour for a fresh device.
+    let cached = null;
+    try { cached = localStorage.getItem('theme'); } catch (e) { /* storage off */ }
+    if (cached) {
+      document.documentElement.setAttribute('data-theme', resolveTheme(cached));
     }
   }
 
@@ -5897,7 +5955,9 @@ function importConfig(input) {
       // localStorage.  We reload right after, so the page will re-fetch the
       // authoritative values from /config — this just avoids a brief flash
       // of the previous theme / voice / lap-format on first paint.
-      if (config.theme)         localStorage.setItem('theme',         config.theme);
+      // Store the RESOLVED slug: the <head> script applies this verbatim, so a
+      // legacy alias here would paint the default until /config corrected it.
+      if (config.theme)         localStorage.setItem('theme',         resolveTheme(config.theme));
       if (config.lapFormat)     localStorage.setItem('lapFormat',     config.lapFormat);
       if (config.selectedVoice) localStorage.setItem('selectedVoice', config.selectedVoice);
       if (config.ttsEngine)     localStorage.setItem('ttsEngine',     config.ttsEngine);
@@ -7616,10 +7676,12 @@ function openSettingsModal() {
           updateVoiceButtons();
         }
         
-        // Theme setting
+        // Theme setting — resolved, so a legacy slug selects the palette the
+        // page is actually showing instead of leaving the picker blank (a
+        // <select> silently rejects a value with no matching <option>).
         const themeSelect = document.getElementById('themeSelect');
         if (themeSelect && config.theme) {
-          themeSelect.value = config.theme;
+          themeSelect.value = resolveTheme(config.theme);
         }
         
         // Gate LEDs and webhook event settings

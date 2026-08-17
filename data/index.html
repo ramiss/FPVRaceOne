@@ -4,16 +4,37 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>FPVRaceOne Lap Timer</title>
-    <link rel="icon" type="image/svg+xml" href="logo-white.svg" id="favicon" />
+    <!-- One favicon for every theme.  It used to swap between a white and a
+         black mark depending on whether the active theme was light, which the
+         chevron artwork does not need — it carries its own colours. -->
+    <link rel="icon" type="image/svg+xml" href="favicon_chev.svg" id="favicon" />
     <link rel="stylesheet" type="text/css" href="style.css" />
+    <!-- Apply the last known theme BEFORE anything paints.
+         script.js is deferred, so it runs after parsing — too late to prevent a
+         flash of the default palette, and useless if /config is slow or fails.
+         That is exactly the state right after a re-flash: the browser reloads
+         while the device is still booting, /config never answers, and the page
+         would sit on the default theme even though the device has the right one
+         saved.  This inline read makes the saved theme survive that.
+         An unrecognised value simply matches no [data-theme] block and falls
+         through to :root, which is the intended "unknown theme -> default"
+         behaviour.  script.js corrects this from /config once it answers. -->
+    <script>
+      try {
+        var _t = localStorage.getItem('theme');
+        if (_t) document.documentElement.setAttribute('data-theme', _t);
+      } catch (e) { /* private mode / storage disabled — fall back to :root */ }
+    </script>
     <script src="audio-announcer.js" defer></script>
     <script src="script.js" defer></script>
     <script defer>console.log('[FPV] announcer');</script>
     <style>
       #splash{position:fixed;inset:0;z-index:9999;display:flex;flex-direction:column;align-items:center;justify-content:center;background:#1a1d2e;transition:opacity .45s ease}
       #splash.out{opacity:0;pointer-events:none}
-      #splash img{width:72px;height:72px;margin-bottom:18px;animation:sp 1.6s ease-in-out infinite}
-      #splash h2{color:#fff;font-family:system-ui,sans-serif;font-size:1.35rem;font-weight:700;letter-spacing:.06em;margin:0 0 6px}
+      /* The lockup is 2048x682 (3:1), not the old square mark — sizing by width
+         with height:auto keeps it proportional.  The previous 72x72 would have
+         squashed it.  max-width keeps it inside narrow phone screens. */
+      #splash img{width:288px;max-width:68vw;height:auto;aspect-ratio:1963/258;margin-bottom:18px;animation:sp 1.6s ease-in-out infinite}
       #splash-status{color:rgba(255,255,255,.55);font-family:system-ui,sans-serif;font-size:.82rem;min-height:1.2em}
       .sp-dots{display:flex;gap:7px;margin-top:22px}
       .sp-dots span{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.35);animation:spd 1.2s ease-in-out infinite}
@@ -26,8 +47,10 @@
 
   <body>
     <div id="splash" aria-live="polite" role="status">
-      <img src="logo-white.svg" alt="FPVRaceOne">
-      <h2>FPVRaceOne</h2>
+      <!-- The lockup already contains the wordmark, so the <h2>FPVRaceOne</h2>
+           that used to sit here has gone — it would have printed the name twice.
+           The alt text still carries it for screen readers. -->
+      <img src="fpv_raceone_logo2.svg" alt="FPVRaceOne" width="288" height="38">
       <div id="splash-status">Loading&hellip;</div>
       <div class="sp-dots"><span></span><span></span><span></span></div>
     </div>
@@ -35,8 +58,23 @@
     <header>
       <nav>
         <div class="logo">
-          <img src="logo-white.svg" alt="FPVRaceOne" width="64" id="headerLogo" />
-          <h1>FPVRaceOne</h1>
+          <!-- One asset replaces the old mark + <h1> wordmark.  Rendered as a
+               plain <img>, NOT masked: this artwork is multi-colour (blue mark,
+               yellow chevrons, blue/yellow/white lettering on dark outlines), so
+               a CSS mask would flatten it to a single-colour silhouette.  It
+               therefore keeps its own brand colours in every theme rather than
+               following --primary-color the way the old mark did. -->
+          <!-- width/height attributes are NOT redundant with the CSS.  The SVG
+               declares width="2048" height="682", so that is its intrinsic size:
+               with no CSS applied the browser paints it at 2048px across.  That
+               is what produced the huge logo on an uncached first load, when
+               style.css (an external, gzipped request on a device with only 16
+               TCP slots) had not arrived yet.  These attributes bound it with no
+               stylesheet at all, and also give the layout engine the right box
+               before the SVG decodes, so the header does not reflow.
+               CSS still wins wherever it applies — see .logo-lockup. -->
+          <img src="fpv_raceone_logo2.svg" alt="FPVRaceOne" class="logo-lockup" id="headerLogo"
+               width="342" height="45" />
           <!-- WiFi signal strength indicator disabled — use OS WiFi indicator instead
           <div id="connectionIndicator" class="connection-indicator" title="Connection status">
             <svg id="wifiIcon" class="wifi-icon" width="26" height="22" viewBox="0 0 26 22" xmlns="http://www.w3.org/2000/svg" aria-label="WiFi signal">
@@ -248,7 +286,7 @@
             </div>
             <div style="display: flex; gap: 8px; justify-content: center; margin-top: 12px;">
               <button id="playbackBtn" onclick="playbackRace()" style="padding: 8px 16px; background-color: var(--primary-color);">▶ Play Race</button>
-              <button id="stopPlaybackBtn" onclick="stopPlayback()" style="padding: 8px 16px; background-color: var(--secondary-color); display: none;">■ Stop</button>
+              <button id="stopPlaybackBtn" onclick="stopPlayback()" style="padding: 8px 16px; background-color: var(--btn-secondary-bg); display: none;">■ Stop</button>
               <label style="display: flex; align-items: center; gap: 6px; font-size: 14px; margin-left: 8px;">
                 <input type="checkbox" id="playbackWebhooks" checked style="margin: 0;">
                 Trigger Webhooks
@@ -542,11 +580,11 @@
         
         <h4 style="margin-top: 24px; margin-bottom: 12px;">Lap Times</h4>
         <div id="editLapsList" style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;"></div>
-        <button onclick="addNewLapToEdit()" style="width: 100%; background-color: var(--accent-color); margin-bottom: 16px;">+ Add Lap</button>
+        <button onclick="addNewLapToEdit()" style="width: 100%; background-color: var(--accent-color); color: var(--highlight-text); margin-bottom: 16px;">+ Add Lap</button>
         
         <div style="display: flex; gap: 12px;">
           <button onclick="saveRaceEdit()" style="flex: 1;">Save Changes</button>
-          <button onclick="closeEditModal()" style="flex: 1; background-color: var(--secondary-color);">Cancel</button>
+          <button onclick="closeEditModal()" style="flex: 1; background-color: var(--btn-secondary-bg);">Cancel</button>
         </div>
       </div>
     </div>
@@ -579,7 +617,7 @@
           </div>
           <div style="display: flex; gap: 12px; margin-top: 24px;">
             <button onclick="stopCalibrationWizard()" style="flex: 1;">Stop Recording</button>
-            <button onclick="cancelCalibrationWizard()" style="flex: 1; background-color: var(--secondary-color);">Cancel</button>
+            <button onclick="cancelCalibrationWizard()" style="flex: 1; background-color: var(--btn-secondary-bg);">Cancel</button>
           </div>
         </div>
 
@@ -618,7 +656,7 @@
             </p>
             <div style="display:flex; gap: 8px;">
               <button onclick="restartCalibrationWizard()" style="flex:1; padding:6px 12px;">Restart Calibration</button>
-              <button onclick="dismissPeakSpreadWarning()" style="flex:1; padding:6px 12px; background-color: var(--secondary-color);">Continue Anyway</button>
+              <button onclick="dismissPeakSpreadWarning()" style="flex:1; padding:6px 12px; background-color: var(--btn-secondary-bg);">Continue Anyway</button>
             </div>
           </div>
 
@@ -626,9 +664,9 @@
             <canvas id="wizardChart" style="cursor: crosshair; border: 2px solid var(--border-color); border-radius: 4px;"></canvas>
           </div>
           <div style="display: flex; gap: 12px; margin-top: 16px;">
-            <button id="wizardUndoButton" onclick="undoLastMarker()" disabled style="flex: 1; background-color: var(--secondary-color);">Undo Last</button>
+            <button id="wizardUndoButton" onclick="undoLastMarker()" disabled style="flex: 1; background-color: var(--btn-secondary-bg);">Undo Last</button>
             <button id="wizardCalculateButton" onclick="calculateThresholds()" disabled style="flex: 1;">Calculate Thresholds</button>
-            <button onclick="cancelCalibrationWizard()" style="flex: 1; background-color: var(--secondary-color);">Cancel</button>
+            <button onclick="cancelCalibrationWizard()" style="flex: 1; background-color: var(--btn-secondary-bg);">Cancel</button>
           </div>
         </div>
 
@@ -649,7 +687,7 @@
           </div>
           <div style="display: flex; gap: 12px; margin-top: 16px;">
             <button onclick="applyCalculatedThresholds()" style="flex: 1;">Apply Thresholds</button>
-            <button onclick="closeCalibrationWizard()" style="flex: 1; background-color: var(--secondary-color);">Close</button>
+            <button onclick="closeCalibrationWizard()" style="flex: 1; background-color: var(--btn-secondary-bg);">Close</button>
           </div>
         </div>
       </div>
@@ -1182,7 +1220,7 @@
                 <div style="margin-top: 24px; padding: 12px; background-color: var(--bg-secondary); border-radius: 8px;">
                   <h4 style="margin: 0 0 8px 0;">Test Webhook</h4>
                   <p style="margin: 0 0 12px 0; font-size: 13px; color: var(--secondary-color);">Send a test flash to all configured webhooks</p>
-                  <button onclick="testWebhook()" style="width: 100%; background-color: var(--accent-color);">Send Test Flash</button>
+                  <button onclick="testWebhook()" style="width: 100%; background-color: var(--accent-color); color: var(--highlight-text);">Send Test Flash</button>
                 </div>
 
                 <div style="margin-top: 16px; padding: 12px; background-color: var(--bg-secondary); border-radius: 8px; font-size: 13px;">
@@ -1392,29 +1430,18 @@
               <div class="config-item">
                 <label for="themeSelect">Theme:</label>
                 <select id="themeSelect" onchange="changeTheme()">
-                  <option value="oceanic" selected>Material Oceanic</option>
-                  <!--<option value="lighter">Material Lighter</option>
-                  <option value="darker">Material Darker</option>
-                  <option value="palenight">Material Palenight</option>
-                  <option value="deepocean">Material Deep Ocean</option>
-                  <option value="forest">Material Forest</option>
-                  <option value="skyblue">Material Sky Blue</option>
-                  <option value="sandybeach">Material Sandy Beach</option>
-                  <option value="volcano">Material Volcano</option>
-                  <option value="space">Material Space</option>
-                  <option value="monokai">Monokai Pro</option>
-                  <option value="dracula">Dracula</option>-->
-                  <option value="github">GitHub</option>
-                  <!--<option value="githubdark">GitHub Dark</option>
-                  <option value="arcdark">Arc Dark</option>
-                  <option value="onedark">One Dark</option>-->
-                  <option value="onelight">One Light</option>
-                  <!--<option value="solarizeddark">Solarized Dark</option>
-                  <option value="solarizedlight">Solarized Light</option>
-                  <option value="nightowl">Night Owl</option>-->
-                  <option value="lightowl">Light Owl</option>
-                  <!--<option value="moonlight">Moonlight</option>
-                  <option value="synthwave">SynthWave '84</option>-->
+                  <option value="fpvraceone" selected>FPVRaceOne</option>
+                  <option value="fpvraceoneday">FPVRaceOne Day</option>
+                  <option value="paddockviolet">Paddock Violet</option>
+                  <option value="cobaltsteel">Cobalt &amp; Steel</option>
+                  <option value="vaporcircuit">Vapor Circuit</option>
+                  <option value="blueprint">Blueprint</option>
+                  <option value="garnetgold">Garnet &amp; Gold</option>
+                  <option value="coppercarbon">Copper &amp; Carbon</option>
+                  <option value="runwayamber">Runway Amber</option>
+                  <option value="rosequartz">Rose Quartz</option>
+                  <option value="tracksidehivis">Trackside Hi-Vis</option>
+                  <option value="graphitemono">Graphite Mono</option>
                 </select>
               </div>
 
@@ -1467,7 +1494,7 @@
                 <p style="margin: 0;">Run comprehensive hardware and software tests to verify all FPVRaceOne components are functioning correctly.</p>
               </div>
 
-              <button id="runTestsButton" onclick="runSelfTest()" style="width: 100%; padding: 12px; margin-bottom: 16px; background-color: var(--accent-color);">Run System Self-Test</button>
+              <button id="runTestsButton" onclick="runSelfTest()" style="width: 100%; padding: 12px; margin-bottom: 16px; background-color: var(--accent-color); color: var(--highlight-text);">Run System Self-Test</button>
               
               <div id="testResults" style="display: none; margin-bottom: 16px;">
                 <h4 style="margin-bottom: 12px; color: var(--primary-color);">Test Results</h4>
@@ -1483,8 +1510,8 @@
                 <p style="margin: 0;">Monitor real-time system events including WiFi status, race events, RSSI changes, and webhooks.</p>
               </div>
               <div style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center;">
-                <button id="serialMonitorToggle" onclick="toggleSerialMonitor()" style="padding: 8px 16px; background-color: var(--accent-color);">Start Monitor</button>
-                <button onclick="clearSerialMonitor()" style="padding: 8px 16px; background-color: var(--secondary-color);">Clear</button>
+                <button id="serialMonitorToggle" onclick="toggleSerialMonitor()" style="padding: 8px 16px; background-color: var(--accent-color); color: var(--highlight-text);">Start Monitor</button>
+                <button onclick="clearSerialMonitor()" style="padding: 8px 16px; background-color: var(--btn-secondary-bg);">Clear</button>
                 <label style="display: flex; align-items: center; gap: 6px; margin-left: auto; font-size: 14px;">
                   <input type="checkbox" id="serialAutoScroll" checked style="margin: 0;">
                   Auto-scroll
@@ -1496,8 +1523,8 @@
             </div>
           </div>
           <div class="settings-footer">
-            <button onclick="downloadConfig()" style="background-color: var(--secondary-color);">Download Config</button>
-            <button onclick="document.getElementById('importConfigFile').click()" style="background-color: var(--secondary-color);">Import Config</button>
+            <button onclick="downloadConfig()" style="background-color: var(--btn-secondary-bg);">Download Config</button>
+            <button onclick="document.getElementById('importConfigFile').click()" style="background-color: var(--btn-secondary-bg);">Import Config</button>
             <input type="file" id="importConfigFile" accept=".json" style="display: none;" onchange="importConfig(this)" />
             <button id="saveConfigBtn" onclick="saveConfig()" disabled>Apply &amp; Save</button>
           </div>

@@ -1,300 +1,337 @@
-:root {
-  --primary-color: #FAFAFA;
-  --primary-color-dark: #E0E0E0;
-  --secondary-color: #90A4AE;
-  --background-color: #FFFFFF;
-  --bg-primary: #FFFFFF;
-  --bg-secondary: #F5F5F5;
-  --text-color: #212121;
-  --border-color: #E0E0E0;
-  --table-even-bg: #F5F5F5;
-  --tabcontent-bg: #FAFAFA;
+/* ============================================================================
+ * THEME TOKENS
+ *
+ * Every theme defines the SAME 13 variables.  No fall-through: the previous
+ * generation of blocks omitted --bg-primary / --bg-secondary, so those themes
+ * silently inherited white from :root and looked broken — which is why all but
+ * one were pulled from the picker rather than fixed.
+ *
+ * Semantic role -> variable:
+ *   chrome        --primary-color        header, buttons, table th, tabs, stat cards
+ *   (derived)     --primary-color-dark   2nd stop of the .stat-box gradient only
+ *   chromeText    --chrome-text          text/icons ON chrome
+ *   background    --background-color + --bg-primary
+ *   panel         --bg-secondary + --tabcontent-bg
+ *   panelAlt      --table-even-bg        alternating table rows
+ *   border        --border-color
+ *   highlight     --accent-color         fastest lap, best lap, accent buttons
+ *   highlightText --highlight-text       text ON highlight
+ *   text          --text-color
+ *   textDim       --secondary-color      muted/secondary text
+ *
+ * --chrome-text and --highlight-text are NEW.  Text on chrome used to be a
+ * hardcoded `color: white`, which is illegible on the four light-chrome themes
+ * (Blueprint, Runway Amber, Trackside Hi-Vis, Graphite Mono).
+ *
+ * --accent-color was REFERENCED by six controls but defined in no block at all,
+ * so those buttons fell back to the bare button background.  It now has a value
+ * in every theme.
+ *
+ * Pilot colours are NOT part of this system — they are a fixed named list in
+ * index.html, chosen per pilot and stored in each device's own config.
+ *
+ * :root is the DEFAULT theme (Paddock Violet), not a bare light palette, so a
+ * missing or unrecognised data-theme renders the default rather than an
+ * unstyled white UI.
+ *
+ * ---------------------------------------------------------------------------
+ * TO CHANGE THE DEFAULT THEME, three places must agree:
+ *
+ *   1. HERE  — move the `:root,` prefix onto the block you want as default.
+ *   2. data/script.js — `const DEFAULT_THEME = '<slug>'`.
+ *   3. lib/CONFIG/config.cpp — `strlcpy(conf.theme, "<slug>", ...)`, which is
+ *      what a factory-reset or newly flashed unit starts with.  Max 20 chars
+ *      (conf.theme is char[21]).  Requires a firmware rebuild.
+ *
+ * (1) and (2) ship as filesystem assets; only (3) needs new firmware.  Devices
+ * that already have a theme saved are unaffected by a default change — they
+ * keep their own choice.
+ * ---------------------------------------------------------------------------
+ * ========================================================================== */
+
+[data-theme="paddockviolet"] {
+  --primary-color: #9D7CFF;
+  /* The selected settings row lays rgba(255,255,255,0.1) over the panel, and
+   * chrome only reached 4.2:1 against that lightened surface.  A small lift
+   * clears it and slightly brightens the section headings too. */
+  --heading-color: #A98BFF;
+  /* LIGHTER than chrome, not darker.  --chrome-text is near-black here, so
+   * darkening the second gradient stop drags it toward the text and the stat
+   * cards drop to 3.9:1.  Shifting away from the text instead keeps AA.
+   * (Themes with plenty of headroom keep a conventional darker stop.) */
+  --primary-color-dark: #C3AFFF;
+  --chrome-text: #16121F;
+  --background-color: #16121F;
+  --bg-primary: #16121F;
+  --bg-secondary: #1C1730;
+  --tabcontent-bg: #1C1730;
+  --table-even-bg: #211A38;
+  /* Borders are drawn against three surfaces (page, panel, alternating row),
+   * so the WORST of the three has to clear 3:1 — WCAG's bar for the boundary
+   * of a UI component.  The original values measured 1.11-1.46:1: real elements
+   * in the DOM that simply could not be seen, indoors or out.  Still quieter
+   * than muted text (~5:1), so the hierarchy stays border < muted < body. */
+  --border-color: #6C63A1;
+  --accent-color: #FF4FA3;
+  --highlight-text: #16121F;
+  --text-color: #EDE8FF;
+  /* --secondary-color is now TEXT ONLY, at ~8:1 on the panel — just under the
+   * ~9.6:1 that "Not connected" actually renders at (that label is --text-color
+   * at 0.8 opacity, so its effective colour is a blend, not the raw token).
+   * It is 12px helper text in ~100 places, e.g. "Backup saves each pilot's
+   * name…".
+   *
+   * The button background moved to its own token because of a conflict: in 8 of
+   * the 12 themes a text-legible value is LIGHTER than chrome, which would make
+   * every Cancel button out-shine the primary action next to it.  Splitting lets
+   * the text get bright without inverting that hierarchy. */
+  --secondary-color: #BBAFCC;
+  --btn-secondary-bg: #9185B0;
 }
 
-/* Material Oceanic */
-[data-theme="oceanic"] {
-  --primary-color: #009688;
-  --primary-color-dark: #00796B;
-  --secondary-color: #90A4AE;
-  --background-color: #263238;
-  --bg-primary: #263238;
-  --bg-secondary: #37474F;
-  --text-color: #CFD8DC;
-  --border-color: #37474F;
-  --table-even-bg: #2E3C43;
-  --tabcontent-bg: #2E3C43;
+/* FPVRaceOne — the house theme, drawn from the header logo.
+ *
+ * Four anchors are taken verbatim from fpv_raceone_logo2.svg rather than
+ * approximated: #0868E8 blue (the square mark) as chrome, #FFD800 yellow (the
+ * chevrons) as the highlight, #080808 as the page, #F8F8F8 as body text.  The
+ * panel tints, border, muted text, button background and chrome second stop are
+ * derived to clear the same contrast bars as the other eleven themes.
+ *
+ * NOTE the inverted second stop: chrome-text here is LIGHT (blue at mid
+ * luminance carries white at 4.76:1 but black at only 3.96), so
+ * --primary-color-dark goes DARKER — away from the text — where the dark-text
+ * themes have to go lighter.  Same rule, opposite direction.
+ *
+ * Renamed from "Night Gate"; THEME_ALIASES in script.js maps the old
+ * `nightgate` slug so saved devices follow the rename. */
+:root,
+[data-theme="fpvraceone"] {
+  --primary-color: #0868E8;
+  --primary-color-dark: #0756C1;   /* darker — see note above */
+  /* Same blue, lifted for use AS TEXT on the dark panel: the brand blue reads
+   * 3.6:1 there, which is legible but visibly murky for a section heading.
+   * 6.7:1 keeps the hue and makes it scan. */
+  --heading-color: #589EF7;
+  --chrome-text: #F8F8F8;
+  --background-color: #080808;
+  --bg-primary: #080808;
+  --bg-secondary: #0F1520;
+  --tabcontent-bg: #0F1520;
+  --table-even-bg: #141C2A;
+  --border-color: #576694;
+  --accent-color: #FFD800;
+  --highlight-text: #080808;
+  --text-color: #F8F8F8;
+  --secondary-color: #A1AEC4;
+  --btn-secondary-bg: #2A3648;
 }
 
-/* Material Darker */
-[data-theme="darker"] {
-  --primary-color: #FF9800;
-  --primary-color-dark: #F57C00;
-  --secondary-color: #FFAB40;
-  --background-color: #212121;
-  --text-color: #B0BEC5;
-  --border-color: #424242;
-  --table-even-bg: #2A2A2A;
-  --tabcontent-bg: #2A2A2A;
+/* The one theme whose supplied palette could not be made legible as given.
+ * chrome #2F6FED sits at mid luminance, the worst case for contrast: the
+ * specified near-white chrome-text reached only 4.04:1, and swapping to dark
+ * text only reached 4.07 — neither clears AA, and the Cancel buttons (dark
+ * label on the dim token) fell to 2.91.
+ *
+ * Fixed by lifting chrome one notch to #437BED and using dark chrome-text like
+ * the other eleven themes, which clears every pair (4.67 chrome / 5.65 Cancel /
+ * 10.62 active tab).  This DOES change the theme's character — it was the only
+ * light-text-on-blue palette.  To restore the original look, revert these three
+ * values to #2F6FED / #2456C4 / #EAF2FF and accept the sub-AA contrast. */
+[data-theme="cobaltsteel"] {
+  --primary-color: #437BED;
+  --heading-color: #7F9FF1;        /* chrome is 4.2:1 as text on the panel */
+  --primary-color-dark: #729CF1;
+  --chrome-text: #0A1420;
+  --background-color: #0A1420;
+  --bg-primary: #0A1420;
+  --bg-secondary: #101E30;
+  --tabcontent-bg: #101E30;
+  --table-even-bg: #13233A;
+  --border-color: #3B6BC0;
+  --accent-color: #FFB648;
+  --highlight-text: #0A1420;
+  --text-color: #E6EEFA;
+  --secondary-color: #A1B8CC;
+  --btn-secondary-bg: #7790B0;
 }
 
-/* Material Lighter — contrast-tuned for WCAG AA on near-white backgrounds.
- * The original palette used #7CB342 lime-green as --secondary-color (~2.7:1 on
- * white, fails AA) and #00897B teal as --primary-color (~3.97:1, marginal for
- * 12-14px text). Both are commonly used as text colors throughout the UI, so
- * we shift them to darker variants while keeping the same hue family:
- *   - secondary: teal-leaning blue-gray #455A64 (~9.0:1 on white)
- *   - primary:   #00796B teal 700        (~4.91:1 on white — passes AA normal)
- * bg-primary / bg-secondary fall through to :root (#FFFFFF / #F5F5F5).
- */
-[data-theme="lighter"] {
-  --primary-color: #00796B;
-  --primary-color-dark: #004D40;
-  --secondary-color: #455A64;
-  --background-color: #FAFAFA;
-  --text-color: #212121;
-  --border-color: #CFD8DC;
-  --table-even-bg: #ECEFF1;
+[data-theme="vaporcircuit"] {
+  --primary-color: #FF3FA4;
+  --heading-color: #FF58AE;        /* chrome was 4.3:1 on the selected row */
+  --primary-color-dark: #FF72BC;   /* lighter — see Paddock Violet */
+  --chrome-text: #120A1F;
+  --background-color: #120A1F;
+  --bg-primary: #120A1F;
+  --bg-secondary: #1B1030;
+  --tabcontent-bg: #1B1030;
+  --table-even-bg: #21133A;
+  --border-color: #7850CA;
+  --accent-color: #33E1FF;
+  --highlight-text: #120A1F;
+  --text-color: #F2E8FF;
+  --secondary-color: #BDABDA;
+  --btn-secondary-bg: #937BBE;
+}
+
+/* Light chrome — the four themes below and Graphite Mono are the reason
+ * --chrome-text has to exist.  White label text on #E8F1FA is unreadable. */
+[data-theme="blueprint"] {
+  --primary-color: #E8F1FA;
+  --primary-color-dark: #C3D4E8;
+  --chrome-text: #0C2D4D;
+  --background-color: #0C2D4D;
+  --bg-primary: #0C2D4D;
+  --bg-secondary: #123A63;
+  --tabcontent-bg: #123A63;
+  --table-even-bg: #16416F;
+  --border-color: #4A8FCB;
+  --accent-color: #F2C14E;
+  --highlight-text: #0C2D4D;
+  --text-color: #E8F1FA;
+  --secondary-color: #A3BED9;
+  --btn-secondary-bg: #8FAFCF;
+}
+
+[data-theme="garnetgold"] {
+  --primary-color: #E8384F;
+  --heading-color: #F07983;        /* chrome is 4.4:1 as text on the panel */
+  --primary-color-dark: #ED6677;   /* lighter — see Paddock Violet */
+  --chrome-text: #150B0D;
+  --background-color: #150B0D;
+  --bg-primary: #150B0D;
+  --bg-secondary: #221316;
+  --tabcontent-bg: #221316;
+  --table-even-bg: #26151A;
+  --border-color: #8E565B;
+  --accent-color: #FFB84D;
+  --highlight-text: #150B0D;
+  --text-color: #F6E9EA;
+  --secondary-color: #C3AEB3;
+  --btn-secondary-bg: #A37E83;
+}
+
+[data-theme="coppercarbon"] {
+  --primary-color: #C9784A;
+  --heading-color: #CE875E;        /* chrome was 4.1:1 on the selected row */
+  --primary-color-dark: #D59571;   /* lighter — see Paddock Violet */
+  --chrome-text: #0F0D0C;
+  --background-color: #0F0D0C;
+  --bg-primary: #0F0D0C;
+  --bg-secondary: #1A1613;
+  --tabcontent-bg: #1A1613;
+  --table-even-bg: #1F1A16;
+  --border-color: #825E58;
+  --accent-color: #E0B15A;
+  --highlight-text: #0F0D0C;
+  --text-color: #EDE3D8;
+  --secondary-color: #B3AEA6;
+  --btn-secondary-bg: #938776;
+}
+
+[data-theme="runwayamber"] {
+  --primary-color: #FFB020;
+  --primary-color-dark: #D98F12;
+  --chrome-text: #10141A;
+  --background-color: #10141A;
+  --bg-primary: #10141A;
+  --bg-secondary: #171D26;
+  --tabcontent-bg: #171D26;
+  --table-even-bg: #1B222D;
+  --border-color: #606A93;
+  --accent-color: #4FA8FF;
+  --highlight-text: #10141A;
+  --text-color: #EDEDEA;
+  --secondary-color: #B3B6B6;
+  --btn-secondary-bg: #868E94;
+}
+
+[data-theme="rosequartz"] {
+  --primary-color: #E38AA6;
+  --primary-color-dark: #C46C88;
+  --chrome-text: #1D1420;
+  --background-color: #1D1420;
+  --bg-primary: #1D1420;
+  --bg-secondary: #271A2C;
+  --tabcontent-bg: #271A2C;
+  --table-even-bg: #2E1F34;
+  --border-color: #8B5E93;
+  --accent-color: #C9A6E8;
+  --highlight-text: #1D1420;
+  --text-color: #F5E9EE;
+  --secondary-color: #BDB1B8;
+  --btn-secondary-bg: #A18798;
+}
+
+[data-theme="tracksidehivis"] {
+  --primary-color: #D4FF3D;
+  --primary-color-dark: #AEDB22;
+  --chrome-text: #14181B;
+  --background-color: #14181B;
+  --bg-primary: #14181B;
+  --bg-secondary: #1D2226;
+  --tabcontent-bg: #1D2226;
+  --table-even-bg: #232A2F;
+  --border-color: #5B777D;
+  --accent-color: #3FA8FF;
+  --highlight-text: #14181B;
+  --text-color: #F0F4F0;
+  --secondary-color: #B9BBBB;
+  --btn-secondary-bg: #899296;
+}
+
+[data-theme="graphitemono"] {
+  --primary-color: #E5E5E5;
+  --primary-color-dark: #C2C2C2;
+  --chrome-text: #121212;
+  --background-color: #121212;
+  --bg-primary: #121212;
+  --bg-secondary: #1A1A1A;
+  --tabcontent-bg: #1A1A1A;
+  --table-even-bg: #1F1F1F;
+  --border-color: #6A6A6A;
+  --accent-color: #4FA8FF;
+  --highlight-text: #121212;
+  --text-color: #EDEDED;
+  --secondary-color: #B4B4B4;
+  --btn-secondary-bg: #8A8A8A;
+}
+
+/* The only light theme.  updateThemeLogos() in script.js keys off this exact
+ * slug to swap the header logo and favicon to the black variant. */
+/* FPVRaceOne Day — the light sibling of the house theme.
+ *
+ * Chrome is the logo blue, same as the dark FPVRaceOne.  The ACCENT stays red
+ * and deliberately does not follow the dark theme's yellow: #FFD800 on a white
+ * panel measures 1.2:1, so the logo yellow simply cannot serve as a highlight
+ * on a light background.  Red carries the same "look here" job legibly.
+ *
+ * Renamed from "Daybright"; THEME_ALIASES maps the old slug, and every legacy
+ * light theme (github, onelight, lightowl, solarizedlight, lighter) resolves
+ * here too. */
+[data-theme="fpvraceoneday"] {
+  --primary-color: #0868E8;        /* logo blue, matching the dark theme */
+  --primary-color-dark: #0756C1;
+  /* Deeper blue for text roles.  On a LIGHT theme the selected settings row has
+   * to get darker to be visible, which fights a mid-blue label — this clears
+   * 5.2:1 on that row and 6.8:1 on the panel, where plain chrome managed 4.1. */
+  --heading-color: #0756C1;
+  --chrome-text: #FFFFFF;
+  --background-color: #F4F6F8;
+  --bg-primary: #F4F6F8;
+  --bg-secondary: #FFFFFF;
   --tabcontent-bg: #FFFFFF;
-}
-
-/* Material Palenight */
-[data-theme="palenight"] {
-  --primary-color: #C792EA;
-  --primary-color-dark: #B070D8;
-  --secondary-color: #82AAFF;
-  --background-color: #292D3E;
-  --text-color: #A6ACCD;
-  --border-color: #3B3F51;
-  --table-even-bg: #343747;
-  --tabcontent-bg: #343747;
-}
-
-/* Material Deep Ocean */
-[data-theme="deepocean"] {
-  --primary-color: #84FFFF;
-  --primary-color-dark: #18FFFF;
-  --secondary-color: #4DD0E1;
-  --background-color: #0F111A;
-  --text-color: #8F93A2;
-  --border-color: #1F2233;
-  --table-even-bg: #181A29;
-  --tabcontent-bg: #181A29;
-}
-
-/* Material Forest */
-[data-theme="forest"] {
-  --primary-color: #C3E88D;
-  --primary-color-dark: #A5D66E;
-  --secondary-color: #82AAFF;
-  --background-color: #1E2E26;
-  --text-color: #C4CFA5;
-  --border-color: #2A3E33;
-  --table-even-bg: #263A2E;
-  --tabcontent-bg: #263A2E;
-}
-
-/* Material Sky Blue */
-[data-theme="skyblue"] {
-  --primary-color: #84FFFF;
-  --primary-color-dark: #00E5FF;
-  --secondary-color: #82AAFF;
-  --background-color: #0F2431;
-  --text-color: #B0BEC5;
-  --border-color: #1A3A4C;
-  --table-even-bg: #143349;
-  --tabcontent-bg: #143349;
-}
-
-/* Material Sandy Beach */
-[data-theme="sandybeach"] {
-  --primary-color: #FFAB00;
-  --primary-color-dark: #FF8F00;
-  --secondary-color: #FFD54F;
-  --background-color: #302F2D;
-  --text-color: #D6C8B8;
-  --border-color: #3E3D3A;
-  --table-even-bg: #3A3937;
-  --tabcontent-bg: #3A3937;
-}
-
-/* Material Volcano */
-[data-theme="volcano"] {
-  --primary-color: #F78C6C;
-  --primary-color-dark: #F5744E;
-  --secondary-color: #FFCB6B;
-  --background-color: #2E1A1A;
-  --text-color: #D9A57A;
-  --border-color: #442626;
-  --table-even-bg: #3A2323;
-  --tabcontent-bg: #3A2323;
-}
-
-/* Material Space */
-[data-theme="space"] {
-  --primary-color: #8B5CF6;
-  --primary-color-dark: #7C3AED;
-  --secondary-color: #A78BFA;
-  --background-color: #14141F;
-  --text-color: #A0A0C0;
-  --border-color: #22222F;
-  --table-even-bg: #1B1B27;
-  --tabcontent-bg: #1B1B27;
-}
-
-/* Monokai Pro */
-[data-theme="monokai"] {
-  --primary-color: #FFD866;
-  --primary-color-dark: #FFC93D;
-  --secondary-color: #FF6188;
-  --background-color: #2D2A2E;
-  --text-color: #FCFCFA;
-  --border-color: #403E41;
-  --table-even-bg: #3A3739;
-  --tabcontent-bg: #3A3739;
-}
-
-/* Dracula */
-[data-theme="dracula"] {
-  --primary-color: #BD93F9;
-  --primary-color-dark: #9580CC;
-  --secondary-color: #FF79C6;
-  --background-color: #282A36;
-  --text-color: #F8F8F2;
-  --border-color: #44475A;
-  --table-even-bg: #343746;
-  --tabcontent-bg: #343746;
-}
-
-/* GitHub */
-[data-theme="github"] {
-  --primary-color: #0366D6;
-  --primary-color-dark: #0256B4;
-  --secondary-color: #28A745;
-  --background-color: #FFFFFF;
-  --text-color: #24292E;
-  --border-color: #E1E4E8;
-  --table-even-bg: #F6F8FA;
-  --tabcontent-bg: #FAFBFC;
-}
-
-/* GitHub Dark */
-[data-theme="githubdark"] {
-  --primary-color: #58A6FF;
-  --primary-color-dark: #1F6FEB;
-  --secondary-color: #56D364;
-  --background-color: #0D1117;
-  --text-color: #C9D1D9;
-  --border-color: #30363D;
-  --table-even-bg: #161B22;
-  --tabcontent-bg: #161B22;
-}
-
-/* Arc Dark */
-[data-theme="arcdark"] {
-  --primary-color: #5294E2;
-  --primary-color-dark: #3C7EC9;
-  --secondary-color: #7BA2D3;
-  --background-color: #2F343F;
-  --text-color: #D3DAE3;
-  --border-color: #404552;
-  --table-even-bg: #383C4A;
-  --tabcontent-bg: #383C4A;
-}
-
-/* One Dark */
-[data-theme="onedark"] {
-  --primary-color: #61AFEF;
-  --primary-color-dark: #4496DC;
-  --secondary-color: #98C379;
-  --background-color: #282C34;
-  --text-color: #ABB2BF;
-  --border-color: #3E4451;
-  --table-even-bg: #2C313A;
-  --tabcontent-bg: #2C313A;
-}
-
-/* One Light */
-[data-theme="onelight"] {
-  --primary-color: #4078F2;
-  --primary-color-dark: #2362E0;
-  --secondary-color: #50A14F;
-  --background-color: #FAFAFA;
-  --text-color: #383A42;
-  --border-color: #E5E5E6;
-  --table-even-bg: #F0F0F1;
-  --tabcontent-bg: #FFFFFF;
-}
-
-/* Solarized Dark */
-[data-theme="solarizeddark"] {
-  --primary-color: #268BD2;
-  --primary-color-dark: #0E6DAA;
-  --secondary-color: #2AA198;
-  --background-color: #002B36;
-  --text-color: #839496;
-  --border-color: #073642;
-  --table-even-bg: #073642;
-  --tabcontent-bg: #073642;
-}
-
-/* Solarized Light */
-[data-theme="solarizedlight"] {
-  --primary-color: #268BD2;
-  --primary-color-dark: #0E6DAA;
-  --secondary-color: #2AA198;
-  --background-color: #FDF6E3;
-  --text-color: #657B83;
-  --border-color: #EEE8D5;
-  --table-even-bg: #EEE8D5;
-  --tabcontent-bg: #EEE8D5;
-}
-
-/* Night Owl */
-[data-theme="nightowl"] {
-  --primary-color: #82AAFF;
-  --primary-color-dark: #5E92E8;
-  --secondary-color: #C792EA;
-  --background-color: #011627;
-  --text-color: #D6DEEB;
-  --border-color: #1D3B53;
-  --table-even-bg: #0B2942;
-  --tabcontent-bg: #0B2942;
-}
-
-/* Light Owl */
-[data-theme="lightowl"] {
-  --primary-color: #2AA298;
-  --primary-color-dark: #1D8478;
-  --secondary-color: #4876D6;
-  --background-color: #FBFBFB;
-  --text-color: #403F53;
-  --border-color: #E0E0E0;
-  --table-even-bg: #F0F0F0;
-  --tabcontent-bg: #FFFFFF;
-}
-
-/* Moonlight */
-[data-theme="moonlight"] {
-  --primary-color: #82AAFF;
-  --primary-color-dark: #5E92E8;
-  --secondary-color: #C099FF;
-  --background-color: #1E2030;
-  --text-color: #C8D3F5;
-  --border-color: #2F334D;
-  --table-even-bg: #252839;
-  --tabcontent-bg: #252839;
-}
-
-/* SynthWave '84 */
-[data-theme="synthwave"] {
-  --primary-color: #FF7EDB;
-  --primary-color-dark: #F92672;
-  --secondary-color: #72F1B8;
-  --background-color: #262335;
-  --text-color: #F2F3F7;
-  --border-color: #34294F;
-  --table-even-bg: #2B2A3E;
-  --tabcontent-bg: #2B2A3E;
+  --table-even-bg: #EDF0F3;
+  --border-color: #8086A9;
+  --accent-color: #DC2F4C;
+  --highlight-text: #FFFFFF;
+  --text-color: #101828;
+  --secondary-color: #46505E;
+  --btn-secondary-bg: #607085;
+  /* The white wash the dark themes use is invisible here (white on white), so
+   * this theme supplies real tints.  1.31 step vs the panel, against ~1.40 for
+   * the wash on a dark theme — comparable weight. */
+  --row-active-bg: #D6E2F8;
+  --row-hover-bg: #EEF3FC;
 }
 
 * {
@@ -319,11 +356,18 @@ body {
   width: 100%;
 }
 
+/* The header sits FLAT on the page surface — no coloured bar, no seam.  The
+ * brand lockup (see .logo-lockup) carries its own colours, and the tab blocks
+ * below carry the theme's, so chrome still identifies the theme without a band
+ * across the top.  The drop shadow goes with it: against a matching background
+ * it would draw exactly the dividing line this removes. */
 header {
-  background-color: var(--primary-color);
-  color: white;
-  padding: 12px 16px 4px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+  background-color: var(--background-color);
+  color: var(--text-color);
+  /* No bottom padding: the tabs are the last thing in the header and have to
+   * meet the content card's top border, folder-style.  The 8px gap that used to
+   * separate them was this 4px plus main's 4px top margin. */
+  padding: 12px 16px 0;
 }
 
 nav {
@@ -338,9 +382,30 @@ nav {
   gap: 16px;
 }
 
-.logo h1 {
-  margin-left: 0;
-  font-size: 32px;
+/* Brand lockup — mark and wordmark in one asset, replacing the old masked mark
+ * plus its <h1> text sibling.
+ *
+ * Multi-colour artwork, so it is a plain <img>: masking it (as the previous
+ * single-colour mark was) would collapse the blue square, yellow chevrons and
+ * three-colour lettering into one flat silhouette.  The consequence is that the
+ * header brand no longer follows --primary-color; it keeps its own colours in
+ * every theme, which is what a fixed brand asset should do.
+ *
+ * Height is stated and width derived, because the source is 2048x682 — a 3.003:1
+ * ratio.  Pinning HEIGHT keeps the header the same depth as before (the old mark
+ * rendered 72px tall) while the width follows the artwork, so the lockup can
+ * never be squashed.  aspect-ratio reserves the box before the SVG loads, which
+ * stops the header reflowing on a slow first paint. */
+/* Heights below are the ARTWORK height.  They dropped sharply (119px -> 45px)
+ * without the logo shrinking, because the source viewBox was cropped: 119px used
+ * to be ~45px of logo plus ~74px of empty canvas.  Same rendered mark, minus the
+ * padding that was pushing the header open. */
+.logo-lockup {
+  display: block;
+  height: 45px;
+  width: auto;
+  aspect-ratio: 1963 / 258;
+  flex: 0 0 auto;
 }
 
 /* WiFi signal strength indicator disabled — use OS WiFi indicator instead
@@ -427,21 +492,41 @@ nav {
   justify-content: space-around;
 }
 
+/* File-folder tabs.
+ *
+ * The chrome fill is back, but per TAB rather than as a strip: the <ul> stays
+ * transparent so the header still reads flat, and each label sits in its own
+ * block with the top corners rounded, like a folder tab meeting the content.
+ *
+ * INACTIVE tabs use chrome; the ACTIVE one uses the highlight, so the current
+ * page reads at a glance without relying on a subtle tint.  Both are designed
+ * token pairs (chrome/chrome-text, accent/highlight-text), so legibility is
+ * guaranteed in all 12 themes rather than depending on the surface behind.
+ *
+ * The old rgba(255,255,255,0.2) hover was a white wash that only worked on a
+ * mid-toned bar — invisible on Daybright.  Hover now shifts to the chrome
+ * second stop, which every theme defines. */
 .nav-links a {
-  color: white;
+  background-color: var(--primary-color);
+  color: var(--chrome-text);
   text-decoration: none;
   padding: 8px 16px;
-  border-radius: 4px;
-  transition: background-color 0.3s;
+  border-radius: 8px 8px 0 0;
+  transition: background-color 0.3s, color 0.3s;
 }
 
-.nav-links a:hover,
+.nav-links a:hover {
+  background-color: var(--primary-color-dark);
+}
+
 .nav-links a.active {
-  background-color: rgba(255, 255, 255, 0.2);
+  background-color: var(--accent-color);
+  color: var(--highlight-text);
 }
 
 main {
-  margin: 4px 8px 8px;
+  /* Top margin removed so the card butts against the tabs above it. */
+  margin: 0 8px 8px;
   padding: 0 8px;
   flex-grow: 1;
 }
@@ -449,8 +534,12 @@ main {
 .tabcontent {
   background-color: var(--tabcontent-bg);
   border-radius: 8px;
+  /* Chrome, i.e. the same colour as the tab blocks above, so the card reads as
+   * the body of the folder those tabs belong to.  box-sizing is border-box
+   * globally, so the 1px is drawn inside and nothing reflows. */
+  border: 1px solid var(--primary-color);
   box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  padding: 8px; 
+  padding: 8px;
 }
 
 
@@ -535,7 +624,7 @@ main {
 
 .rssi-step-btn:hover {
   background-color: var(--primary-color);
-  color: white;
+  color: var(--chrome-text);
 }
 
 .rssi-step-btn:active {
@@ -550,7 +639,7 @@ button {
   margin: 6px 0;
   padding: 8px 12px;
   background-color: var(--primary-color);
-  color: white;
+  color: var(--chrome-text);
   border: none;
   border-radius: 4px;
   cursor: pointer;
@@ -569,7 +658,12 @@ button:disabled {
 }
 
 button.active {
-  background-color: #f39c12;
+  background-color: var(--accent-color);
+  /* Must restate the colour: the base `button` rule sets --chrome-text, which
+   * is chosen against CHROME, not against the accent.  They are the same value
+   * in most themes but not all (Cobalt & Steel has light chrome-text and a
+   * light amber accent — white-on-amber would be unreadable). */
+  color: var(--highlight-text);
   animation: pulse 1s infinite;
 }
 
@@ -627,7 +721,7 @@ table td {
 
 table th {
   background-color: var(--primary-color);
-  color: white;
+  color: var(--chrome-text);
   font-weight: normal;
 }
 
@@ -636,14 +730,14 @@ table tr:nth-child(even) {
 }
 
 table tr.fastest-lap {
-  background-color: #f39c12 !important;  /* Gold/orange for fastest lap */
-  color: white;
+  background-color: var(--accent-color) !important;
+  color: var(--highlight-text);
   font-weight: bold;
-  box-shadow: 0 0 8px rgba(243, 156, 18, 0.5);
+  box-shadow: 0 0 8px var(--accent-color);
 }
 
 table tr.fastest-lap td {
-  border-color: #e67e22;
+  border-color: var(--accent-color);
 }
 
 #lapTable {
@@ -743,6 +837,9 @@ input:checked + .slider:before {
 footer {
   padding: 8px;
   background-color: var(--primary-color);
+  /* Without this the footer inherits --text-color from body, i.e. the colour
+   * chosen to sit on the PAGE background, painted onto chrome. */
+  color: var(--chrome-text);
 }
 
 .credits {
@@ -796,7 +893,9 @@ footer {
 }
 
 .stat-label {
-  color: rgba(255,255,255,0.9);
+  /* was rgba(255,255,255,0.9) — the alpha existed only to soften white against
+   * the teal gradient.  --chrome-text is already chosen to sit on chrome. */
+  color: var(--chrome-text);
   font-size: 11px;
   font-weight: 500;
   text-transform: uppercase;
@@ -805,14 +904,15 @@ footer {
 }
 
 .stat-value {
-  color: white;
+  color: var(--chrome-text);
   font-size: 22px;
   font-weight: bold;
   text-shadow: 1px 1px 2px rgba(0,0,0,0.2);
 }
 
 .stat-sublabel {
-  color: rgba(255,255,255,0.8);
+  color: var(--chrome-text);
+  opacity: 0.8;
   font-size: 11px;
   margin-top: 4px;
 }
@@ -840,13 +940,13 @@ footer {
 
 .analysis-tab:hover {
   background-color: var(--primary-color);
-  color: white;
+  color: var(--chrome-text);
   border-color: var(--primary-color);
 }
 
 .analysis-tab.active {
   background-color: var(--primary-color);
-  color: white;
+  color: var(--chrome-text);
   border-color: var(--primary-color);
   font-weight: bold;
 }
@@ -902,7 +1002,8 @@ footer {
 }
 
 .bar-time {
-  color: white;
+  /* Sits inside .bar-fill, whose background is the chrome gradient. */
+  color: var(--chrome-text);
   font-weight: bold;
   font-size: 13px;
   text-shadow: 1px 1px 2px rgba(0,0,0,0.3);
@@ -1007,7 +1108,7 @@ footer {
   position: absolute;
   top: 12px;
   right: 12px;
-  background-color: var(--secondary-color);
+  background-color: var(--btn-secondary-bg);
   padding: 6px 12px;
   margin: 0;
   font-size: 14px;
@@ -1056,7 +1157,7 @@ footer {
 
 .race-item-button:hover {
   background-color: var(--primary-color);
-  color: white;
+  color: var(--chrome-text);
   border-color: var(--primary-color);
 }
 
@@ -1069,7 +1170,7 @@ footer {
 .race-tag {
   display: inline-block;
   background-color: var(--primary-color);
-  color: white;
+  color: var(--chrome-text);
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 11px;
@@ -1402,6 +1503,11 @@ footer {
 
 .settings-close-button:hover {
   background-color: var(--border-color);
+  /* The glyph is --secondary-color at rest.  Now that --border-color is a
+   * visible mid-tone rather than near-black, muted-on-border would collapse to
+   * about 1.5:1 — so the icon goes full strength on hover, which is the right
+   * affordance anyway. */
+  color: var(--text-color);
   color: var(--text-color);
 }
 
@@ -1422,14 +1528,22 @@ footer {
 }
 
 .settings-nav-item:hover {
-  background-color: rgba(255, 255, 255, 0.05);
+  /* A white wash works on the eleven dark themes but is invisible on a light
+   * one — white over white is still white, so the row gave no feedback at all.
+   * Light themes override with a real tint; the dark themes keep the wash,
+   * which steps further from their panel than any theme token would. */
+  background-color: var(--row-hover-bg, rgba(255, 255, 255, 0.05));
   color: var(--text-color);
 }
 
 .settings-nav-item.active {
-  background-color: rgba(255, 255, 255, 0.1);
-  color: var(--primary-color);
-  border-left-color: var(--primary-color);
+  background-color: var(--row-active-bg, rgba(255, 255, 255, 0.1));
+  /* Same token as the section headings.  The sidebar background is
+   * --bg-secondary, i.e. the exact surface --heading-color was tuned against,
+   * so the selected item and the heading it reveals now read as one colour.
+   * Nine themes fall through to chrome via the fallback and are unchanged. */
+  color: var(--heading-color, var(--primary-color));
+  border-left-color: var(--heading-color, var(--primary-color));
   font-weight: bold;
 }
 
@@ -1470,7 +1584,12 @@ footer {
 .settings-section h3 {
   margin: 24px 0 16px 0;
   font-size: 18px;
-  color: var(--primary-color);
+  /* Chrome by default, but a theme may override.  Chrome is picked to carry
+   * text ON it, not to BE text on a dark panel, and three themes land dim when
+   * used that way — 3.6:1 for FPVRaceOne's brand blue.  Themes that need a
+   * lighter heading set --heading-color; the other nine inherit chrome through
+   * this fallback and are unchanged. */
+  color: var(--heading-color, var(--primary-color));
   border-bottom: 1px solid var(--border-color);
   padding-bottom: 8px;
 }
@@ -1633,17 +1752,23 @@ button.update-btn {
 
 .update-btn-primary {
   background-color: var(--primary-color);
-  color: var(--bg-secondary, #1a1a2e);
+  /* Was --bg-secondary (the PANEL colour) used as text on chrome.  It happened
+   * to read acceptably because panel and chrome tend to be tonal opposites, but
+   * --chrome-text is the token that actually means "text on chrome". */
+  color: var(--chrome-text);
 }
 
 .update-btn-secondary {
-  background-color: var(--secondary-color);
-  color: white;
+  background-color: var(--btn-secondary-bg);
+  /* Matches every other secondary/Cancel button, which inherit --chrome-text
+   * from the base `button` rule.  Hardcoded white was the odd one out and got
+   * worse as --secondary-color was lifted for legibility. */
+  color: var(--chrome-text);
 }
 
 /* ── Save Configuration button — dim when nothing to save, highlighted when dirty ── */
 #saveConfigBtn {
-  background-color: var(--secondary-color);
+  background-color: var(--btn-secondary-bg);
   opacity: 0.5;
   transition: background-color 0.25s, opacity 0.25s, box-shadow 0.25s;
 }
@@ -1652,9 +1777,10 @@ button.update-btn {
 }
 #saveConfigBtn.dirty,
 #saveRssiBtn.dirty {
-  background-color: #e67e22;
+  background-color: var(--accent-color);
+  color: var(--highlight-text);
   opacity: 1;
-  box-shadow: 0 0 8px rgba(230, 126, 34, 0.55);
+  box-shadow: 0 0 8px var(--accent-color);
   animation: pulse-save 1.8s ease-in-out infinite;
 }
 @keyframes pulse-save {
@@ -1839,14 +1965,15 @@ button.update-btn {
 /* Tablets and smaller laptops */
 @media screen and (max-width: 1024px) {
   main {
-    margin: 4px;
+    margin: 0 4px 4px;   /* no top margin — the card meets the tabs above it */
     padding: 0 4px;
   }
   
-  .logo h1 {
-    font-size: 28px;
+  /* Lockup scales by height; width follows via aspect-ratio. */
+  .logo-lockup {
+    height: 37px;
   }
-  
+
   .nav-links {
     gap: 12px;
   }
@@ -1872,17 +1999,20 @@ button.update-btn {
   }
   
   header {
-    padding: 12px 8px;
+    /* Bottom stays 0, as in the base rule: the tabs still have to meet the
+     * content card.  This was `12px 8px`, which reinstated a 12px bottom and
+     * detached them at exactly the widths where the design is most cramped. */
+    padding: 12px 8px 0;
   }
   
-  .logo h1 {
-    font-size: 20px;
-    margin-left: 8px;
-  }
-  
-  .logo img {
-    max-width: 36px;
-    height: auto;
+  /* 7.6:1 artwork now, so a given height is much wider than before: 27px tall is
+   * ~205px wide.  max-width guards the narrowest devices — with aspect-ratio and
+   * object-fit:contain, the height gives way rather than the logo distorting
+   * when the width bound is the one that binds. */
+  .logo-lockup {
+    height: 27px;
+    max-width: 72vw;
+    object-fit: contain;
   }
   
   nav {
@@ -1894,7 +2024,11 @@ button.update-btn {
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
-    padding-top: 8px;
+    /* This was 8px — HALF the base 16px — so the tabs crowded the logo at
+     * exactly the width where they stop sitting beside it and stack under it
+     * instead.  Narrow layouts need more separation there, not less, because
+     * the two are no longer distinguished by being on different axes. */
+    padding-top: 20px;
     width: 100%;
   }
   
@@ -1907,7 +2041,7 @@ button.update-btn {
   }
   
   main {
-    margin: 4px 0;
+    margin: 0 0 4px;     /* no top margin — the card meets the tabs above it */
     padding: 0;
   }
   
@@ -2022,7 +2156,8 @@ button.update-btn {
   
   .settings-nav-item.active {
     border-left: none;
-    border-bottom-color: var(--primary-color);
+    /* Narrow layout moves the indicator to the bottom edge — same colour. */
+    border-bottom-color: var(--heading-color, var(--primary-color));
   }
   
   .settings-content {
@@ -2040,10 +2175,10 @@ button.update-btn {
 
 /* Small phones */
 @media screen and (max-width: 480px) {
-  .logo h1 {
-    font-size: 18px;
+  .logo-lockup {
+    height: 23px;
   }
-  
+
   .nav-links a {
     font-size: 12px;
     padding: 6px 8px;
@@ -2110,7 +2245,7 @@ button.update-btn {
 }
 .mn-btn-start {
   background-color: var(--primary-color);
-  color: #fff;
+  color: var(--chrome-text);
   border: none;
   padding: 10px 20px;
   border-radius: 6px;
@@ -2262,7 +2397,17 @@ button.update-btn {
 
 .mn-leaderboard {
   width: 100%;
-  border-collapse: collapse;
+  /* separate + zero spacing, NOT collapse.  The bottom border added below had
+   * no side borders to meet, so it read as a floating line with open corners.
+   * Enclosing the table needs a border on the table itself — and with
+   * border-collapse:collapse the spec does not apply border-radius to collapsed
+   * borders, so the corners would be square while overflow:hidden clipped the
+   * background round: the corners still would not line up.  `separate` lets the
+   * radius apply to the border properly.  Spacing is 0, so cell edges sit
+   * exactly where they did under collapse. */
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--border-color);
   font-size: 13px;
   margin-bottom: 20px;
   background: var(--bg-secondary);
@@ -2271,16 +2416,22 @@ button.update-btn {
 }
 .mn-leaderboard thead tr {
   background: var(--bg-primary);
-  border-bottom: 2px solid var(--border-color);
 }
 .mn-leaderboard th {
+  /* Moved here from `thead tr`: under border-collapse:separate, borders set on
+   * a ROW are not painted at all. */
+  border-bottom: 2px solid var(--border-color);
   padding: 9px 12px;
   text-align: left;
   font-weight: 600;
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #fff;
+  /* These th cells take their background from the generic `table th` rule, i.e.
+   * CHROME — so the label has to be --chrome-text.  Hardcoded #fff outlived the
+   * teal-only days and would be unreadable on the light-chrome themes
+   * (Blueprint, Runway Amber, Trackside Hi-Vis, Graphite Mono). */
+  color: var(--chrome-text);
   white-space: nowrap;
 }
 .mn-leaderboard td {
@@ -2288,13 +2439,15 @@ button.update-btn {
   border-bottom: 1px solid var(--border-color);
   vertical-align: middle;
 }
+/* The table's own border now draws the bottom edge, so the last row drops its
+ * cell border — keeping both would stack two 1px lines at the bottom. */
 .mn-leaderboard tbody tr:last-child td { border-bottom: none; }
 .mn-leaderboard tbody tr:nth-child(even) { background: var(--table-even-bg); }
 
 .mn-lb-rank    { font-weight: 700; width: 28px; color: var(--secondary-color); }
 .mn-lb-pilot   { font-weight: 600; }
 .mn-lb-mono    { font-family: 'Courier New', monospace; }
-.mn-lb-fastest { color: #27ae60; font-weight: 600; }
+.mn-lb-fastest { color: var(--accent-color); font-weight: 600; }
 
 /* Status badges inside leaderboard */
 .mn-status-racing  { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px; background: rgba(76,175,80,0.18); color: #4caf50; }
@@ -2328,18 +2481,27 @@ button.update-btn {
 .mn-card-edit-btn { color: #fff !important; opacity: 0.7; }
 .mn-card-edit-btn:hover { opacity: 1; background: rgba(255,255,255,0.2) !important; }
 
-/* Empty pilot slot */
+/* Empty pilot slot.
+ *
+ * "Slot X" and "Not connected" used --secondary-color (already the dimmest text
+ * token) MULTIPLIED by a 0.55-0.6 opacity, landing near 2:1 against the card —
+ * legible on a desk, not on a phone in daylight, which is where this app is
+ * actually read.
+ *
+ * Now --text-color, so it tracks the theme the way the user asked: near-white
+ * on the dark themes, near-black on Daybright.  A light opacity still marks the
+ * slot as unoccupied without costing legibility. */
 .mn-pilot-card-empty .mn-pilot-card-header-empty {
   background: var(--bg-primary) !important;
-  color: var(--secondary-color);
-  opacity: 0.6;
+  color: var(--text-color);
+  opacity: 0.9;
 }
 .mn-card-empty-label {
   padding: 10px;
   font-size: 12px;
-  color: var(--secondary-color);
+  color: var(--text-color);
   text-align: center;
-  opacity: 0.55;
+  opacity: 0.8;
 }
 .mn-card-solo-label {
   padding: 12px 8px;
@@ -2354,7 +2516,11 @@ button.update-btn {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
-  align-items: flex-start;
+  /* stretch, not flex-start: an occupied card is taller than an empty one (its
+   * header carries an edit button and a badge), so empty slots used to sit
+   * short and the row looked ragged.  Stretch sizes every card in a row to the
+   * tallest, which keeps the grid even however many laps are showing. */
+  align-items: stretch;
 }
 .mn-pilot-card {
   flex: 1 1 160px;
@@ -2362,7 +2528,13 @@ button.update-btn {
   border-radius: 8px;
   overflow: hidden;
   background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  /* This border was already here, but --border-color measures 1.16-1.62:1
+   * against the card background across the themes — present in the DOM and
+   * invisible on screen, which is why the cards read as edgeless.  Chrome puts
+   * it at 4.1-13.9:1 and matches the content card, so every card on the page
+   * shares one edge treatment.  Applies to empty slots too: those carry
+   * .mn-pilot-card as well as .mn-pilot-card-empty. */
+  border: 1px solid var(--primary-color);
 }
 .mn-pilot-card-header {
   display: flex;
@@ -2417,8 +2589,11 @@ button.update-btn {
 }
 .mn-card-lap-time  { font-family: 'Courier New', monospace; font-weight: 600; font-size: 13px; }
 .mn-card-lap-cumul { font-family: 'Courier New', monospace; font-size: 11px; color: var(--secondary-color); }
-.mn-card-lap.mn-card-lap-best .mn-card-lap-time { color: #27ae60; }
-.mn-card-lap.mn-card-lap-best .mn-card-lap-num  { color: #27ae60; }
+/* Best lap now uses the theme accent, matching tr.fastest-lap in the
+ * single-race table.  These were #27ae60 green while that table was orange —
+ * the same concept in two colours.  Status greens below are unchanged. */
+.mn-card-lap.mn-card-lap-best .mn-card-lap-time { color: var(--accent-color); }
+.mn-card-lap.mn-card-lap-best .mn-card-lap-num  { color: var(--accent-color); }
 
 @media (max-width: 600px) {
   .mn-pilot-card { flex: 1 1 120px; }

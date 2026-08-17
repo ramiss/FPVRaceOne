@@ -897,7 +897,11 @@ void Config::setDefaults(void) {
     conf.webhookLap = 1;  // Lap enabled by default
     strlcpy(conf.pilotName, "Pilot", sizeof(conf.pilotName));  // Default pilot name
     conf.pilotColor = 0x0080FF;  // Default blue color
-    strlcpy(conf.theme, "oceanic", sizeof(conf.theme));  // Default theme
+    // Default theme.  Must be a slug that exists in data/style.css, and must
+    // fit conf.theme (char[21], so <=20 chars).  script.js carries the matching
+    // DEFAULT_THEME plus a THEME_ALIASES map that rescues units still holding
+    // the old "oceanic" value in NVS.
+    strlcpy(conf.theme, "fpvraceone", sizeof(conf.theme));
     strlcpy(conf.selectedVoice, "piper", sizeof(conf.selectedVoice));  // Default voice
     conf.voiceEnabled = 1;   // default ON 
     strlcpy(conf.lapFormat, "pilottime", sizeof(conf.lapFormat));  // Default lap format
