@@ -3,6 +3,31 @@
 #include <Arduino.h>
 #include <vector>
 
+// ── USB serial log output ───────────────────────────────────────────────────
+//
+// Gates ONLY the Serial.printf in log() below.  The in-memory ring is filled
+// either way, so /api/debuglog and the web Serial Monitor keep the complete
+// record — turning this off costs no diagnostic the UI can reach, it only stops
+// the bytes leaving the USB port.
+//
+// DEFINED HERE, not in config.h, for two reasons.  log() is an inline function
+// in this header, so every translation unit must see the same value or they
+// compile different bodies for one function — which means the flag has to live
+// in a header everyone including this one already gets.  And config.h cannot be
+// that header: it pulls in ArduinoJson/AsyncJson, which the WEBHOOK, STORAGE
+// and RACEHISTORY libraries do not carry, so including it here fails to build.
+//
+// NOT tied to TIMING_MARKER_ENABLED: that flag means "the rig's marker wire is
+// on GPIO21".  Bench work without the marker wired is normal, and coupling the
+// two would silently kill logging for anyone doing it.
+//
+// DEFAULTS ON because serial is the only view into a failure that happens
+// BEFORE the webserver starts — /api/debuglog cannot report a boot that never
+// reaches it. Set to 0 for a silent shipping build.
+#ifndef DEBUG_SERIAL_ENABLED
+#define DEBUG_SERIAL_ENABLED 1
+#endif
+
 // Ring depth and per-line length.
 //
 // Was 100 x 256 = 26,000 bytes, claimed in one contiguous heap block and held
@@ -70,8 +95,20 @@ public:
         head = (head + 1) % DEBUG_BUFFER_SIZE;
         if (count < DEBUG_BUFFER_SIZE) count++;
 
-        // Also print to serial
+        // Also print to serial.
+        //
+        // The ring above is filled FIRST and unconditionally, so /api/debuglog
+        // and the web Serial Monitor keep the complete record whether or not
+        // this write happens — gating it costs no diagnostic the UI can reach.
+        //
+        // On this target Serial is HWCDC (ARDUINO_USB_CDC_ON_BOOT=1).  When USB
+        // is plugged but nothing is draining the port, its 256-byte TX ring
+        // fills and this call blocks; setup() calls Serial.setTxTimeoutMs(1) to
+        // bound that to ~2 ms.  Without that bound it is 100 ms, which is what
+        // made this very logger stall the sampler it reports on.
+#if DEBUG_SERIAL_ENABLED
         Serial.printf("[%lu] %s", entry.timestamp, entry.message);
+#endif
     }
 
     // Number of entries currently held (0..DEBUG_BUFFER_SIZE).

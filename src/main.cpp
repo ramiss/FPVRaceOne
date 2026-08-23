@@ -235,6 +235,28 @@ void setup() {
     while (Serial.available()) { Serial.read(); }
     DEBUG_INIT;
 
+    // Bound a blocked USB CDC write to ~2 ms instead of the 100 ms default.
+    //
+    // Serial here is HWCDC (ARDUINO_USB_CDC_ON_BOOT=1).  Its TX ring is 256
+    // bytes.  When USB is PLUGGED BUT NOTHING IS DRAINING the port — a timer
+    // powered from a laptop, no terminal open — the ring fills and every write
+    // then blocks for tx_timeout_ms.  That is not a bench-only condition, and
+    // the writes that matter are the ones on loop(): handleLapTimerUpdate()
+    // emits the 10-second [TIMING] summary itself, so the log line stalled the
+    // sampler and the NEXT window reported the stall as a 114 ms gap.  The
+    // diagnostic was manufacturing the fault it reported.
+    //
+    // 1, NOT 0.  With 0 the driver's retry counter starts at zero and is
+    // decremented BEFORE its `tries == 0` exit test; a full byte-buffer returns
+    // pdTRUE for a zero-length send (documented IDF behaviour), so the loop
+    // makes no progress, underflows to 0xFFFFFFFF and spins on delay(1) for
+    // ~49 days.  1 gives a single retry then a clean exit.
+    //
+    // Cost: characters are dropped rather than waited on when the host is not
+    // reading.  DebugLogger fills its in-memory ring BEFORE calling Serial, so
+    // /api/debuglog and the web Serial Monitor keep the full record either way.
+    Serial.setTxTimeoutMs(1);
+
     // Initialize storage first (LittleFS only at boot)
     storage.init();
 

@@ -92,6 +92,12 @@
 // emulator rig is wired up.
 #define TIMING_MARKER_ENABLED 0
 
+// USB serial log output is gated by DEBUG_SERIAL_ENABLED, which lives in
+// lib/DEBUG/debuglogger.h rather than here.  It has to sit in a header that
+// every user of DEBUG() already includes (log() is inline), and config.h cannot
+// serve that role — it pulls in ArduinoJson/AsyncJson, which several libraries
+// that log do not carry.  Deliberately NOT tied to TIMING_MARKER_ENABLED above.
+
 //ESP23-C3
 #if defined(ESP32C3)
 
