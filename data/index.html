@@ -140,38 +140,54 @@
         <!-- Config moved to settings modal -->
       </div>
 
-      <div id="race" class="tabcontent" style="display: block;">
+      <div id="race" class="tabcontent">
 
         <!-- ── Multi-node status bar (hidden in standalone mode) ── -->
-        <div id="mn-race-status-bar" style="display:none; text-align:center; font-size:13px; font-weight:600; color:#fff; background:#1565c0; padding:6px 14px; border-radius:6px; letter-spacing:0.02em; margin:6px 0;">
+        <!-- Mode strip.  Was a filled #1565c0 bar; now a quiet line under the
+             header, because it states a standing fact ("this unit is the
+             master") rather than raising an alert. -->
+        <div id="mn-race-status-bar" class="race-mode-strip" style="display:none;">
           <span id="mn-race-status-text"></span>
         </div>
 
         <!-- ── Single-pilot view (standalone / client mode) ── -->
-        <div id="single-race-view">
-          <div id="raceDataButtons" style="display: none; margin-bottom: 16px; text-align: center;">
-            <button onclick="downloadCurrentRaceData()" style="padding: 8px 16px; margin-right: 8px;">Download Current Race</button>
-            <button onclick="transferToRaceHistory()" style="padding: 8px 16px;">Transfer to Race History</button>
+        <div id="single-race-view" class="race-shell">
+
+          <!-- Console: clock, run state and controls.  Fixed width, never
+               scrolls, so Stop Race is always reachable. -->
+          <div class="race-console">
+            <div class="race-label">Race clock</div>
+            <span id="timer">00:00:00s</span>
+            <div id="raceStatePill" class="race-state" hidden><i></i><span id="raceStateText">Racing</span></div>
+            <!-- .racebuttons deliberately dropped: it is declared later in the
+                 stylesheet than .race-controls and would win the cascade with
+                 its 2-up (500px+: 4-up) grid, which cannot fit the console. -->
+            <div class="race-controls">
+              <button id="startRaceButton" onclick="startRace()">Start Race</button>
+              <button id="stopRaceButton" onclick="stopRace()" disabled>Stop Race</button>
+              <button id="addLapButton" onclick="addManualLap()" disabled>Add Lap</button>
+              <button id="clearLapsButton" onclick="clearLaps()">Clear Laps</button>
+            </div>
+            <div class="race-meta">
+              <div>
+                <span class="rm-label">Pilot</span>
+                <span class="rm-value" id="pilotNameDisplay">--</span>
+              </div>
+              <div>
+                <!-- The value carries its own "Lap N" / "Lap N / max" text from
+                     script.js, so the label names the row rather than repeating
+                     the word. -->
+                <span class="rm-label">Progress</span>
+                <span class="rm-value" id="lapCounter">Lap 0</span>
+              </div>
+            </div>
           </div>
-          <span id="timer">00:00:00s</span>
-          <div id="pilotNameDisplay" style="text-align: center; font-size: 15px; font-weight: 600; color: var(--secondary-color); margin: 2px 0; cursor: default;"></div>
-          <div id="lapCounter" style="text-align: center; font-size: 18px; font-weight: bold; color: var(--primary-color); margin: 4px 0;">Lap 0</div>
-          <div class="racebuttons">
-            <button id="startRaceButton" onclick="startRace()">Start Race</button>
-            <button id="stopRaceButton" onclick="stopRace()" disabled>Stop Race</button>
-            <button id="addLapButton" onclick="addManualLap()" disabled>Add Lap</button>
-            <button id="clearLapsButton" onclick="clearLaps()">Clear Laps</button>
-          </div>
-          <table id="lapTable">
-            <tr>
-              <th>Lap No</th>
-              <th>Lap Time</th>
-              <th>Gap</th>
-              <th>Total Time</th>
-            </tr>
-          </table>
-          <div id="lapAnalysis" class="lap-analysis">
-            <h3>Lap Analysis</h3>
+
+          <div class="race-right">
+            <!-- Summary sits ABOVE the lap list: the four numbers a pilot
+                 actually wants are the first thing on the screen, instead of
+                 being reached by scrolling past every lap. -->
+            <div class="race-section-head"><span>Summary</span></div>
             <div class="stats-boxes">
               <div class="stat-box">
                 <div class="stat-label">Fastest Lap</div>
@@ -191,42 +207,73 @@
               <div class="stat-box">
                 <div class="stat-label">Median Lap</div>
                 <div class="stat-value" id="statMedian">--</div>
+                <div class="stat-sublabel"></div>
               </div>
             </div>
-            <div class="analysis-tabs">
-              <button class="analysis-tab active" onclick="switchAnalysisMode('history')">Lap History</button>
-              <button class="analysis-tab" onclick="switchAnalysisMode('fastestRound')">Fastest Round (3 Laps)</button>
+
+            <div class="race-section-head"><span>Laps</span></div>
+            <table id="lapTable">
+              <tr>
+                <th>Lap No</th>
+                <th>Lap Time</th>
+                <th>Gap</th>
+                <th>Total Time</th>
+              </tr>
+            </table>
+
+            <div id="lapAnalysis" class="lap-analysis">
+              <h3>Lap Analysis</h3>
+              <div class="analysis-tabs">
+                <button class="analysis-tab active" onclick="switchAnalysisMode('history')">Lap History</button>
+                <button class="analysis-tab" onclick="switchAnalysisMode('fastestRound')">Fastest Round (3 Laps)</button>
+              </div>
+              <div id="analysisContent" class="analysis-content">
+                <p class="no-data">Complete at least 1 lap to see analysis</p>
+              </div>
             </div>
-            <div id="analysisContent" class="analysis-content">
-              <p class="no-data">Complete at least 1 lap to see analysis</p>
+
+            <div id="raceDataButtons" class="race-actions" style="display: none;">
+              <button onclick="downloadCurrentRaceData()">Download Current Race</button>
+              <button onclick="transferToRaceHistory()">Transfer to Race History</button>
             </div>
           </div>
         </div>
 
         <!-- ── Master multi-node race view ── -->
-        <div id="master-race-view" style="display:none;">
-          <div id="mn-race-data-buttons" style="display:none; margin-bottom:12px; text-align:center;">
-            <button onclick="downloadMnRaceData()" style="padding:8px 16px;">Download Race</button>
-          </div>
-          <div id="mn-race-timer" class="mn-race-timer-display">00:00:00s</div>
-          <div class="racebuttons mn-race-buttons">
-            <button id="mnStartRaceBtnMain" onclick="mnStartRace()">Start All</button>
-            <button id="mnStopRaceBtnMain"  onclick="mnStopRace()" disabled>Stop All</button>
-            <button id="mnClearRaceBtnMain" onclick="mnClearRace()">Clear</button>
-          </div>
-          <div id="mn-race-container" style="margin: 16px 0;"></div>
+        <div id="master-race-view" class="race-shell" style="display:none;">
 
-          <!-- Pilot backup / restore.  Stores per-MAC pilot settings (name,
-               color, band/channel/freq, enter/exit RSSI, preferred slot) to
-               a JSON file the director can re-load on the same physical
-               hardware later — calibration is hardware-specific so MAC is
-               the matching key, never slot number. -->
-          <div style="margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-color, rgba(128,128,128,0.25)); text-align:center;">
-            <button onclick="mnBackupPilots()" style="padding:8px 16px;">Backup Pilots</button>
-            <button onclick="document.getElementById('mnRestoreFile').click()" style="padding:8px 16px; margin-left:8px;">Restore Pilots</button>
-            <input type="file" id="mnRestoreFile" accept=".json,application/json" style="display:none;" onclick="this.value='';" onchange="mnRestoreOpenFile(this)">
-            <div style="font-size:12px; color:var(--secondary-color); margin-top:6px;">
-              Backup saves each pilot's name, color, channel and RSSI calibration tied to their physical unit's MAC. Restore writes those settings back to the same hardware when connected as client(s).
+          <!-- onRaceTabOpen() shows this with style.display = '' (not 'block'),
+               which clears the inline value and lets .race-shell's grid apply. -->
+          <div class="race-console">
+            <div class="race-label">Race clock</div>
+            <div id="mn-race-timer" class="mn-race-timer-display">00:00:00s</div>
+            <div id="mnRaceStatePill" class="race-state" hidden><i></i><span>Racing</span></div>
+            <div class="mn-race-buttons race-controls">
+              <button id="mnStartRaceBtnMain" onclick="mnStartRace()">Start All</button>
+              <button id="mnStopRaceBtnMain"  onclick="mnStopRace()" disabled>Stop All</button>
+              <button id="mnClearRaceBtnMain" onclick="mnClearRace()">Clear</button>
+            </div>
+          </div>
+
+          <div class="race-right">
+            <div id="mn-race-container"></div>
+
+            <div id="mn-race-data-buttons" class="race-actions" style="display:none;">
+              <button onclick="downloadMnRaceData()">Download Race</button>
+            </div>
+
+            <!-- Pilot backup / restore.  Stores per-MAC pilot settings (name,
+                 color, band/channel/freq, enter/exit RSSI, preferred slot) to
+                 a JSON file the director can re-load on the same physical
+                 hardware later — calibration is hardware-specific so MAC is
+                 the matching key, never slot number. -->
+            <div class="race-actions">
+              <button onclick="mnBackupPilots()">Backup Pilots</button>
+              <button onclick="document.getElementById('mnRestoreFile').click()">Restore Pilots</button>
+              <input type="file" id="mnRestoreFile" accept=".json,application/json" style="display:none;" onclick="this.value='';" onchange="mnRestoreOpenFile(this)">
+              <p class="race-actions-note">
+                Backup saves each pilot's name, color, channel and RSSI calibration tied to their physical unit's MAC. Restore writes those settings back to the same hardware when connected as client(s).
+              </p>
             </div>
           </div>
         </div>
@@ -238,15 +285,28 @@
         <div id="rv-status-banner" style="text-align:center; font-size:13px; font-weight:600; color:#fff; background:#1565c0; padding:6px 14px; border-radius:6px; letter-spacing:0.02em; margin:6px 0;">
           Waiting for race director to start race...
         </div>
-        <div id="rv-race-data-buttons" style="display:none; margin-bottom:12px; text-align:center;">
-          <button onclick="downloadClientRaceData()" style="padding:8px 16px;">Download Race</button>
-        </div>
-        <div id="rv-race-timer" class="mn-race-timer-display">00:00.00</div>
-        <div id="rv-race-container" style="margin: 16px 0;"></div>
-        <div style="margin-top: 24px; padding-top: 16px; text-align:center; border-top: 1px solid var(--border-color, rgba(128,128,128,0.25));">
-          <button onclick="document.getElementById('rvImportFile').click()" style="padding:10px 24px; font-size:15px;">Import Multi Race File</button>
-          <input type="file" id="rvImportFile" accept=".json" style="display:none;" onclick="this.value='';" onchange="importClientRace(this);">
-          <div style="font-size:12px; color:var(--secondary-color); margin-top:8px;">Load a saved MultiRace file to review.</div>
+        <div class="race-shell">
+          <!-- Read-only mirror: no Start / Stop / Clear anywhere, so the console
+               carries the clock and the run state and nothing else. -->
+          <div class="race-console">
+            <div class="race-label">Race clock</div>
+            <div id="rv-race-timer" class="mn-race-timer-display">00:00.00</div>
+            <div id="rvRaceStatePill" class="race-state" hidden><i></i><span>Racing</span></div>
+          </div>
+
+          <div class="race-right">
+            <div id="rv-race-container"></div>
+
+            <div id="rv-race-data-buttons" class="race-actions" style="display:none;">
+              <button onclick="downloadClientRaceData()">Download Race</button>
+            </div>
+
+            <div class="race-actions">
+              <button onclick="document.getElementById('rvImportFile').click()">Import Multi Race File</button>
+              <input type="file" id="rvImportFile" accept=".json" style="display:none;" onclick="this.value='';" onchange="importClientRace(this);">
+              <p class="race-actions-note">Load a saved MultiRace file to review.</p>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -1432,6 +1492,8 @@
                 <select id="themeSelect" onchange="changeTheme()">
                   <option value="fpvraceone" selected>FPVRaceOne</option>
                   <option value="fpvraceoneday">FPVRaceOne Day</option>
+                  <option value="bluelovers">Blue Lovers</option>
+                  <option value="blueloversday">Blue Lovers Day</option>
                   <option value="paddockviolet">Paddock Violet</option>
                   <option value="cobaltsteel">Cobalt &amp; Steel</option>
                   <option value="vaporcircuit">Vapor Circuit</option>

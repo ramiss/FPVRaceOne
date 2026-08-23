@@ -1046,7 +1046,8 @@ onload = async function (e) {
   loadFirmwareVersion();
 
   config.style.display = "none";
-  race.style.display = "block";
+  // '' not "block" — see the note in openTab(); .tabcontent is a flex column.
+  race.style.display = "";
   calib.style.display = "none";
 
   attachConfigStagingListeners();
@@ -2174,8 +2175,12 @@ function openTab(evt, tabName) {
     tablinks[i].className = tablinks[i].className.replace(" active", "");
   }
 
-  // Show the current tab, and add an "active" class to the button that opened the tab
-  document.getElementById(tabName).style.display = "block";
+  // Show the current tab, and add an "active" class to the button that opened
+  // the tab.  '' rather than 'block': .tabcontent is a flex column that also
+  // carries flex:1/min-height:0, which is what lets .race-shell fill the
+  // viewport and scroll its right column instead of scrolling the whole page.
+  // An inline display:block would beat the class and collapse that chain.
+  document.getElementById(tabName).style.display = "";
 
   // Switch between single-pilot and master race view
   if (tabName === "race")     onRaceTabOpen();
@@ -4285,6 +4290,10 @@ async function startRace() {
   startRaceButton.disabled = true;
   startRaceButton.classList.add('active');
   stopRaceButton.disabled = false;  // allow cancelling during countdown
+  // The console's run-state pill keys off stopRaceButton.disabled, and every
+  // other call site for this is on a stop/clear path — without this the pill
+  // would only ever be updated on the way OUT of a race.
+  updateRaceDataButtonsVisibility();
 
   // iOS Safari: fire the FIRST TTS call DIRECTLY and SYNCHRONOUSLY here,
   // still inside the click gesture.  Going through audioAnnouncer's
@@ -4450,7 +4459,15 @@ function updateRaceDataButtonsVisibility() {
   if (buttonsDiv) {
     // Only show buttons if we have lap data AND the race is stopped (stop button is disabled)
     const raceIsStopped = stopRaceButton.disabled;
-    buttonsDiv.style.display = (lapTimes.length > 0 && raceIsStopped) ? 'block' : 'none';
+    // 'flex', not 'block': #raceDataButtons is a .race-actions row, and an
+    // inline display:block would beat the class and stack the buttons.
+    buttonsDiv.style.display = (lapTimes.length > 0 && raceIsStopped) ? 'flex' : 'none';
+  }
+  // The console's run-state pill reads the same signal the buttons do: Stop is
+  // enabled exactly while a race is live.
+  const statePill = document.getElementById('raceStatePill');
+  if (statePill) {
+    statePill.hidden = stopRaceButton.disabled;
   }
 }
 
@@ -8676,7 +8693,11 @@ function mnRenderRaceTab(nodes, opts) {
 
     if (n.empty) {
       html += `<div class="mn-pilot-card mn-pilot-card-empty">
-        <div class="mn-pilot-card-header mn-pilot-card-header-empty">Slot ${_slotLetter(n.nodeId)}</div>
+        <div class="mn-pilot-card-header mn-pilot-card-header-empty">
+          <span class="mn-card-swatch mn-card-swatch-empty"></span>
+          <span class="mn-card-name">Slot ${_slotLetter(n.nodeId)}</span>
+        </div>
+        <div class="mn-pilot-card-sub"><span class="mn-card-slot">Empty</span></div>
         <div class="mn-pilot-card-laps mn-card-empty-label">${emptySlotLabel}</div>
       </div>`;
       return;
@@ -8702,15 +8723,24 @@ function mnRenderRaceTab(nodes, opts) {
     const isSoloRacing = n.running && !n.isMaster &&
       (!raceRunning || _isExcludedThisRace) && !_mnGraceSuppressSolo;
     const canTap  = !readOnly && mnDevMode && raceRunning && !n.independent && !isSoloRacing && !isDisconnected;
-    // Card header text colour follows the WCAG relative luminance of the
-    // pilot's background colour: light backgrounds (gold, green, cyan,
-    // white, spring green) get black text; everything else stays white.
-    // Threshold 0.6 keeps red / orange / hot pink on white text but flips
-    // the user's flagged five.  Theme-independent.
-    const textColor = _pilotCardTextColor(color);
+    // The header is no longer FILLED with the pilot's colour — the colour is a
+    // swatch beside the name instead.  That is what retires the luminance
+    // check: there is no arbitrary user-picked background under the label any
+    // more, so the text is just --text-color and reads the same on all 14
+    // themes.  This was _pilotCardTextColor()'s only caller — the function is
+    // now unused and can be deleted if no filled-colour surface comes back.
     const devAttr = canTap
-      ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.laps.length},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="background:${color};color:${textColor};cursor:pointer;"`
-      : ` style="background:${color};color:${textColor};"`;
+      ? ` onclick="mnDevTriggerLap(${n.nodeId},${n.laps.length},'${callsign.replace(/'/g,"\\'")}');" title="Dev: click to simulate lap" style="cursor:pointer;"`
+      : '';
+    // Position comes from the same ranked array the standings table uses, so
+    // the card and the table can never disagree.  Solo / excluded / skipped
+    // pilots are not in it, hence the -1 guard.
+    const rankIdx   = Array.isArray(ranked) ? ranked.findIndex(r => r.nodeId === n.nodeId) : -1;
+    const posLabel  = rankIdx >= 0 ? `P${rankIdx + 1}` : '';
+    const slotLabel = n.isMaster ? 'Host' : `Slot ${_slotLetter(n.nodeId)}`;
+    const subLeft   = posLabel ? `${posLabel} &middot; ${slotLabel}` : slotLabel;
+    const bestLabel = (n.laps && n.laps.length && isFinite(n.fastestMs) && n.fastestMs > 0)
+      ? `<span class="mn-card-best">${formatMsRace(n.fastestMs)}</span>` : '';
     // Show Racing badge as soon as raceRunning flips (pre-arm) for non-excluded nodes, matching the master card.
     const isRacing = n.isMaster
       ? raceRunning
@@ -8721,8 +8751,11 @@ function mnRenderRaceTab(nodes, opts) {
     // can quickly edit the host pilot from the Race tab — the modal hides
     // Kick + Swap for nodeId === 0 since they don't apply to the host.
     const cardEditBtn = readOnly ? '' : `<button class="mn-edit-btn mn-card-edit-btn" onclick="event.stopPropagation();mnOpenPilotModal(${n.nodeId})" title="Edit pilot" style="margin-right:5px;vertical-align:middle;"><svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25zm17.71-10.21a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg></button>`;
+    // "Me" moves to the theme accent.  It used to be near-black on the pilot's
+    // own colour; on the panel that reads as no badge at all, and this is the
+    // one badge a pilot is actually looking for on their own screen.
     const meBadge = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
-      ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Me</span>' : '';
+      ? ' <span class="mn-card-badge mn-card-badge-me">Me</span>' : '';
     const slotPrefix = n.isMaster ? '' : `${_slotLetter(n.nodeId)}: `;
     const disconnectedBadge = isDisconnected
       ? ' <span class="mn-card-badge" style="background:rgba(208,80,80,0.85);color:#fff;">Disconnected</span>'
@@ -8739,7 +8772,26 @@ function mnRenderRaceTab(nodes, opts) {
     const unanchoredBadge = (n.unanchored && !n.isMaster)
       ? ' <span class="mn-card-badge" style="background:rgba(90,90,90,0.85);color:#fff;" title="No clock anchor — lap times are accurate, but this pilot cannot be ordered against the field.">Unsynced</span>'
       : '';
-    html += `<div class="mn-pilot-card"><div class="mn-pilot-card-header"${devAttr}>${cardEditBtn}${slotPrefix}${callsign}<span style="flex:1;"></span>${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.25);">Host</span>' : ''}${meBadge}${disconnectedBadge}${staleBadge}${unanchoredBadge}${isRacing && !isDisconnected ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}${canTap ? ' <span class="mn-card-badge" style="background:rgba(0,0,0,0.3);font-size:9px;">TAP</span>' : ''}</div><div class="mn-pilot-card-laps">`;
+    // Two header rows: identity on top (swatch + name + edit), status beneath
+    // (position, slot, badges, the pilot's own best lap).  The badges keep the
+    // exact inline colours they had — they are semantic, not thematic — but
+    // they now sit on the panel rather than on the pilot's colour, so the
+    // white-text override in .mn-card-badge still holds.
+    html += `<div class="mn-pilot-card${isDisconnected ? ' mn-pilot-card-offline' : ''}${rankIdx === 0 ? ' mn-pilot-card-lead' : ''}">`
+          + `<div class="mn-pilot-card-header"${devAttr}>`
+          +   `<span class="mn-card-swatch" style="background:${color};"></span>`
+          +   `<span class="mn-card-name">${slotPrefix}${callsign}</span>`
+          +   cardEditBtn
+          + `</div>`
+          + `<div class="mn-pilot-card-sub">`
+          +   `<span class="mn-card-slot">${subLeft}</span>`
+          +   `${n.isMaster ? ' <span class="mn-card-badge" style="background:rgba(120,120,120,0.35);">Host</span>' : ''}`
+          +   `${meBadge}${disconnectedBadge}${staleBadge}${unanchoredBadge}`
+          +   `${isRacing && !isDisconnected ? ` <span class="mn-card-badge" style="background:${racingBadgeColor};">Racing</span>` : ''}`
+          +   `${canTap ? ' <span class="mn-card-badge" style="background:rgba(120,120,120,0.4);font-size:9px;">TAP</span>' : ''}`
+          +   bestLabel
+          + `</div>`
+          + `<div class="mn-pilot-card-laps">`;
 
     // Not racing but has skip-master-start enabled
     if (!n.running && !n.isMaster && n.skipEnabled) {
@@ -9887,7 +9939,8 @@ function rvShowTabIfClient() {
     // If we're somehow on the Race View tab in a non-client mode, switch away.
     tab.style.display = 'none';
     const raceTab = document.getElementById('race');
-    if (raceTab) raceTab.style.display = 'block';
+    // '' not 'block' — see the note in openTab(); .tabcontent is a flex column.
+    if (raceTab) raceTab.style.display = '';
   }
   // In client mode the "Race" tab is the pilot's own solo race; the "Race View"
   // tab mirrors the multi-node race director's view.  Rename both to make that
@@ -10200,7 +10253,11 @@ function rvUpdateDownloadButton() {
   if (!div) return;
   const hasData = (rvLastNodes || []).some(n => (n.laps || []).length > 0);
   const stopped = !rvRaceRunning && !rvPrearmActive;
-  div.style.display = (stopped && hasData) ? 'block' : 'none';
+  // 'flex' — this is a .race-actions row; inline display:block would beat the
+  // class and stack the buttons instead of laying them out in a row.
+  div.style.display = (stopped && hasData) ? 'flex' : 'none';
+  const rvPill = document.getElementById('rvRaceStatePill');
+  if (rvPill) rvPill.hidden = stopped;
 }
 
 function downloadClientRaceData() {
@@ -10459,7 +10516,10 @@ function mnUpdateRaceDataButtons() {
   if (!div) return;
   const hasData = (mnCurrentNodes || []).some(n => (n.laps || []).length > 0)
                || (window.lapTimes || []).length > 0;
-  div.style.display = (!mnRaceRunning && hasData) ? 'block' : 'none';
+  // 'flex' — see the note in rvUpdateRaceDataButtons(); .race-actions is a row.
+  div.style.display = (!mnRaceRunning && hasData) ? 'flex' : 'none';
+  const mnPill = document.getElementById('mnRaceStatePill');
+  if (mnPill) mnPill.hidden = !mnRaceRunning;
 }
 
 function downloadMnRaceData() {

@@ -1,7 +1,7 @@
 /* ============================================================================
  * THEME TOKENS
  *
- * Every theme defines the SAME 13 variables.  No fall-through: the previous
+ * Every theme defines the SAME 14 variables.  No fall-through: the previous
  * generation of blocks omitted --bg-primary / --bg-secondary, so those themes
  * silently inherited white from :root and looked broken — which is why all but
  * one were pulled from the picker rather than fixed.
@@ -13,7 +13,10 @@
  *   background    --background-color + --bg-primary
  *   panel         --bg-secondary + --tabcontent-bg
  *   panelAlt      --table-even-bg        alternating table rows
- *   border        --border-color
+ *   border        --border-color         OUTLINE of a component: panel, card,
+ *                                        input, modal, table frame.
+ *   rule          --rule-color           SEPARATOR *inside* a component: lap
+ *                                        rows, standings rows, list rows.
  *   highlight     --accent-color         fastest lap, best lap, accent buttons
  *   highlightText --highlight-text       text ON highlight
  *   text          --text-color
@@ -72,6 +75,7 @@
    * in the DOM that simply could not be seen, indoors or out.  Still quieter
    * than muted text (~5:1), so the hierarchy stays border < muted < body. */
   --border-color: #6C63A1;
+  --rule-color: #302850;
   --accent-color: #FF4FA3;
   --highlight-text: #16121F;
   --text-color: #EDE8FF;
@@ -91,19 +95,26 @@
 
 /* FPVRaceOne — the house theme, drawn from the header logo.
  *
- * Four anchors are taken verbatim from fpv_raceone_logo2.svg rather than
- * approximated: #0868E8 blue (the square mark) as chrome, #FFD800 yellow (the
- * chevrons) as the highlight, #080808 as the page, #F8F8F8 as body text.  The
- * panel tints, border, muted text, button background and chrome second stop are
- * derived to clear the same contrast bars as the other eleven themes.
+ * The four logo anchors still set the character, but each is pulled half a step
+ * back from the raw artwork values, which were built to survive vinyl printing
+ * rather than to be stared at on a phone in a dark field:
+ *
+ *   page    #080808 -> #0A0E14  pure black is a void behind blue chrome; a
+ *                               slight blue bias lets panels sit ON the page
+ *   chrome  #0868E8 -> #1668DC  same hue family, one notch less electric
+ *   accent  #FFD800 -> #F5C518  warmer and less saturated, so a fastest lap
+ *                               reads as gold rather than as hazard tape
+ *   text    #F8F8F8 -> #E9EEF5  a hair off pure white, tinted to the ground
  *
  * NOTE the inverted second stop: chrome-text here is LIGHT (blue at mid
- * luminance carries white at 4.76:1 but black at only 3.96), so
+ * luminance carries white at 5.19:1 but black at only 3.7), so
  * --primary-color-dark goes DARKER — away from the text — where the dark-text
  * themes have to go lighter.  Same rule, opposite direction.
  *
- * Renamed from "Night Gate"; THEME_ALIASES in script.js maps the old
- * `nightgate` slug so saved devices follow the rename. */
+ * The PREVIOUS values of this theme are preserved verbatim below as Blue
+ * Lovers.  No THEME_ALIASES entry maps between them on purpose: no unit had
+ * shipped on the old palette, so `fpvraceone` simply resolves to the new one.
+ * (The `nightgate` alias still points here, from the earlier rename.) */
 /* Semantic status colours — deliberately NOT per-theme.  Red-means-destructive
  * is a convention worth keeping across every palette, exactly like the
  * green-means-online pills.  Declared on bare :root so it applies under every
@@ -120,11 +131,37 @@
 
 :root,
 [data-theme="fpvraceone"] {
+  --primary-color: #1668DC;
+  --primary-color-dark: #1355B4;   /* darker — see note above */
+  /* Same blue, lifted for use AS TEXT on the dark panel: chrome itself reads
+   * 3.4:1 there, which is legible but visibly murky for a section heading.
+   * 6.4:1 keeps the hue and makes it scan. */
+  --heading-color: #6FA8F0;
+  --chrome-text: #F8F8F8;
+  --background-color: #0A0E14;
+  --bg-primary: #0A0E14;
+  --bg-secondary: #121926;
+  --tabcontent-bg: #121926;
+  --table-even-bg: #171F2E;
+  /* Lifted from #576694 to hold 3:1 against the slightly lighter panel tints
+   * this theme now uses — same audit, new grounds. */
+  --border-color: #5E6EA0;
+  --rule-color: #253044;
+  --accent-color: #F5C518;
+  --highlight-text: #0A0E14;
+  --text-color: #E9EEF5;
+  --secondary-color: #8695A9;
+  --btn-secondary-bg: #202A3A;
+}
+
+/* Blue Lovers — the previous FPVRaceOne palette, kept intact for anyone who
+ * prefers the harder contrast: pure-black page, electric logo blue, and the raw
+ * #FFD800 chevron yellow as the highlight.  Every value here is the one that
+ * shipped in 345f2c7; only --rule-color is new, and it is derived rather than
+ * changing anything that was already audited. */
+[data-theme="bluelovers"] {
   --primary-color: #0868E8;
-  --primary-color-dark: #0756C1;   /* darker — see note above */
-  /* Same blue, lifted for use AS TEXT on the dark panel: the brand blue reads
-   * 3.6:1 there, which is legible but visibly murky for a section heading.
-   * 6.7:1 keeps the hue and makes it scan. */
+  --primary-color-dark: #0756C1;
   --heading-color: #589EF7;
   --chrome-text: #F8F8F8;
   --background-color: #080808;
@@ -133,6 +170,7 @@
   --tabcontent-bg: #0F1520;
   --table-even-bg: #141C2A;
   --border-color: #576694;
+  --rule-color: #212C40;
   --accent-color: #FFD800;
   --highlight-text: #080808;
   --text-color: #F8F8F8;
@@ -162,6 +200,7 @@
   --tabcontent-bg: #101E30;
   --table-even-bg: #13233A;
   --border-color: #3B6BC0;
+  --rule-color: #1F3352;
   --accent-color: #FFB648;
   --highlight-text: #0A1420;
   --text-color: #E6EEFA;
@@ -180,6 +219,7 @@
   --tabcontent-bg: #1B1030;
   --table-even-bg: #21133A;
   --border-color: #7850CA;
+  --rule-color: #311E52;
   --accent-color: #33E1FF;
   --highlight-text: #120A1F;
   --text-color: #F2E8FF;
@@ -199,6 +239,7 @@
   --tabcontent-bg: #123A63;
   --table-even-bg: #16416F;
   --border-color: #4A8FCB;
+  --rule-color: #1E5183;
   --accent-color: #F2C14E;
   --highlight-text: #0C2D4D;
   --text-color: #E8F1FA;
@@ -217,6 +258,7 @@
   --tabcontent-bg: #221316;
   --table-even-bg: #26151A;
   --border-color: #8E565B;
+  --rule-color: #3C2429;
   --accent-color: #FFB84D;
   --highlight-text: #150B0D;
   --text-color: #F6E9EA;
@@ -235,6 +277,7 @@
   --tabcontent-bg: #1A1613;
   --table-even-bg: #1F1A16;
   --border-color: #825E58;
+  --rule-color: #322822;
   --accent-color: #E0B15A;
   --highlight-text: #0F0D0C;
   --text-color: #EDE3D8;
@@ -252,6 +295,7 @@
   --tabcontent-bg: #171D26;
   --table-even-bg: #1B222D;
   --border-color: #606A93;
+  --rule-color: #283043;
   --accent-color: #4FA8FF;
   --highlight-text: #10141A;
   --text-color: #EDEDEA;
@@ -269,6 +313,7 @@
   --tabcontent-bg: #271A2C;
   --table-even-bg: #2E1F34;
   --border-color: #8B5E93;
+  --rule-color: #402C47;
   --accent-color: #C9A6E8;
   --highlight-text: #1D1420;
   --text-color: #F5E9EE;
@@ -286,6 +331,7 @@
   --tabcontent-bg: #1D2226;
   --table-even-bg: #232A2F;
   --border-color: #5B777D;
+  --rule-color: #2E383C;
   --accent-color: #3FA8FF;
   --highlight-text: #14181B;
   --text-color: #F0F4F0;
@@ -303,6 +349,7 @@
   --tabcontent-bg: #1A1A1A;
   --table-even-bg: #1F1F1F;
   --border-color: #6A6A6A;
+  --rule-color: #303030;
   --accent-color: #4FA8FF;
   --highlight-text: #121212;
   --text-color: #EDEDED;
@@ -310,24 +357,61 @@
   --btn-secondary-bg: #8A8A8A;
 }
 
-/* The only light theme.  updateThemeLogos() in script.js keys off this exact
- * slug to swap the header logo and favicon to the black variant. */
+/* ── The two LIGHT themes ────────────────────────────────────────────────────
+ * Nothing in script.js needs to know which themes are light: the brand lockup
+ * carries its own colours and the favicon is one chevron mark shared by every
+ * theme, so the old updateThemeLogos() swap is gone.  A light theme is just
+ * another block — it only has to define --row-active-bg / --row-hover-bg,
+ * because the white wash the dark themes fall back to is invisible here. */
+
 /* FPVRaceOne Day — the light sibling of the house theme.
  *
- * Chrome is the logo blue, same as the dark FPVRaceOne.  The ACCENT stays red
- * and deliberately does not follow the dark theme's yellow: #FFD800 on a white
- * panel measures 1.2:1, so the logo yellow simply cannot serve as a highlight
- * on a light background.  Red carries the same "look here" job legibly.
- *
- * Renamed from "Daybright"; THEME_ALIASES maps the old slug, and every legacy
- * light theme (github, onelight, lightowl, solarizedlight, lighter) resolves
- * here too. */
+ * Chrome is the same #1668DC as the dark theme.  The ACCENT cannot simply
+ * follow the dark theme's gold: #F5C518 on a white panel measures 1.5:1, so it
+ * fails both as text and as a fill label.  Driving the same hue down to a deep
+ * amber keeps the gold family and clears 5.1:1 on white, which is what lets it
+ * serve BOTH roles — .mn-lb-fastest paints it as text, tr.fastest-lap fills a
+ * row with it and lays --highlight-text on top. */
 [data-theme="fpvraceoneday"] {
-  --primary-color: #0868E8;        /* logo blue, matching the dark theme */
-  --primary-color-dark: #0756C1;
+  --primary-color: #1668DC;        /* matching the dark theme */
+  --primary-color-dark: #1355B4;
   /* Deeper blue for text roles.  On a LIGHT theme the selected settings row has
-   * to get darker to be visible, which fights a mid-blue label — this clears
-   * 5.2:1 on that row and 6.8:1 on the panel, where plain chrome managed 4.1. */
+   * to get darker to be visible, which fights a mid-blue label. */
+  --heading-color: #1355B4;
+  --chrome-text: #FFFFFF;
+  --background-color: #F3F5F8;
+  --bg-primary: #F3F5F8;
+  --bg-secondary: #FFFFFF;
+  --tabcontent-bg: #FFFFFF;
+  --table-even-bg: #EDF1F6;
+  --border-color: #7C879C;
+  --rule-color: #E3E8EF;
+  --accent-color: #9A6206;
+  --highlight-text: #FFFFFF;
+  --text-color: #0F1722;
+  --secondary-color: #48525F;
+  --btn-secondary-bg: #5C6B7E;
+  /* The white wash the dark themes use is invisible here (white on white), so
+   * the light themes supply real tints. */
+  --row-active-bg: #DDE7F7;
+  --row-hover-bg: #F0F4FB;
+}
+
+/* Blue Lovers Day — the previous FPVRaceOne Day, unchanged.
+ *
+ * Its accent is RED rather than any yellow: #FFD800 on a white panel measures
+ * 1.2:1, so the old logo yellow could not serve as a highlight on a light
+ * background at all, and red carried the "look here" job instead.
+ *
+ * This is the palette that shipped as "FPVRaceOne Day", kept under a new slug.
+ * The THEME_ALIASES entries are deliberately NOT repointed at it: `daybright`
+ * and the legacy light slugs (github, onelight, lightowl, solarizedlight,
+ * lighter) still resolve to `fpvraceoneday`, so an upgrading unit lands on the
+ * NEW light theme — the same override the dark side gets.  Blue Lovers Day is
+ * reachable by choosing it in the picker. */
+[data-theme="blueloversday"] {
+  --primary-color: #0868E8;
+  --primary-color-dark: #0756C1;
   --heading-color: #0756C1;
   --chrome-text: #FFFFFF;
   --background-color: #F4F6F8;
@@ -336,14 +420,12 @@
   --tabcontent-bg: #FFFFFF;
   --table-even-bg: #EDF0F3;
   --border-color: #8086A9;
+  --rule-color: #E4E8EC;
   --accent-color: #DC2F4C;
   --highlight-text: #FFFFFF;
   --text-color: #101828;
   --secondary-color: #46505E;
   --btn-secondary-bg: #607085;
-  /* The white wash the dark themes use is invisible here (white on white), so
-   * this theme supplies real tints.  1.31 step vs the panel, against ~1.40 for
-   * the wash on a dark theme — comparable weight. */
   --row-active-bg: #D6E2F8;
   --row-hover-bg: #EEF3FC;
 }
@@ -371,23 +453,27 @@ body {
 }
 
 /* The header sits FLAT on the page surface — no coloured bar, no seam.  The
- * brand lockup (see .logo-lockup) carries its own colours, and the tab blocks
- * below carry the theme's, so chrome still identifies the theme without a band
- * across the top.  The drop shadow goes with it: against a matching background
- * it would draw exactly the dividing line this removes. */
+ * brand lockup (see .logo-lockup) carries its own colours, so chrome no longer
+ * has to paint a band across the top to identify the theme.  The drop shadow
+ * goes with it: against a matching background it would draw exactly the
+ * dividing line this removes.
+ *
+ * The nav now lives on the SAME ROW as the lockup rather than in a strip below
+ * it, which is what closes the old empty right half of the header.  A single
+ * hairline separates the header from the screen under it. */
 header {
   background-color: var(--background-color);
   color: var(--text-color);
-  /* No bottom padding: the tabs are the last thing in the header and have to
-   * meet the content card's top border, folder-style.  The 8px gap that used to
-   * separate them was this 4px plus main's 4px top margin. */
-  padding: 12px 16px 0;
+  padding: 10px 16px 0;
+  border-bottom: 1px solid var(--border-color);
 }
 
 nav {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 24px;
+  flex-wrap: wrap;
 }
 
 .logo {
@@ -498,62 +584,241 @@ nav {
 }
 */
 
+/* Underline nav.
+ *
+ * Replaces the file-folder tabs.  Those were the most recognisably-upstream
+ * element on the page: a full-width row of chrome-filled blocks with rounded
+ * top corners folding into one big card.  The nav now sits on the same line as
+ * the brand lockup and marks the current page with a 2px accent underline, so
+ * the top of the app is a single quiet strip instead of a coloured band.
+ *
+ * The <ul> keeps its list semantics; only the presentation changes.  openTab()
+ * still toggles .active on the <a>, so no JS moved. */
 .nav-links {
   display: flex;
   list-style: none;
-  gap: 16px;
-  padding-top: 16px;
-  justify-content: space-around;
+  gap: 22px;
+  margin-left: auto;
+  align-items: center;
+  flex-wrap: wrap;
 }
 
-/* File-folder tabs.
- *
- * The chrome fill is back, but per TAB rather than as a strip: the <ul> stays
- * transparent so the header still reads flat, and each label sits in its own
- * block with the top corners rounded, like a folder tab meeting the content.
- *
- * INACTIVE tabs use chrome; the ACTIVE one uses the highlight, so the current
- * page reads at a glance without relying on a subtle tint.  Both are designed
- * token pairs (chrome/chrome-text, accent/highlight-text), so legibility is
- * guaranteed in all 12 themes rather than depending on the surface behind.
- *
- * The old rgba(255,255,255,0.2) hover was a white wash that only worked on a
- * mid-toned bar — invisible on Daybright.  Hover now shifts to the chrome
- * second stop, which every theme defines. */
 .nav-links a {
-  background-color: var(--primary-color);
-  color: var(--chrome-text);
+  color: var(--secondary-color);
   text-decoration: none;
-  padding: 8px 16px;
-  border-radius: 8px 8px 0 0;
-  transition: background-color 0.3s, color 0.3s;
+  padding: 6px 1px;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: color 0.2s, border-color 0.2s;
 }
 
 .nav-links a:hover {
-  background-color: var(--primary-color-dark);
+  color: var(--text-color);
+  border-bottom-color: var(--rule-color);
 }
 
 .nav-links a.active {
-  background-color: var(--accent-color);
-  color: var(--highlight-text);
+  color: var(--text-color);
+  font-weight: bold;
+  border-bottom-color: var(--accent-color);
+}
+
+.nav-links a:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 3px;
+  border-radius: 2px;
 }
 
 main {
-  /* Top margin removed so the card butts against the tabs above it. */
-  margin: 0 8px 8px;
-  padding: 0 8px;
+  /* The card is gone — .tabcontent is now a plain container and each screen
+   * builds its own frame — so main only has to fill the height. */
+  margin: 0;
+  padding: 0;
   flex-grow: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
+/* .tabcontent used to BE the card: one chrome-outlined rounded box holding a
+ * whole screen, folding into the tabs above it.  That box is what forced every
+ * screen into a single stacked column.  It is now a bare container — each
+ * screen frames its own regions — so the race screens can lay out as a
+ * console-plus-content grid instead. */
 .tabcontent {
-  background-color: var(--tabcontent-bg);
-  border-radius: 8px;
-  /* Chrome, i.e. the same colour as the tab blocks above, so the card reads as
-   * the body of the folder those tabs belong to.  box-sizing is border-box
-   * globally, so the 1px is drawn inside and nothing reflows. */
-  border: 1px solid var(--primary-color);
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-  padding: 8px;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* The screens that did NOT move to the console layout keep a comfortable
+ * gutter, which .tabcontent's 8px padding used to give them. */
+#history,
+#calib,
+#config {
+  padding: 14px 16px 20px;
+}
+
+/* ============================================================================
+ * RACE CONSOLE LAYOUT
+ *
+ * Shared by the three race screens: single/standalone (#single-race-view),
+ * multi-node master (#master-race-view) and the client mirror (#raceview).
+ *
+ * A fixed-width console on the left holds the clock, the run state and the
+ * controls; the right column scrolls.  The point is that Stop never leaves the
+ * screen — under the old stacked layout it scrolled away the moment anyone
+ * looked at lap detail, which is the one control that must always be reachable.
+ *
+ * 224px is deliberate: it fits "00:00:00s" at 2.1em with the controls stacked
+ * full-width beneath, and nothing narrower does.
+ * ========================================================================== */
+/* Multi-node mode strip.  mnUpdateRaceStatusBar() shows it with
+ * style.display = '', so the class supplies the display value. */
+.race-mode-strip {
+  display: block;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--secondary-color);
+  background-color: var(--bg-secondary);
+}
+
+.race-shell {
+  display: grid;
+  grid-template-columns: 224px minmax(0, 1fr);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.race-console {
+  padding: 16px 14px;
+  border-right: 1px solid var(--border-color);
+  background-color: var(--bg-secondary);
+  min-width: 0;
+}
+
+.race-label {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--secondary-color);
+  margin-bottom: 5px;
+}
+
+/* Stacked, not a 2-up grid: at 224px a two-column row cannot hold "Clear Laps"
+ * without either wrapping the label or clipping it. */
+.race-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.race-controls button {
+  margin: 0;
+  width: 100%;
+}
+
+/* Label above value rather than beside it — the only way four readouts fit a
+ * 224px column without truncating a pilot name or a channel string. */
+.race-meta {
+  border-top: 1px solid var(--rule-color);
+}
+
+.race-meta > div {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule-color);
+}
+
+.race-meta .rm-label {
+  display: block;
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--secondary-color);
+}
+
+.race-meta .rm-value {
+  display: block;
+  font-size: 1em;
+  font-weight: bold;
+  margin-top: 1px;
+}
+
+.race-meta > div.rm-hi .rm-value {
+  color: var(--accent-color);
+}
+
+.race-right {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* Section header inside the right column.  Small caps label on the left, a
+ * count or a value on the right. */
+.race-section-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-color);
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--secondary-color);
+}
+
+.race-section-head strong {
+  color: var(--text-color);
+  font-size: 1.3em;
+  letter-spacing: 0;
+}
+
+/* Footer actions — Download, Transfer, Backup, Restore, Import. */
+.race-actions {
+  padding: 14px 16px;
+  border-top: 1px solid var(--border-color);
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-top: auto;
+}
+
+.race-actions button {
+  margin: 0;
+  width: auto;
+  min-width: 120px;
+  font-size: 14px;
+}
+
+.race-actions .race-actions-note {
+  flex-basis: 100%;
+  margin: 2px 0 0;
+  font-size: 12px;
+  color: var(--secondary-color);
+}
+
+/* Below this width the console stops being a column and becomes a block above
+ * the content — same order, so the reading sequence never changes. */
+@media (max-width: 700px) {
+  .race-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .race-console {
+    border-right: 0;
+    border-bottom: 1px solid var(--border-color);
+    padding: 14px 12px;
+  }
+  .race-right {
+    overflow-y: visible;
+  }
 }
 
 
@@ -708,17 +973,20 @@ button.active:disabled {
   }
 }
 
+/* Start All / Stop All / Clear now live in the console, so they stack
+ * full-width like the single-race controls.  These used to be a centred
+ * space-between row capped at 480px, which cannot fit a 224px column — and
+ * because .mn-race-buttons is declared after .race-controls, it would win the
+ * cascade if it still set its own layout. */
 .mn-race-buttons {
-  display: flex;
-  justify-content: space-between;
-  max-width: 480px;
-  margin: 0 auto;
+  max-width: none;
+  margin: 0;
   grid-template-columns: unset;
 }
 
 .mn-race-buttons button {
-  width: auto;
-  min-width: 110px;
+  width: 100%;
+  min-width: 0;
   flex: 0 0 auto;
 }
 
@@ -763,11 +1031,129 @@ table tr.fastest-lap td {
   display: table-row-group;
 }
 
+/* The clock now anchors the console instead of floating centred above a stack,
+ * so it is left-aligned and bigger.  2.1em is the largest size at which
+ * "00:00:00s" still fits the 224px column without wrapping. */
 #timer {
-  font-size: 24px;
+  font-size: 2.1em;
   font-weight: bold;
   display: block;
-  text-align: center;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Run-state pill.  Outlined rather than filled: it sits directly under the
+ * clock, and a solid accent block there would out-weigh the number itself. */
+.race-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 11px 0 14px;
+  padding: 3px 10px;
+  border: 1px solid var(--accent-color);
+  border-radius: 11px;
+  font-size: 10px;
+  font-weight: bold;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--accent-color);
+}
+
+.race-state[hidden] {
+  display: none;
+}
+
+.race-state i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--accent-color);
+  flex-shrink: 0;
+}
+
+/* ── Lap feed ───────────────────────────────────────────────────────────────
+ * #lapTable stays a real <table> — script.js builds it with insertRow/
+ * insertCell and the cells are genuinely tabular, so the element is right and
+ * nothing about the renderer had to change.  What changes is that it stops
+ * drawing a four-sided grid around every cell: rows are separated by a single
+ * --rule-color hairline, which is the whole difference between "spreadsheet"
+ * and "feed".  The outer frame is gone too; .race-right supplies the edges. */
+#lapTable {
+  margin-top: 0;
+  border-collapse: collapse;
+}
+
+#lapTable th,
+#lapTable td {
+  border: none;
+  border-bottom: 1px solid var(--rule-color);
+  padding: 9px 16px;
+  text-align: left;
+}
+
+#lapTable th {
+  background-color: transparent;
+  color: var(--secondary-color);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border-color);
+}
+
+/* Lap number: a quiet index, not a column of equal weight to the times. */
+#lapTable td:first-child {
+  color: var(--secondary-color);
+  font-weight: bold;
+  width: 62px;
+}
+
+/* Times are the content of this table, so they get the size and the mono. */
+#lapTable td:nth-child(2) {
+  font-family: 'Courier New', monospace;
+  font-weight: bold;
+  font-size: 1.15em;
+}
+
+#lapTable td:nth-child(3),
+#lapTable td:nth-child(4) {
+  font-family: 'Courier New', monospace;
+  color: var(--secondary-color);
+  font-size: 0.95em;
+}
+
+#lapTable tr:nth-child(even) {
+  background-color: var(--table-even-bg);
+}
+
+/* Fastest lap, quiet treatment.  The global rule fills the whole row with
+ * --accent-color and adds a 0 0 8px glow; at feed scale that turns a six-lap
+ * list into a yellow band with a halo.  Here the accent moves to the TIME plus
+ * a 3px edge marker, which reads just as fast and lets the row stay a row.
+ * !important is required only because the global rule carries it. */
+#lapTable tr.fastest-lap {
+  background-color: transparent !important;
+  color: inherit;
+  font-weight: normal;
+  box-shadow: inset 3px 0 0 var(--accent-color);
+}
+
+#lapTable tr.fastest-lap td {
+  border-color: var(--rule-color);
+}
+
+#lapTable tr.fastest-lap td:first-child,
+#lapTable tr.fastest-lap td:nth-child(2) {
+  color: var(--accent-color);
+}
+
+/* Summary strip.  Same .stat-box cards as before, just moved above the lap
+ * list and given the section's own gutter. */
+.race-right .stats-boxes {
+  padding: 12px 16px;
+  margin-bottom: 0;
 }
 
 /* The chart height adapts to viewport so the threshold sliders and the
@@ -877,9 +1263,9 @@ footer {
 
 /* Lap Analysis Section */
 .lap-analysis {
-  margin-top: 12px;
-  padding: 10px;
-  background-color: var(--tabcontent-bg);
+  margin: 14px 16px 16px;
+  padding: 12px;
+  background-color: var(--bg-secondary);
   border-radius: 8px;
   border: 1px solid var(--border-color);
 }
@@ -1998,7 +2384,7 @@ button.update-btn {
   }
   
   .nav-links a {
-    padding: 6px 12px;
+    padding: 6px 1px;
     font-size: 14px;
   }
 
@@ -2096,15 +2482,14 @@ button.update-btn {
     padding: 12px 8px;
   }
   
-  #timer {
-    font-size: 32px;
-    margin: 12px 0;
-  }
+  /* Both race clocks together — they are the same object in two modes, one tab
+   * apart, and the console stacks full-width here so there is room for it. */
+  #timer,
   .mn-race-timer-display {
-    font-size: 38px;
-    margin: 12px 0;
+    font-size: 34px;
+    margin: 0;
   }
-  
+
   table {
     min-width: 100%;
     font-size: 13px;
@@ -2198,19 +2583,18 @@ button.update-btn {
     height: 23px;
   }
 
+  /* min-width sized the old folder-tab blocks so they filled the strip evenly.
+   * The underline nav is text, so a min-width just pushes the labels apart. */
   .nav-links a {
     font-size: 12px;
-    padding: 6px 8px;
-    min-width: 70px;
+    padding: 5px 1px;
   }
   
-  #timer {
-    font-size: 28px;
-  }
+  #timer,
   .mn-race-timer-display {
-    font-size: 34px;
+    font-size: 30px;
   }
-  
+
   table {
     font-size: 11px;
   }
@@ -2390,13 +2774,18 @@ button.update-btn {
   .mn-header-row { flex-direction: column; align-items: flex-start; }
 }
 
-/* ── Master race timer display ──────────────────────────────── */
+/* ── Master / client race clock ─────────────────────────────────
+ * Matches #timer: this is the same object in a different mode, and the two
+ * screens sit one tab apart. */
 .mn-race-timer-display {
-  font-size: 32px;
+  font-size: 2.1em;
   font-weight: bold;
   display: block;
-  text-align: center;
-  margin-bottom: 14px;
+  line-height: 1;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 0;
 }
 
 /* ── Master race view — leaderboard table ───────────────────── */
@@ -2405,7 +2794,7 @@ button.update-btn {
    counts — so this has to be unmistakable about the data being frozen. */
 .mn-stale-banner {
   padding: 8px 12px;
-  margin-bottom: 12px;
+  margin: 12px 16px 0;
   border-radius: 6px;
   font-size: 13px;
   font-weight: 600;
@@ -2428,7 +2817,11 @@ button.update-btn {
   border-spacing: 0;
   border: 1px solid var(--border-color);
   font-size: 13px;
-  margin-bottom: 20px;
+  /* The container has no padding of its own — the race screens are full-bleed
+   * grids now — so the table carries its own gutter.  calc keeps it from
+   * overflowing the way width:100% plus side margins would. */
+  width: calc(100% - 32px);
+  margin: 12px 16px 4px;
   background: var(--bg-secondary);
   border-radius: 8px;
   overflow: hidden;
@@ -2455,7 +2848,11 @@ button.update-btn {
 }
 .mn-leaderboard td {
   padding: 8px 12px;
-  border-bottom: 1px solid var(--border-color);
+  /* The generic `table th, table td` rule puts a 1px border on all four sides.
+   * Only the horizontal separator is wanted here, and it is a separator inside
+   * the table's own frame, so it uses --rule-color. */
+  border: none;
+  border-bottom: 1px solid var(--rule-color);
   vertical-align: middle;
 }
 /* The table's own border now draws the bottom edge, so the last row drops its
@@ -2496,9 +2893,12 @@ button.update-btn {
 }
 .mn-edit-btn:hover { opacity: 1; background: var(--border-color) !important; }
 
-/* Edit button inside coloured pilot card header — white icon, semi-transparent */
-.mn-card-edit-btn { color: #fff !important; opacity: 0.7; }
-.mn-card-edit-btn:hover { opacity: 1; background: rgba(255,255,255,0.2) !important; }
+/* Edit button in the pilot card header.  The header is no longer filled with
+ * the pilot's colour, so the icon follows the theme like every other icon
+ * instead of being pinned to white, and it sits at the end of the row. */
+.mn-card-edit-btn { color: var(--text-color) !important; opacity: 0.55; }
+.mn-card-edit-btn:hover { opacity: 1; background: var(--border-color) !important; }
+.mn-pilot-card-header .mn-card-edit-btn { margin-left: auto; margin-right: 0 !important; }
 
 /* Empty pilot slot.
  *
@@ -2511,7 +2911,6 @@ button.update-btn {
  * on the dark themes, near-black on Daybright.  A light opacity still marks the
  * slot as unoccupied without costing legibility. */
 .mn-pilot-card-empty .mn-pilot-card-header-empty {
-  background: var(--bg-primary) !important;
   color: var(--text-color);
   opacity: 0.9;
 }
@@ -2531,39 +2930,108 @@ button.update-btn {
 }
 
 /* ── Pilot lap cards (RotorHazard-style columns) ────────────── */
+/* Auto-filling GRID, not a wrapping flex row.
+ *
+ * Same behaviour the flex row had — cards wrap and the block grows downward,
+ * never sideways — but auto-fill gives every card in a row the same width.
+ * Under flex: 1 1 160px the last row stretched its one or two cards to fill,
+ * so an 8-slot field rendered as three neat cards and then two enormous ones.
+ *
+ * Rows still size to their tallest card because grid items stretch by default,
+ * which is what the old align-items: stretch was for. */
 .mn-pilot-cards {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(172px, 1fr));
   gap: 10px;
-  flex-wrap: wrap;
-  /* stretch, not flex-start: an occupied card is taller than an empty one (its
-   * header carries an edit button and a badge), so empty slots used to sit
-   * short and the row looked ragged.  Stretch sizes every card in a row to the
-   * tallest, which keeps the grid even however many laps are showing. */
-  align-items: stretch;
+  padding: 12px 16px;
 }
 .mn-pilot-card {
-  flex: 1 1 160px;
-  min-width: 140px;
+  min-width: 0;
   border-radius: 8px;
   overflow: hidden;
   background: var(--bg-secondary);
-  /* This border was already here, but --border-color measures 1.16-1.62:1
-   * against the card background across the themes — present in the DOM and
-   * invisible on screen, which is why the cards read as edgeless.  Chrome puts
-   * it at 4.1-13.9:1 and matches the content card, so every card on the page
-   * shares one edge treatment.  Applies to empty slots too: those carry
-   * .mn-pilot-card as well as .mn-pilot-card-empty. */
-  border: 1px solid var(--primary-color);
+  /* Back to --border-color now that it is audited to 3:1 — chrome was only
+   * used here because the old border value was invisible against the card, and
+   * an outline of blue boxes competed with the pilot colours inside them. */
+  border: 1px solid var(--border-color);
+  display: flex;
+  flex-direction: column;
 }
+
+/* The leader's card, marked by edge rather than by fill so the accent stays
+ * reserved for lap times. */
+.mn-pilot-card-lead {
+  border-color: var(--accent-color);
+}
+
+.mn-pilot-card-offline {
+  opacity: 0.62;
+}
+
+.mn-pilot-card-empty {
+  opacity: 0.5;
+}
+
+/* Row 1: identity.  No background — the pilot's colour is the swatch, which is
+ * what removes the need to flip the label between black and white. */
 .mn-pilot-card-header {
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 7px 10px;
+  padding: 8px 10px 7px;
   font-weight: 700;
   font-size: 13px;
-  color: #fff;
+  color: var(--text-color);
   gap: 6px;
+}
+
+.mn-card-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex: 0 0 9px;
+  /* The same lean as the three chevrons in the logo mark — the one place the
+   * brand geometry becomes structure rather than decoration. */
+  transform: skewX(-12deg);
+  /* Pilot colours include pure #FFFFFF and pure #000000, either of which
+   * disappears against some theme's panel without an outline of its own. */
+  box-shadow: 0 0 0 1px var(--border-color);
+}
+
+.mn-card-swatch-empty {
+  background: var(--border-color);
+}
+
+.mn-card-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+/* Row 2: status.  Position, slot, badges, and the pilot's own best lap. */
+.mn-pilot-card-sub {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  padding: 0 10px 8px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.mn-card-slot {
+  font-size: 9.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--secondary-color);
+}
+
+.mn-card-best {
+  margin-left: auto;
+  font-family: 'Courier New', monospace;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-color);
 }
 .mn-card-badge {
   font-size: 10px;
@@ -2571,11 +3039,17 @@ button.update-btn {
   padding: 1px 6px;
   border-radius: 8px;
   white-space: nowrap;
-  /* Badges always render white text — their semi-transparent dark
-     backgrounds (Host / Me / TAP / Racing) would be unreadable if they
-     inherited the card header's flipped-to-black text colour when the
-     pilot picks a light card colour. */
+  /* Badges still force white text.  They no longer sit on the pilot's colour,
+     but their backgrounds are semantic and hardcoded (green Racing, red
+     Disconnected, amber "not shown"), so the label cannot follow the theme. */
   color: #fff;
+}
+
+/* "Me" is the exception: it carries no semantic colour of its own, so it uses
+   the theme accent and the matching text token rather than white-on-grey. */
+.mn-card-badge-me {
+  background: var(--accent-color);
+  color: var(--highlight-text);
 }
 .mn-card-racing  { background: rgba(0,0,0,0.25); color: #fff; }
 .mn-card-dnf     { background: rgba(255,152,0,0.85); color: #fff; }
@@ -2589,7 +3063,8 @@ button.update-btn {
   align-items: center;
   gap: 8px;
   padding: 5px 10px;
-  border-bottom: 1px solid var(--border-color);
+  /* A separator inside a card, not the card's own edge — see --rule-color. */
+  border-bottom: 1px solid var(--rule-color);
   font-size: 13px;
 }
 .mn-card-lap:last-child { border-bottom: none; }
@@ -2615,7 +3090,12 @@ button.update-btn {
 .mn-card-lap.mn-card-lap-best .mn-card-lap-num  { color: var(--accent-color); }
 
 @media (max-width: 600px) {
-  .mn-pilot-card { flex: 1 1 120px; }
+  /* Narrower tracks so a phone still gets two cards across rather than one. */
+  .mn-pilot-cards {
+    grid-template-columns: repeat(auto-fill, minmax(122px, 1fr));
+    gap: 8px;
+    padding: 10px 12px;
+  }
   .mn-leaderboard th, .mn-leaderboard td { padding: 6px 8px; }
 }
 
