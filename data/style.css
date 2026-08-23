@@ -104,6 +104,20 @@
  *
  * Renamed from "Night Gate"; THEME_ALIASES in script.js maps the old
  * `nightgate` slug so saved devices follow the rename. */
+/* Semantic status colours — deliberately NOT per-theme.  Red-means-destructive
+ * is a convention worth keeping across every palette, exactly like the
+ * green-means-online pills.  Declared on bare :root so it applies under every
+ * [data-theme], none of which redefine it.
+ *
+ * --danger-color was REFERENCED by the delete-lap and remove-webhook buttons
+ * but defined nowhere, and with no fallback.  An invalid var() computes to
+ * `unset`, not to the cascade value, so those buttons lost their background
+ * entirely — white label on a transparent chip, i.e. invisible against the
+ * light theme's white card. */
+:root {
+  --danger-color: #C0392B;
+}
+
 :root,
 [data-theme="fpvraceone"] {
   --primary-color: #0868E8;
@@ -404,7 +418,7 @@ nav {
   display: block;
   height: 45px;
   width: auto;
-  aspect-ratio: 1963 / 258;
+  aspect-ratio: 1963 / 247;
   flex: 0 0 auto;
 }
 
@@ -1647,13 +1661,18 @@ footer {
   line-height: 1.5;
 }
 
+/* --bg-color was never a token in this project (the real one is --bg-primary),
+ * so every theme fell through to the hardcoded #1a1a2e navy — a dark chip
+ * stamped onto a white card on the light themes, and chrome-blue text on it at
+ * 3.4:1.  Now a real surface: the alternating-row tint, which steps gently off
+ * the card in every theme, with the text-role blue on top. */
 .update-intro code {
-  background-color: var(--bg-color, #1a1a2e);
+  background-color: var(--table-even-bg);
   border: 1px solid var(--border-color);
   border-radius: 3px;
   padding: 1px 5px;
   font-size: 12px;
-  color: var(--primary-color);
+  color: var(--heading-color, var(--primary-color));
 }
 
 .update-method-grid {
@@ -1699,12 +1718,12 @@ footer {
 }
 
 .update-steps code {
-  background-color: var(--bg-color, #1a1a2e);
+  background-color: var(--table-even-bg);   /* see .update-intro code */
   border: 1px solid var(--border-color);
   border-radius: 3px;
   padding: 0 4px;
   font-size: 11px;
-  color: var(--primary-color);
+  color: var(--heading-color, var(--primary-color));
 }
 
 .update-actions {

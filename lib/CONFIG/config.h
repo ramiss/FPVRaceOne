@@ -90,7 +90,7 @@
 //
 // Bench equipment, not a product feature — ship as 0, set to 1 when the
 // emulator rig is wired up.
-#define TIMING_MARKER_ENABLED 1
+#define TIMING_MARKER_ENABLED 0
 
 //ESP23-C3
 #if defined(ESP32C3)

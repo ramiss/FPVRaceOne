@@ -6,10 +6,15 @@
      to match so the intrinsic aspect ratio stays correct (7.6085:1).
      If this file is ever re-exported, crop it the same way or the header
      spacing will regress. -->
-<svg xmlns="http://www.w3.org/2000/svg" width="1963" height="258" viewBox="38 206 1963 258">
+<svg xmlns="http://www.w3.org/2000/svg" width="1963" height="247" viewBox="38 217 1963 247">
   <title>FPVRaceOne source-truth wordmark with square product icon</title>
   <desc>Uses the traced source-truth wordmark and the square product artwork from the user-supplied SVG.</desc>
-  <g transform="translate(12.278 177.644) scale(0.877778)">
+  <!-- translate Y was 177.644, which left the square mark's baseline 11.11 units
+     above the underline beneath the wordmark.  Nudged down to sit flush: the
+     mark's stroked bottom edge (rect y+height, plus half its 10-unit stroke,
+     through this group's 0.877778 scale) now lands on the underline's stroked
+     bottom edge at y=463.5. -->
+<g transform="translate(12.278 188.755) scale(0.877778)">
 <rect x="35" y="38" width="270" height="270" rx="24"
         fill="#0868E8" stroke="#101010" stroke-width="10"/>
 <g fill="#FFD31A" stroke="#101010" stroke-width="8" stroke-linejoin="round">

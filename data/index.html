@@ -34,7 +34,7 @@
       /* The lockup is 2048x682 (3:1), not the old square mark — sizing by width
          with height:auto keeps it proportional.  The previous 72x72 would have
          squashed it.  max-width keeps it inside narrow phone screens. */
-      #splash img{width:288px;max-width:68vw;height:auto;aspect-ratio:1963/258;margin-bottom:18px;animation:sp 1.6s ease-in-out infinite}
+      #splash img{width:288px;max-width:68vw;height:auto;aspect-ratio:1963/247;margin-bottom:18px;animation:sp 1.6s ease-in-out infinite}
       #splash-status{color:rgba(255,255,255,.55);font-family:system-ui,sans-serif;font-size:.82rem;min-height:1.2em}
       .sp-dots{display:flex;gap:7px;margin-top:22px}
       .sp-dots span{width:8px;height:8px;border-radius:50%;background:rgba(255,255,255,.35);animation:spd 1.2s ease-in-out infinite}
@@ -50,7 +50,7 @@
       <!-- The lockup already contains the wordmark, so the <h2>FPVRaceOne</h2>
            that used to sit here has gone — it would have printed the name twice.
            The alt text still carries it for screen readers. -->
-      <img src="fpv_raceone_logo2.svg" alt="FPVRaceOne" width="288" height="38">
+      <img src="fpv_raceone_logo2.svg" alt="FPVRaceOne" width="288" height="36">
       <div id="splash-status">Loading&hellip;</div>
       <div class="sp-dots"><span></span><span></span><span></span></div>
     </div>
@@ -74,7 +74,7 @@
                before the SVG decodes, so the header does not reflow.
                CSS still wins wherever it applies — see .logo-lockup. -->
           <img src="fpv_raceone_logo2.svg" alt="FPVRaceOne" class="logo-lockup" id="headerLogo"
-               width="342" height="45" />
+               width="358" height="45" />
           <!-- WiFi signal strength indicator disabled — use OS WiFi indicator instead
           <div id="connectionIndicator" class="connection-indicator" title="Connection status">
             <svg id="wifiIcon" class="wifi-icon" width="26" height="22" viewBox="0 0 26 22" xmlns="http://www.w3.org/2000/svg" aria-label="WiFi signal">

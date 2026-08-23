@@ -2746,6 +2746,25 @@ EEPROM:\n";
 
     // Self-test endpoint
     server.on("/api/selftest", HTTP_GET, [this](AsyncWebServerRequest *request) {
+        // ── Passive observations FIRST, before anything blocking ──────────
+        //
+        // These two only read a statistics window that some other task already
+        // closed; they measure nothing themselves.  They must run before the
+        // RX5808 sweeps below, which block this handler (i.e. the async_tcp
+        // task) for over two seconds tuning and sampling.  Run afterwards, the
+        // 10 s window they report necessarily overlaps that blocking work, so
+        // the act of running diagnostics produced the stall that the timing
+        // test then reported as a failure.
+        //
+        // Sampling punctuality — worst gap between consecutive RSSI samples.
+        // This is the direct evidence that lap detection is not late; read it
+        // together with the CPU Load result, which only shows headroom.
+        TestResult jitterTest = selftest->testTimingJitter(timer, rx);
+
+        // Per-task CPU load / idle headroom.
+        TestResult cpuTest = selftest->testCpuLoad();
+
+        // ── Active tests, which block this handler ────────────────────────
         // Run RX5808 test (RF receive smoke test)
         TestResult rxTest = selftest->testRX5808(rx);
 
@@ -2757,14 +2776,6 @@ EEPROM:\n";
 
         // Run Lap Timer test
         TestResult timerTest = selftest->testLapTimer(timer);
-
-        // Sampling punctuality — worst gap between consecutive RSSI samples.
-        // This is the direct evidence that lap detection is not late; read it
-        // together with the CPU Load result below, which only shows headroom.
-        TestResult jitterTest = selftest->testTimingJitter(timer, rx);
-
-        // Per-task CPU load / idle headroom.
-        TestResult cpuTest = selftest->testCpuLoad();
 
         // Run Audio test
         TestResult audioTest = selftest->testAudio(buz);

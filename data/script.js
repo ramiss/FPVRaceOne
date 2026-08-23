@@ -7266,7 +7266,14 @@ function handleLogForCalibrationBanner(line) {
 
   if (line.includes('Setting frequency to')) {
     showCalibrationBanner();
-  } else if (line.includes('RX5808 frequency verified properly')) {
+  } else if (line.includes('RX5808 Tune done') ||
+             line.includes('RX5808 frequency verified properly')) {
+    // "Tune done" is the real end-of-tune signal.  Hiding only on "verified
+    // properly" tied this banner to SPI register READBACK, which most RX5808
+    // modules do not support — verifyFrequency() then logs "frequency not
+    // matching" instead and the banner never cleared.  There is no timeout
+    // behind it, so it stayed up indefinitely.  "verified properly" is kept as
+    // a second trigger for modules that do read back.
     hideCalibrationBanner();
   }
 }
@@ -7466,7 +7473,7 @@ function displayWebhooks(webhooks) {
           <div style="font-weight: bold; font-size: 15px;">${ip}</div>
           <div style="font-size: 13px; color: var(--secondary-color); margin-top: 2px;">http://${ip}/Lap, /RaceStart, /RaceStop</div>
         </div>
-        <button onclick="removeWebhook('${ip}')" style="padding: 6px 10px; font-size: 14px; background-color: var(--danger-color);">Remove</button>
+        <button onclick="removeWebhook('${ip}')" style="padding: 6px 10px; font-size: 14px; background-color: var(--danger-color); color: #fff;">Remove</button>
       </div>
     `;
   });

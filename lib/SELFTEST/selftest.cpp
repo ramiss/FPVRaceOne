@@ -337,7 +337,14 @@ TestResult SelfTest::testTimingJitter(LapTimer* timer, RX5808* rx5808) {
                    + String(TIMING_STATS_LATE_THRESHOLD_MS) + "ms)=" + String(s.lateCount)
                    + "/" + String(s.sampleCount);
     if (!result.passed) {
-        result.details += " — sampling stalled, see [CORE0] log for the blocking call";
+        // The old hint said "see [CORE0] log for the blocking call".  That is
+        // only true for work on parallelTask, which is all CORE0_TIME wraps.
+        // A stall caused by an AsyncWebServer handler — the self-test itself
+        // included — never appears there, so the hint sent people to a log that
+        // could not contain the answer.
+        result.details += " — sampling stalled. [CORE0] names the call only if it "
+                          "ran on parallelTask; a stall from an AsyncWebServer "
+                          "handler or a USB serial write will not appear there.";
     }
 #else
     (void)timer;
@@ -489,9 +496,16 @@ TestResult SelfTest::testRX5808(RX5808* rx5808) {
         delay(tuneDelayMs);
         rx5808->recentSetFreqFlag = false;  // Allow RSSI reads now
 
+        // Two bugs removed here.  The loop used to call readRssi() TWICE per
+        // iteration — printing one reading and summing a different one, so the
+        // average was never of the values shown.  And the Serial.println() was
+        // raw and unconditional (not DEBUG()), putting 78 USB CDC writes inside
+        // the sweep; each blocks for as long as the host takes to drain the
+        // port, which stalls the loop task and shows up as a sampling gap in
+        // the RSSI Sample Timing test.  A diagnostic must not perturb the thing
+        // it is measuring.
         uint16_t sum = 0;
         for (uint8_t s = 0; s < samplesPerFreq; s++) {
-            Serial.println("RX5808 RSSI: " + String(rx5808->readRssi()));
             sum += rx5808->readRssi();
             delay(sampleDelayMs);
         }
@@ -592,62 +606,104 @@ TestResult SelfTest::testRX5808SpiMode(RX5808* rx5808) {
         rx5808->recentSetFreqFlag = false;
     };
 
-    // ── Two-frequency verify ──────────────────────────────────────────────
+    // ── Retune-response sweep (NO register readback) ──────────────────────
     //
-    // Write freq A, delay for tune settle, read register back, compare.
-    // Then repeat with freq B (well-separated in the RX5808's register
-    // space so a stuck-bit failure surfaces as a mismatch on at least
-    // one of them).  If BOTH readbacks match what we wrote, the SPI
-    // programming path is confirmed working with high confidence.
+    // This test used to write a frequency and read register 0x01 back, passing
+    // only if the readback matched.  That can never pass on this hardware: the
+    // RX5808 / RTC6715 modules used here do not drive the DATA line, so
+    // verifyFrequency() clocks in the MCU's own INPUT_PULLUP and returns
+    // 0xFFFF (65535) every time.  testRX5808() states the same limitation
+    // outright — "We can't truly verify frequency (RX5808 has no readback)" —
+    // so the two tests in this file disagreed about whether readback exists.
+    // The old failure text blamed MODE-pin strapping, sending people to chase a
+    // PCB fault that was not there.
     //
-    // A single-frequency test could false-positive if the module happens
-    // to hold that value from a previous programming attempt or from
-    // hardwired defaults.  Two well-separated values eliminates that
-    // ambiguity.
-    const uint16_t freqA = 5800;   // Fatshark F4 — common freq
-    const uint16_t freqB = 5860;   // Fatshark F8 — differs from A across multiple register bits
+    // What actually separates a working SPI path from a module stuck in manual
+    // mode is whether the receiver RESPONDS to what we command.  Sweep the band
+    // and watch RSSI:
+    //
+    //   moves with the commanded frequency -> programming works.
+    //   high and identical at every step   -> receiving something it cannot be
+    //                                         tuned away from, i.e. ignoring
+    //                                         register writes.  This is the
+    //                                         real manual-mode signature.
+    //   low and flat                       -> no RF in range.  A working tuner
+    //                                         and a stuck one look identical
+    //                                         here, so report UNCONFIRMED
+    //                                         rather than invent a verdict.
+    //
+    // Note this asks a different question from testRX5808(), which only asks
+    // "is any RF being received" — a manual-mode module passes that trivially
+    // by sitting on its hardwired channel.
+    const uint16_t freqs[] = { 5645, 5705, 5760, 5800, 5860, 5917 };
+    const int nFreqs = (int)(sizeof(freqs) / sizeof(freqs[0]));
 
-    // ── Test freq A ────────────────────────────────
-    rx5808->setFrequency(freqA);
-    delay(RX5808_MIN_TUNETIME + 100);
-    const bool verifiedA = rx5808->verifyFrequency();
+    const uint8_t  samplesPerFreq = 6;
+    const uint16_t sampleDelayMs  = 6;
 
-    if (!verifiedA) {
-        result.passed = false;
-        result.details =
-            "SPI register read did not match written value at " + String(freqA) + " MHz. "
-            "The RX5808 module is likely in manual mode (MODE pin strapping "
-            "wrong on the PCB) OR the SPI wiring is broken. In manual mode, the "
-            "chip ignores register writes and picks its channel from hardwired "
-            "CH0-CH2/BS pins — this timer will read a fixed RSSI regardless of "
-            "the configured channel.";
-        restoreRx();
-        result.duration_ms = millis() - start;
-        return result;
+    uint8_t  minRssi = 255, maxRssi = 0;
+    uint16_t minFreq = 0,   maxFreq = 0;
+
+    for (int i = 0; i < nFreqs; i++) {
+        rx5808->setFrequency(freqs[i]);
+        delay(RX5808_MIN_TUNETIME);
+        // readRssi() returns 0 while this flag is set, so it has to be cleared
+        // before sampling or every reading would be zero.
+        rx5808->recentSetFreqFlag = false;
+
+        uint16_t sum = 0;
+        for (uint8_t s = 0; s < samplesPerFreq; s++) {
+            sum += rx5808->readRssi();
+            delay(sampleDelayMs);
+        }
+        const uint8_t avg = (uint8_t)(sum / samplesPerFreq);
+
+        if (avg < minRssi) { minRssi = avg; minFreq = freqs[i]; }
+        if (avg > maxRssi) { maxRssi = avg; maxFreq = freqs[i]; }
     }
 
-    // ── Test freq B ────────────────────────────────
-    rx5808->setFrequency(freqB);
-    delay(RX5808_MIN_TUNETIME + 100);
-    const bool verifiedB = rx5808->verifyFrequency();
+    const uint8_t span = (uint8_t)(maxRssi - minRssi);
 
-    if (!verifiedB) {
+    // kSpanConfirm matches testRX5808()'s kMinSpan so both tests agree on what
+    // counts as "RSSI actually moved".  kStuckHigh is deliberately well above
+    // that test's kMinPeak of 8: a fault is only asserted when the receiver is
+    // pinned to a STRONG signal at every commanded frequency, which no working
+    // tuner does.  Anything weaker is treated as "nothing to test against".
+    const uint8_t kSpanConfirm = 6;
+    const uint8_t kStuckHigh   = 60;
+
+    const String sweep = "min=" + String(minRssi) + " @ " + String(minFreq) +
+                         " MHz, max=" + String(maxRssi) + " @ " + String(maxFreq) +
+                         " MHz, span=" + String(span);
+
+    if (span >= kSpanConfirm) {
+        result.passed = true;
+        result.details =
+            "SPI programming confirmed — RSSI tracked the commanded frequency "
+            "across " + String(nFreqs) + " points (" + sweep + ").";
+    } else if (minRssi >= kStuckHigh) {
         result.passed = false;
         result.details =
-            "SPI register read matched at " + String(freqA) + " MHz but not at " +
-            String(freqB) + " MHz. This suggests a partial SPI failure — possibly "
-            "a stuck bit on the DATA or CLK line, or a marginal signal integrity "
-            "issue.  Check the CH1/CH2/CH3 wiring for shorts, cold joints, or "
-            "damaged pull-ups.";
-        restoreRx();
-        result.duration_ms = millis() - start;
-        return result;
+            "RSSI stayed at " + String(minRssi) + "-" + String(maxRssi) +
+            " at every commanded frequency (" + sweep + "). The receiver is "
+            "locked to a signal it cannot be tuned away from, so the module is "
+            "ignoring register writes — check the MODE pin strapping on the PCB "
+            "and the CH1/CH2/CH3 (DATA/SELECT/CLK) wiring. In manual mode the "
+            "chip picks its channel from hardwired CH0-CH2/BS pins and this "
+            "timer reads a fixed RSSI regardless of the configured channel.";
+    } else {
+        // Not a fault — we simply had nothing to test against.  Reported as a
+        // pass so a bench with no VTX powered does not raise a false alarm, but
+        // the wording makes the limitation explicit rather than implying the
+        // SPI path was verified.
+        result.passed = true;
+        result.details =
+            "UNCONFIRMED — no RF in range to test against (" + sweep + "). "
+            "A working tuner and a stuck one both read a flat noise floor when "
+            "nothing is transmitting, so this cannot be proven either way. "
+            "Power a VTX near the gate and re-run to confirm.";
     }
 
-    // Both verified — SPI programming path confirmed.
-    result.passed = true;
-    result.details = "SPI programming confirmed — register readback matched at " +
-                     String(freqA) + " MHz and " + String(freqB) + " MHz.";
     restoreRx();
     result.duration_ms = millis() - start;
     return result;
