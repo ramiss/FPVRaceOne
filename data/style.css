@@ -150,7 +150,13 @@
   --accent-color: #F5C518;
   --highlight-text: #0A0E14;
   --text-color: #E9EEF5;
-  --secondary-color: #8695A9;
+  /* Muted text, lifted from #8695A9.  That measured 5.8:1 on the panel, which
+   * passes AA on paper, but this token is doing far more work than "helper
+   * text": table headers, section labels, lap gaps, the footer, every card's
+   * slot line.  Several of those also sit inside a container with reduced
+   * opacity, and 5.8:1 multiplied by 0.5 is not legible on a phone outdoors.
+   * 8.4:1 leaves headroom for that stacking. */
+  --secondary-color: #A3B1C6;
   --btn-secondary-bg: #202A3A;
 }
 
@@ -464,14 +470,21 @@ body {
 header {
   background-color: var(--background-color);
   color: var(--text-color);
-  padding: 10px 16px 0;
+  /* 4px below the lockup's rule and the nav's active underline — which now sit
+   * on the same line — before the header's own border. */
+  padding: 10px 16px 4px;
   border-bottom: 1px solid var(--border-color);
 }
 
+/* flex-end, not center: the wordmark carries a rule along its baseline, and the
+ * active nav item carries one too.  Bottom-aligning the two makes them a single
+ * line across the header instead of two unrelated marks at different heights.
+ * The lockup's rule is drawn at the very bottom of its own viewBox (y 463.5 of
+ * 217..464), so the image's bottom edge IS that line. */
 nav {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-end;
   gap: 24px;
   flex-wrap: wrap;
 }
@@ -599,14 +612,18 @@ nav {
   list-style: none;
   gap: 22px;
   margin-left: auto;
-  align-items: center;
+  align-items: flex-end;
   flex-wrap: wrap;
 }
 
+/* display:block so the underline is the bottom of the LINK BOX rather than the
+ * bottom of an inline text run — an inline element's border sits at the text's
+ * own box, which would float it above the lockup's rule. */
 .nav-links a {
+  display: block;
   color: var(--secondary-color);
   text-decoration: none;
-  padding: 6px 1px;
+  padding: 6px 1px 0;
   border-bottom: 2px solid transparent;
   white-space: nowrap;
   transition: color 0.2s, border-color 0.2s;
@@ -693,11 +710,28 @@ main {
   min-height: 0;
 }
 
+/* The console STICKS rather than owning a scroll container.
+ *
+ * The obvious version — .race-right { overflow-y: auto } — silently does
+ * nothing: body is min-height:100vh, so every ancestor sizes to content and
+ * the right column never has a definite height to overflow.  The page would
+ * scroll as one and the controls would leave the screen exactly as before.
+ * position: sticky needs no height chain at all, and align-self: start stops
+ * the item stretching so there is something for `top` to act against. */
 .race-console {
   padding: 16px 14px;
-  border-right: 1px solid var(--border-color);
   background-color: var(--bg-secondary);
   min-width: 0;
+  position: sticky;
+  top: 0;
+  align-self: start;
+}
+
+/* The divider moves to the right column so it still runs the full height of
+ * the shell — the console is no longer stretched, so its own border would stop
+ * wherever the controls end. */
+.race-right {
+  border-left: 1px solid var(--border-color);
 }
 
 .race-label {
@@ -722,41 +756,81 @@ main {
   width: 100%;
 }
 
+/* Explicit, following the .race-state[hidden] precedent further down.  The UA
+ * sheet's [hidden] rule would work today only because .race-controls button
+ * happens not to set `display` — any future layout rule here would silently
+ * beat it and put the button back on a pilot's screen.  See
+ * applyAddLapButtonUI() in script.js for when this applies. */
+#addLapButton[hidden] {
+  display: none;
+}
+
 /* Label above value rather than beside it — the only way four readouts fit a
  * 224px column without truncating a pilot name or a channel string. */
 .race-meta {
   border-top: 1px solid var(--rule-color);
 }
 
+/* Label left, figure right on one line.  At 224px this fits: the longest label
+ * ("Fastest 3 consec") runs ~85px at 9.5px uppercase, and the figures are
+ * short.  Stacking them instead cost twice the height for no gain. */
 .race-meta > div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
   padding: 8px 0;
   border-bottom: 1px solid var(--rule-color);
 }
 
 .race-meta .rm-label {
-  display: block;
+  flex: 0 1 auto;
   font-size: 9.5px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--secondary-color);
 }
 
+.race-meta .rm-nums {
+  min-width: 0;
+  text-align: right;
+}
+
 .race-meta .rm-value {
-  display: block;
   font-size: 1em;
   font-weight: bold;
-  margin-top: 1px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* The lap references script.js writes alongside the figures — "Lap 1", "Need
+ * 3 laps".  :empty hides the row's second line when there is nothing to say,
+ * which is how updateLapAnalysis() clears them. */
+.race-meta .rm-sub {
+  display: block;
+  font-size: 9.5px;
+  font-weight: normal;
+  color: var(--secondary-color);
+}
+
+.race-meta .rm-sub:empty {
+  display: none;
 }
 
 .race-meta > div.rm-hi .rm-value {
   color: var(--accent-color);
 }
 
+/* The summary is a second group in the same console — give it some air rather
+ * than letting it read as three more rows of the block above. */
+.race-summary {
+  margin-top: 14px;
+}
+
 .race-right {
   display: flex;
   flex-direction: column;
   min-width: 0;
-  overflow-y: auto;
 }
 
 /* Section header inside the right column.  Small caps label on the left, a
@@ -811,13 +885,15 @@ main {
   .race-shell {
     grid-template-columns: minmax(0, 1fr);
   }
+  /* Stacked: the console is a block above the content, so sticky would pin it
+   * and eat a third of a phone screen. */
   .race-console {
-    border-right: 0;
+    position: static;
     border-bottom: 1px solid var(--border-color);
     padding: 14px 12px;
   }
   .race-right {
-    overflow-y: visible;
+    border-left: 0;
   }
 }
 
@@ -1001,10 +1077,19 @@ table td {
   border: 1px solid var(--border-color);
 }
 
+/* A header row is a set of LABELS, not chrome.  Filling it with
+ * --primary-color put a saturated band across the top of every table on every
+ * screen — the loudest element in each one, carrying the least information.
+ * They now read as small-caps labels sitting over a hairline, which is the
+ * same treatment the nav and the section heads use. */
 table th {
-  background-color: var(--primary-color);
-  color: var(--chrome-text);
-  font-weight: normal;
+  background-color: transparent;
+  color: var(--secondary-color);
+  font-weight: 600;
+  font-size: 0.8em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-bottom: 1px solid var(--border-color);
 }
 
 table tr:nth-child(even) {
@@ -1081,7 +1166,9 @@ table tr.fastest-lap td {
  * --rule-color hairline, which is the whole difference between "spreadsheet"
  * and "feed".  The outer frame is gone too; .race-right supplies the edges. */
 #lapTable {
-  margin-top: 0;
+  /* Breathing room where the "Laps" section head used to sit — the column
+   * header row is now the first thing under the summary strip. */
+  margin-top: 12px;
   border-collapse: collapse;
 }
 
@@ -1103,11 +1190,67 @@ table tr.fastest-lap td {
   border-bottom: 1px solid var(--border-color);
 }
 
-/* Lap number: a quiet index, not a column of equal weight to the times. */
-#lapTable td:first-child {
-  color: var(--secondary-color);
+/* Lap number badge.  The lean is the same one the three chevrons in the logo
+ * mark carry — the brand geometry doing structural work.  It sits on a <span>
+ * because a transform on a <td> is not reliably applied. */
+/* All four columns cluster at the LEFT of the pane.
+ *
+ * Previously only column 1 had a width, so column 2 grew to fill and columns 3
+ * and 4 were pushed against the far edge — on a wide monitor Gap and Total Time
+ * ended up most of a screen away from the lap they describe.  Fixing widths on
+ * 1-3 and left-aligning 4 means the slack falls off the right-hand end, where
+ * nothing needs it. */
+#lapTable th:nth-child(1),
+#lapTable td:nth-child(1) {
+  width: 84px;
+}
+
+#lapTable th:nth-child(2),
+#lapTable td:nth-child(2) {
+  width: 190px;
+}
+
+#lapTable th {
+  white-space: nowrap;
+}
+
+.lap-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 34px;
+  padding: 3px 8px;
+  background-color: var(--primary-color);
+  color: var(--chrome-text);
   font-weight: bold;
-  width: 62px;
+  font-size: 0.9em;
+  font-variant-numeric: tabular-nums;
+  transform: skewX(-14deg);
+}
+
+/* Only the plate leans — the digits are counter-skewed back to upright, which
+ * is why the number needs an element of its own inside the badge. */
+.lap-badge > b {
+  display: block;
+  font-weight: inherit;
+  transform: skewX(14deg);
+}
+
+#lapTable tr.fastest-lap .lap-badge {
+  background-color: var(--accent-color);
+  color: var(--highlight-text);
+}
+
+/* Empty-state row — see updateLapTablePlaceholder().  The badge is hollow so
+ * the row reads as "no laps yet" rather than as a real lap zero. */
+#lapTable tr.lap-placeholder td {
+  color: var(--secondary-color);
+}
+
+#lapTable tr.lap-placeholder .lap-badge {
+  background-color: transparent;
+  box-shadow: inset 0 0 0 1px var(--border-color);
+  color: var(--secondary-color);
 }
 
 /* Times are the content of this table, so they get the size and the mono. */
@@ -1115,6 +1258,21 @@ table tr.fastest-lap td {
   font-family: 'Courier New', monospace;
   font-weight: bold;
   font-size: 1.15em;
+}
+
+/* Gap is right-aligned against a fixed width so its digits line up down the
+ * column.  Total Time takes no width — it is the one that absorbs the slack —
+ * so it is left-aligned and simply sits after Gap. */
+#lapTable th:nth-child(3),
+#lapTable td:nth-child(3) {
+  width: 130px;
+  text-align: right;
+}
+
+#lapTable th:nth-child(4),
+#lapTable td:nth-child(4) {
+  text-align: left;
+  padding-left: 30px;
 }
 
 #lapTable td:nth-child(3),
@@ -1149,12 +1307,9 @@ table tr.fastest-lap td {
   color: var(--accent-color);
 }
 
-/* Summary strip.  Same .stat-box cards as before, just moved above the lap
- * list and given the section's own gutter. */
-.race-right .stats-boxes {
-  padding: 12px 16px;
-  margin-bottom: 0;
-}
+/* The summary moved into the console as .race-summary rows, so .race-right no
+ * longer contains any .stat-box.  Race History still uses the gradient cards
+ * and is unaffected — it was never inside .race-right. */
 
 /* The chart height adapts to viewport so the threshold sliders and the
  * Save / Wizard buttons below always remain in view without scrolling.
@@ -1234,12 +1389,16 @@ input:checked + .slider:before {
   text-decoration: underline;
 }
 
+/* The footer states a build number.  As a full-width chrome bar it was the
+ * single most saturated element on the screen, competing with the accent for
+ * attention while saying the least — so it is now a hairline-topped strip in
+ * muted text on the page ground. */
 footer {
-  padding: 8px;
-  background-color: var(--primary-color);
-  /* Without this the footer inherits --text-color from body, i.e. the colour
-   * chosen to sit on the PAGE background, painted onto chrome. */
-  color: var(--chrome-text);
+  padding: 8px 16px;
+  background-color: var(--background-color);
+  border-top: 1px solid var(--border-color);
+  color: var(--secondary-color);
+  font-size: 12px;
 }
 
 .credits {
@@ -1344,10 +1503,13 @@ footer {
   border-color: var(--primary-color);
 }
 
+/* Selected by an accent underline rather than a filled chrome block — the same
+ * device the main nav uses, so "which view am I on" reads the same way twice. */
 .analysis-tab.active {
-  background-color: var(--primary-color);
-  color: var(--chrome-text);
-  border-color: var(--primary-color);
+  background-color: var(--bg-secondary);
+  color: var(--text-color);
+  border-color: var(--border-color);
+  border-bottom: 2px solid var(--accent-color);
   font-weight: bold;
 }
 
@@ -2383,8 +2545,10 @@ button.update-btn {
     gap: 12px;
   }
   
+  /* Bottom padding stays 0 so the active underline keeps sitting on the same
+   * line as the lockup's rule — see the base .nav-links a rule. */
   .nav-links a {
-    padding: 6px 1px;
+    padding: 6px 1px 0;
     font-size: 14px;
   }
 
@@ -2420,8 +2584,11 @@ button.update-btn {
     object-fit: contain;
   }
   
+  /* Stacked here, so there is no shared baseline to align to — flex-end would
+   * just push the logo to the right-hand edge. */
   nav {
     flex-direction: column;
+    align-items: flex-start;
     gap: 12px;
   }
   
@@ -2839,11 +3006,11 @@ button.update-btn {
   font-size: 12px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  /* These th cells take their background from the generic `table th` rule, i.e.
-   * CHROME — so the label has to be --chrome-text.  Hardcoded #fff outlived the
-   * teal-only days and would be unreadable on the light-chrome themes
-   * (Blueprint, Runway Amber, Trackside Hi-Vis, Graphite Mono). */
-  color: var(--chrome-text);
+  /* The generic `table th` rule no longer fills the cell with chrome, so the
+   * label is muted text on the panel rather than --chrome-text on a blue band.
+   * (It was #fff before that, which was unreadable on the light-chrome themes —
+   * Blueprint, Runway Amber, Trackside Hi-Vis, Graphite Mono.) */
+  color: var(--secondary-color);
   white-space: nowrap;
 }
 .mn-leaderboard td {
@@ -2859,6 +3026,24 @@ button.update-btn {
  * cell border — keeping both would stack two 1px lines at the bottom. */
 .mn-leaderboard tbody tr:last-child td { border-bottom: none; }
 .mn-leaderboard tbody tr:nth-child(even) { background: var(--table-even-bg); }
+
+/* Host / Me tags sitting beside the callsign.  .mn-card-badge pins the label
+ * white for the semantic badges, which have their own colours; these two have
+ * none of their own, so they take a neutral chip and the theme's text token. */
+.mn-lb-tag {
+  margin-left: 6px;
+  vertical-align: middle;
+}
+
+/* Two classes deep on purpose: .mn-card-badge is declared LATER in this file
+ * and pins `color: #fff` for the semantic badges, so a single-class rule here
+ * would lose and put white on a mid-grey chip — under 4.5:1 on the two light
+ * themes.  :not() keeps Me out of it, so it still takes the accent from
+ * .mn-card-badge-me rather than this neutral chip. */
+.mn-card-badge.mn-lb-tag:not(.mn-card-badge-me) {
+  background: var(--btn-secondary-bg);
+  color: var(--text-color);
+}
 
 .mn-lb-rank    { font-weight: 700; width: 28px; color: var(--secondary-color); }
 .mn-lb-pilot   { font-weight: 600; }
@@ -2919,7 +3104,8 @@ button.update-btn {
   font-size: 12px;
   color: var(--text-color);
   text-align: center;
-  opacity: 0.8;
+  /* No opacity of its own: .mn-pilot-card-empty already dims the whole card,
+   * and the two used to compound to roughly 0.4. */
 }
 .mn-card-solo-label {
   padding: 12px 8px;
@@ -2964,12 +3150,16 @@ button.update-btn {
   border-color: var(--accent-color);
 }
 
+/* These opacities MULTIPLY with whatever the text inside already is — a muted
+ * label at 0.5 on a card that is itself dimmed lands around 2:1.  Both are only
+ * meant to say "this one is not in the race", which a lighter touch says just
+ * as clearly without making the slot letter unreadable. */
 .mn-pilot-card-offline {
-  opacity: 0.62;
+  opacity: 0.78;
 }
 
 .mn-pilot-card-empty {
-  opacity: 0.5;
+  opacity: 0.8;
 }
 
 /* Row 1: identity.  No background — the pilot's colour is the swatch, which is

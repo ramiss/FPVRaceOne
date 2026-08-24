@@ -461,6 +461,10 @@ async function onWiFiReconnect() {
     mnMasterRaceActive = data.masterRaceActive || false;
     if (data.nodeMode !== 2) mnStatusSSID = data.ssid || '';
     if (data.ssid) mnMyOwnSSID = data.ssid;
+    // Both inputs to the Add Lap rules (node mode, master-race state) were just
+    // refreshed from the device, so re-apply.  This poll is also what recovers
+    // the correct state after a page reload mid-race.
+    applyAddLapButtonUI();
 
     const timerRunning  = data.timerRunning  || false;
     const raceElapsedMs = data.raceElapsedMs || 0;
@@ -824,6 +828,10 @@ function setupWiFiEvents() {
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.remove('active');
       stopRaceDisplayOnly();
+      // The director's race ended, so the lockout no longer applies.  This does
+      // not re-enable the button — stopRaceDisplayOnly() has just disabled it
+      // because no race is running; it only refreshes visibility.
+      applyAddLapButtonUI();
     }
   }, false);
 
@@ -1049,6 +1057,11 @@ onload = async function (e) {
   // '' not "block" — see the note in openTab(); .tabcontent is a flex column.
   race.style.display = "";
   calib.style.display = "none";
+
+  // Draw the empty lap row on first paint.  Everything else that maintains it
+  // hangs off a state change (a lap, a clear, a stop), none of which has
+  // happened yet on a cold load.
+  updateLapTablePlaceholder();
 
   attachConfigStagingListeners();
 
@@ -2126,6 +2139,13 @@ async function createRssiChart() {
       strokeStyle: "rgba(255,255,255,0.25)",
       sharpLines: true,
       verticalSections: 4,
+      // Horizontal lines only.  SmoothieChart defaults millisPerLine to 1000,
+      // which ruled the plot with a vertical line every second — a dense picket
+      // fence that carried no information here, because this chart has no time
+      // axis and nothing is ever read off it horizontally.  0 disables them
+      // (smoothie.js guards the draw with `millisPerLine > 0`).  The horizontal
+      // lines stay: those ARE read against, for the enter/exit thresholds.
+      millisPerLine: 0,
       borderVisible: false,
     },
     labels: {
@@ -3389,7 +3409,9 @@ function _restoreInProgressLaps(laps) {
       // data-lap-index stays the ARRAY index — it addresses lapTimes[], which
       // only holds what was restored.
       row.setAttribute('data-lap-index', idx);
-      const c1 = row.insertCell(0); c1.innerHTML = lapNo;
+      // Wrapped so CSS can draw the skewed lap badge — a <td> itself cannot be
+      // transformed reliably.  See .lap-badge.
+      const c1 = row.insertCell(0); c1.innerHTML = `<span class="lap-badge"><b>${lapNo}</b></span>`;
       const c2 = row.insertCell(1);
       c2.innerHTML = lapNo === 0 ? '-' : formatMsDisplay(l.lapTimeMs);
       const gapMs = idx > 0 ? Math.round((newLap - lapTimes[idx - 1]) * 1000) : null;
@@ -3436,8 +3458,9 @@ function addLap(lapStr) {
   const cell3 = row.insertCell(2);  // Gap
   const cell4 = row.insertCell(3);  // Total Time
   
-  cell1.innerHTML = lapNo;
-  
+  // See _restoreInProgressLaps(): the badge needs its own element.
+  cell1.innerHTML = `<span class="lap-badge"><b>${lapNo}</b></span>`;
+
   if (lapNo == 0) {
     cell2.innerHTML = "-";
     cell3.innerHTML = "-";
@@ -3598,6 +3621,10 @@ function startRaceDisplayOnly(offsetMs = 0) {
   startRaceButton.classList.add('active');
   stopRaceButton.disabled = false;
   addLapButton.disabled = false;
+  // This function runs ONLY when the master started the race on this client,
+  // so re-apply the lockout immediately after enabling — a client racing under
+  // a director must not be able to inject a lap that syncs upstream.
+  applyAddLapButtonUI();
 
   clearInterval(timerInterval);
   const _timerStart = Date.now() - offsetMs;
@@ -4178,6 +4205,37 @@ function updateLapCounter() {
   } else {
     lapCounter.textContent = `Lap ${Math.max(0, lapNo)} / ${maxLaps}`;
   }
+  updateLapTablePlaceholder();
+}
+
+// A header row on its own reads as a broken table, so an empty lap list shows
+// one placeholder row instead.
+//
+// The row is created and removed here rather than sitting in index.html,
+// because every path that clears the table does it with
+// `for (i = 1; i < rows.length; i++) deleteRow(1)` — a static placeholder would
+// be swept away by the first clear and never come back.
+//
+// Every one of those clear paths calls updateLapCounter() immediately
+// afterwards, and so does addLap(), which is why this hangs off that function.
+function updateLapTablePlaceholder() {
+  const table = document.getElementById('lapTable');
+  if (!table) return;
+
+  const hasLaps = !!table.querySelector('tr[data-lap-index]');
+  const existing = document.getElementById('lapPlaceholderRow');
+
+  if (hasLaps) {
+    if (existing) existing.remove();
+    return;
+  }
+  if (existing) return;
+
+  const row = table.insertRow();   // no index: appends after the header row
+  row.id = 'lapPlaceholderRow';
+  row.className = 'lap-placeholder';
+  row.innerHTML = '<td><span class="lap-badge"><b>&mdash;</b></span></td>'
+                + '<td>&ndash;</td><td>&ndash;</td><td>&ndash;</td>';
 }
 
 function highlightFastestLap() {
@@ -4276,11 +4334,19 @@ async function startRace() {
     }
   }
 
-  // Offer to clear existing lap data before starting
+  // Offer to clear existing lap data before starting.
+  //
+  // Yes / No / Cancel: the old confirm() offered only "clear and start" or
+  // "keep and start", with no way out once the dialog was up.  Cancel returns
+  // before anything is disabled and before /timer/prearm is fired below, so it
+  // genuinely backs out rather than starting a race you did not want.
   if (lapTimes.length > 0) {
-    if (confirm('You have existing lap data. Clear before starting?')) {
-      clearLaps();
-    }
+    const choice = await _showThreeOptionModal(
+      'You have existing lap data. Clear it before starting?',
+      'Yes', 'No', 'Cancel'
+    );
+    if (choice === 2) return;   // Cancel — no pre-arm, no state change
+    if (choice === 0) clearLaps();
   }
 
   updateLapCounter();
@@ -4463,6 +4529,9 @@ function updateRaceDataButtonsVisibility() {
     // inline display:block would beat the class and stack the buttons.
     buttonsDiv.style.display = (lapTimes.length > 0 && raceIsStopped) ? 'flex' : 'none';
   }
+  // clearLaps() reaches here but not updateLapCounter(), so the placeholder is
+  // restored from this path too.
+  updateLapTablePlaceholder();
   // The console's run-state pill reads the same signal the buttons do: Stop is
   // enabled exactly while a race is live.
   const statePill = document.getElementById('raceStatePill');
@@ -7814,6 +7883,7 @@ function openSettingsModal() {
           if (devModeLabel) devModeLabel.textContent = config.devMode ? 'On' : 'Off';
           const _pnd = document.getElementById('pilotNameDisplay');
           if (_pnd) _pnd.style.cursor = config.devMode ? 'pointer' : 'default';
+          applyAddLapButtonUI();   // Dev Mode gates the button's visibility
         }
 
         const otaChannelSel = document.getElementById('otaChannelSelect');
@@ -7862,6 +7932,38 @@ function applyCalibMasterNote() {
   const note = document.getElementById('calibMasterNote');
   if (!note) return;
   note.style.display = (mnNodeMode === 1) ? 'block' : 'none';
+}
+
+// Visibility + hard lockout for the manual "Add Lap" button.
+//
+// Two separate rules, deliberately not merged:
+//
+//  1. HIDDEN unless Dev Mode is on, for single and client.  Injecting a lap by
+//     hand is a development affordance, not something a pilot should find on
+//     their own race screen.  The MASTER keeps it regardless — that is the race
+//     director's console, where adding a missed lap is a legitimate correction.
+//
+//  2. DISABLED when this client is racing under a master, even with Dev Mode
+//     on.  A client's laps are synced upstream, so a fabricated crossing does
+//     not just mislead the pilot — it corrupts the director's record of the
+//     race.  mnMasterRaceActive is only ever set when the client is actually
+//     following the director (both masterRaceState handlers short-circuit on
+//     mnClientSkipEnabled), so an "ignore race director" client is unaffected
+//     and keeps its Dev Mode button.
+//
+// Only ever FORCES disabled — it never enables.  Whether the button is live
+// otherwise is owned by the existing race start/stop paths, and this must not
+// fight them.
+function applyAddLapButtonUI() {
+  const btn = document.getElementById('addLapButton');
+  if (!btn) return;
+
+  const isMaster = (mnNodeMode === 1);
+  btn.hidden = !isMaster && !mnDevMode;
+
+  if (mnNodeMode === 2 && mnMasterRaceActive) {
+    btn.disabled = true;
+  }
 }
 let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE / polling
 // ── Node-list freshness ──────────────────────────────────────────────────────
@@ -8665,9 +8767,14 @@ function mnRenderRaceTab(nodes, opts) {
   ranked.forEach((n, i) => {
     const color    = '#' + ((n.pilotColor || 0x0080FF) >>> 0).toString(16).padStart(6, '0');
     const callsign = n.pilotName || (n.isMaster ? 'Master' : 'Node ' + _slotLetter(n.nodeId));
-    const hostTag  = n.isMaster ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Host</span>' : '';
+    // Inline, immediately after the callsign — these label the pilot, so they
+    // belong beside the name.  They used to be float:right, which parked them
+    // against the far edge of a very wide Pilot column, reading as a stray word
+    // in the middle of the row.  They also carried no background at all, unlike
+    // every other .mn-card-badge, so .mn-lb-tag gives them one.
+    const hostTag  = n.isMaster ? ' <span class="mn-card-badge mn-lb-tag">Host</span>' : '';
     const meTag    = (readOnly && !n.isMaster && n.nodeId === mnMyNodeId)
-      ? ' <span class="mn-card-badge" style="float:right;margin-left:8px;">Me</span>' : '';
+      ? ' <span class="mn-card-badge mn-card-badge-me mn-lb-tag">Me</span>' : '';
     let badge = '';
     if (n.quitEarly) badge = ' <span class="mn-status-dnf">DNF</span>';
     const isFastPilot = isFinite(globalFastestMs) && n.fastestMs === globalFastestMs;
@@ -8675,7 +8782,7 @@ function mnRenderRaceTab(nodes, opts) {
     html += `<tr>
       <td class="mn-lb-rank">${i + 1}</td>
       <td class="mn-lb-pilot">
-        ${hostTag}${meTag}<span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${badge}
+        <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${statusDotColor};margin-right:6px;vertical-align:middle;" title="${n.online !== false ? 'Connected' : 'Offline'}"></span>${callsign}${hostTag}${meTag}${badge}
       </td>
       <td class="mn-lb-mono">${n.lapCount}</td>
       <td class="mn-lb-mono">${n.lapCount > 0 ? formatMsRace(n.totalMs)            : '—'}</td>
@@ -8684,6 +8791,33 @@ function mnRenderRaceTab(nodes, opts) {
     </tr>`;
   });
   html += '</tbody></table>';
+
+  // ── Console readouts ───────────────────────────────────────────
+  // Scoped to the shell this render is targeting, and addressed by CLASS: the
+  // master view and the client mirror are both in the document at once, so a
+  // shared id would always resolve to whichever came first.
+  const _rootEl = document.getElementById(containerId);
+  const _shell  = _rootEl ? _rootEl.closest('.race-shell') : null;
+  if (_shell) {
+    const _name = (n) => n.pilotName
+      || (n.isMaster ? (readOnly ? 'Race Director' : 'Host') : 'Node ' + _slotLetter(n.nodeId));
+    const _set = (sel, txt) => {
+      const el = _shell.querySelector(sel);
+      if (el) el.textContent = txt;
+    };
+    const _leader    = ranked[0];
+    const _fastPilot = isFinite(globalFastestMs)
+      ? ranked.find(n => n.fastestMs === globalFastestMs)
+      : null;
+
+    _set('.rm-pilots', `${ranked.length} of ${allSlots.length}`);
+    _set('.rm-fastest', _fastPilot
+      ? `${formatMsRace(globalFastestMs)} · ${_name(_fastPilot)}`
+      : '—');
+    _set('.rm-leader', (_leader && _leader.lapCount > 0)
+      ? `${_name(_leader)} · ${_leader.lapCount} lap${_leader.lapCount === 1 ? '' : 's'}`
+      : '—');
+  }
 
   // ── Per-pilot lap columns — always 8 slots ─────────────────────
   html += '<div class="mn-pilot-cards">';
@@ -8956,7 +9090,9 @@ async function _mnModalRssiInit() {
       millisPerPixel: 50,
       interpolation: 'linear',
       scaleSmoothing: 1.0,
-      grid: { strokeStyle: "rgba(255,255,255,0.18)", fillStyle: "#0f1722", sharpLines: true, verticalSections: 4, borderVisible: false },
+      // millisPerLine: 0 — same reasoning as the calibration chart above; these
+      // two are the same instrument and should not disagree.
+      grid: { strokeStyle: "rgba(255,255,255,0.18)", fillStyle: "#0f1722", sharpLines: true, verticalSections: 4, millisPerLine: 0, borderVisible: false },
       labels: { precision: 0, fillStyle: "rgba(255,255,255,0.85)", fontSize: 11, showIntermediateLabels: true },
       maxValue: 200,
       minValue: 50,
@@ -10371,7 +10507,24 @@ async function mnStartRace() {
   const hasMasterLaps = lapTimes.length > 0;
   const hasClientLaps = (mnCurrentNodes || []).some(n => !n.isMaster && (n.laps || []).length > 0);
   if (hasMasterLaps || hasClientLaps) {
-    if (confirm('You have existing lap data. Clear before starting?')) {
+    // Yes / No / Cancel, not OK / Cancel.  The old two-button confirm had no
+    // way to back out: "Cancel" meant "don't clear, but start anyway", so a
+    // misclick committed you to a race.
+    //
+    // The note is there because this choice is narrower than it looks.  It
+    // gates ONLY /api/multinode/clearLaps.  Every client is wiped at pre-arm
+    // regardless — /timer/masterArm calls clearLapData() unconditionally so a
+    // client cannot carry solo-race data into the director's race, which is
+    // what the race-epoch design depends on.  Saying "No" and then finding the
+    // clients empty looked like a bug; it is the pre-arm doing its job.
+    const choice = await _showThreeOptionModal(
+      'You have existing lap data. Clear it before starting?' +
+      '<br><br><small style="opacity:0.8;">Client laps are cleared at pre-arm either way — ' +
+      'this choice controls the host\'s own laps.</small>',
+      'Yes', 'No', 'Cancel'
+    );
+    if (choice === 2) return;   // Cancel — nothing sent, no pre-arm, buttons untouched
+    if (choice === 0) {
       await fetch('/api/multinode/clearLaps', { method: 'POST' }).catch(() => {});
       clearLaps();
       const timerEl = document.getElementById('mn-race-timer');

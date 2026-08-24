@@ -90,6 +90,16 @@
           </div>
           -->
         </div>
+        <!-- The nav lives INSIDE <nav>, on the same row as the lockup.  As a
+             sibling after it, .nav-links was a full-width block below the logo
+             and margin-left:auto had nothing to push against. -->
+        <ul class="nav-links">
+          <li><a href="#" id="nav-link-race" class="tablinks active" onclick="openTab(event, 'race')">Race</a></li>
+          <li id="nav-li-raceview" style="display:none;"><a href="#" id="nav-link-raceview" class="tablinks" onclick="openTab(event, 'raceview')">Race View</a></li>
+          <li><a href="#" id="nav-link-history" class="tablinks" onclick="openTab(event, 'history')">Race History</a></li>
+          <li><a href="#" id="nav-link-calib" class="tablinks" onclick="openTab(event, 'calib')">Calibration</a></li>
+          <li><a href="#" id="nav-link-config" class="tablinks" onclick="openSettingsModal()">Configuration</a></li>
+        </ul>
       </nav>
       <div id="raceTabDownloadReminder" class="banner-warning"
           style="display:none; margin: 10px 0; padding: 6px 10px; border-radius: 8px;">
@@ -109,13 +119,6 @@
       ">
         Calibrating pilot frequency, please wait approx 20 secs...
       </div>
-      <ul class="nav-links">
-        <li><a href="#" id="nav-link-race" class="tablinks active" onclick="openTab(event, 'race')">Race</a></li>
-        <li id="nav-li-raceview" style="display:none;"><a href="#" id="nav-link-raceview" class="tablinks" onclick="openTab(event, 'raceview')">Race View</a></li>
-        <li><a href="#" id="nav-link-history" class="tablinks" onclick="openTab(event, 'history')">Race History</a></li>
-        <li><a href="#" id="nav-link-calib" class="tablinks" onclick="openTab(event, 'calib')">Calibration</a></li>
-        <li><a href="#" id="nav-link-config" class="tablinks" onclick="openSettingsModal()">Configuration</a></li>
-      </ul>
     </header>
     <div id="disconnectedBanner" style="
       display: none;
@@ -165,7 +168,11 @@
             <div class="race-controls">
               <button id="startRaceButton" onclick="startRace()">Start Race</button>
               <button id="stopRaceButton" onclick="stopRace()" disabled>Stop Race</button>
-              <button id="addLapButton" onclick="addManualLap()" disabled>Add Lap</button>
+              <!-- Starts HIDDEN: single/client with Dev Mode off is the normal
+                   shipping case, so the safe default is not to show a pilot a
+                   manual-lap control.  applyAddLapButtonUI() reveals it for the
+                   master (and for Dev Mode) on the first /api/mode poll. -->
+              <button id="addLapButton" onclick="addManualLap()" disabled hidden>Add Lap</button>
               <button id="clearLapsButton" onclick="clearLaps()">Clear Laps</button>
             </div>
             <div class="race-meta">
@@ -181,37 +188,46 @@
                 <span class="rm-value" id="lapCounter">Lap 0</span>
               </div>
             </div>
+
+            <!-- Summary lives in the console, under the controls.  The ids are
+                 the ones script.js already writes to, including the sublabels —
+                 updateLapAnalysis() sets those without a null guard, so they
+                 have to stay in the document even though they are small. -->
+            <div class="race-meta race-summary">
+              <div class="rm-hi">
+                <span class="rm-label">Fastest lap</span>
+                <span class="rm-nums">
+                  <span class="rm-value" id="statFastest">--</span>
+                  <span class="rm-sub" id="statFastestLapNo"></span>
+                </span>
+              </div>
+              <div>
+                <span class="rm-label">Fastest 3 consec</span>
+                <span class="rm-nums">
+                  <span class="rm-value" id="statFastest3Consec">--</span>
+                  <span class="rm-sub" id="statFastest3ConsecLaps"></span>
+                </span>
+              </div>
+              <div>
+                <span class="rm-label">Best 3 laps</span>
+                <span class="rm-nums">
+                  <span class="rm-value" id="statBest3">--</span>
+                  <span class="rm-sub" id="statBest3Laps"></span>
+                </span>
+              </div>
+              <div>
+                <span class="rm-label">Median lap</span>
+                <span class="rm-nums">
+                  <span class="rm-value" id="statMedian">--</span>
+                </span>
+              </div>
+            </div>
           </div>
 
           <div class="race-right">
-            <!-- Summary sits ABOVE the lap list: the four numbers a pilot
-                 actually wants are the first thing on the screen, instead of
-                 being reached by scrolling past every lap. -->
-            <div class="race-section-head"><span>Summary</span></div>
-            <div class="stats-boxes">
-              <div class="stat-box">
-                <div class="stat-label">Fastest Lap</div>
-                <div class="stat-value" id="statFastest">--</div>
-                <div class="stat-sublabel" id="statFastestLapNo"></div>
-              </div>
-              <div class="stat-box">
-                <div class="stat-label">Fastest 3 Consecutive</div>
-                <div class="stat-value" id="statFastest3Consec">--</div>
-                <div class="stat-sublabel" id="statFastest3ConsecLaps"></div>
-              </div>
-              <div class="stat-box">
-                <div class="stat-label">Best 3 Laps</div>
-                <div class="stat-value" id="statBest3">--</div>
-                <div class="stat-sublabel" id="statBest3Laps"></div>
-              </div>
-              <div class="stat-box">
-                <div class="stat-label">Median Lap</div>
-                <div class="stat-value" id="statMedian">--</div>
-                <div class="stat-sublabel"></div>
-              </div>
-            </div>
-
-            <div class="race-section-head"><span>Laps</span></div>
+            <!-- No "Laps" section head: the table's own LAP NO / LAP TIME /
+                 GAP / TOTAL TIME header row already names the section, and two
+                 stacked labels just pushed the first lap further down. -->
             <table id="lapTable">
               <tr>
                 <th>Lap No</th>
@@ -253,6 +269,23 @@
               <button id="mnStopRaceBtnMain"  onclick="mnStopRace()" disabled>Stop All</button>
               <button id="mnClearRaceBtnMain" onclick="mnClearRace()">Clear</button>
             </div>
+            <!-- Filled by mnRenderRaceTab().  Addressed by CLASS, not id: this
+                 function renders the master shell and the client mirror below,
+                 and duplicate ids would collide. -->
+            <div class="race-meta">
+              <div>
+                <span class="rm-label">Pilots racing</span>
+                <span class="rm-value rm-pilots">--</span>
+              </div>
+              <div class="rm-hi">
+                <span class="rm-label">Fastest lap</span>
+                <span class="rm-value rm-fastest">--</span>
+              </div>
+              <div>
+                <span class="rm-label">Leader</span>
+                <span class="rm-value rm-leader">--</span>
+              </div>
+            </div>
           </div>
 
           <div class="race-right">
@@ -282,7 +315,10 @@
 
       <!-- ── Client read-only Race View tab (mirrors master's race display) ── -->
       <div id="raceview" class="tabcontent" style="display: none;">
-        <div id="rv-status-banner" style="text-align:center; font-size:13px; font-weight:600; color:#fff; background:#1565c0; padding:6px 14px; border-radius:6px; letter-spacing:0.02em; margin:6px 0;">
+        <!-- margin has side gutters now that the tab is full-bleed — with
+             `margin: 6px 0` a rounded banner sat hard against both edges.
+             rvUpdateBanner() only ever writes background/textContent. -->
+        <div id="rv-status-banner" style="text-align:center; font-size:13px; font-weight:600; color:#fff; background:#1565c0; padding:6px 14px; border-radius:6px; letter-spacing:0.02em; margin:10px 16px;">
           Waiting for race director to start race...
         </div>
         <div class="race-shell">
@@ -292,6 +328,20 @@
             <div class="race-label">Race clock</div>
             <div id="rv-race-timer" class="mn-race-timer-display">00:00.00</div>
             <div id="rvRaceStatePill" class="race-state" hidden><i></i><span>Racing</span></div>
+            <div class="race-meta">
+              <div>
+                <span class="rm-label">Pilots racing</span>
+                <span class="rm-value rm-pilots">--</span>
+              </div>
+              <div class="rm-hi">
+                <span class="rm-label">Fastest lap</span>
+                <span class="rm-value rm-fastest">--</span>
+              </div>
+              <div>
+                <span class="rm-label">Leader</span>
+                <span class="rm-value rm-leader">--</span>
+              </div>
+            </div>
           </div>
 
           <div class="race-right">
@@ -1536,7 +1586,7 @@
                 <label for="devModeToggle">Dev Mode (Simulate Laps):</label>
                 <div style="flex: 1;">
                   <label class="switch">
-                    <input type="checkbox" id="devModeToggle" onchange="mnDevMode=this.checked; document.getElementById('devModeLabel').textContent=this.checked?'On':'Off'; mnRenderRaceTab(mnCurrentNodes); const _pnd=document.getElementById('pilotNameDisplay'); if(_pnd) _pnd.style.cursor=this.checked?'pointer':'default'; stageConfig('devMode', this.checked?1:0); stagedDirty=true; updateSaveButton();">
+                    <input type="checkbox" id="devModeToggle" onchange="mnDevMode=this.checked; document.getElementById('devModeLabel').textContent=this.checked?'On':'Off'; mnRenderRaceTab(mnCurrentNodes); const _pnd=document.getElementById('pilotNameDisplay'); if(_pnd) _pnd.style.cursor=this.checked?'pointer':'default'; applyAddLapButtonUI(); stageConfig('devMode', this.checked?1:0); stagedDirty=true; updateSaveButton();">
                     <span class="slider"></span>
                   </label>
                   <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="devModeLabel">Off</span>
