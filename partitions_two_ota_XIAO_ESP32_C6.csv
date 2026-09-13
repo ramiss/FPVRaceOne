@@ -27,6 +27,12 @@
 #   - scripts/flash_published_release.py FS_OFFSET
 #   - .github/workflows/release.yml      manifest offsets + layout + size gates
 #   - docs/FLASHING_OPTIONAL.md
+#
+# And one file OUTSIDE this repo, which is why the 2026-08-11 rebalance missed
+# it and left local-file flashes writing littlefs into ota_1:
+#   - FPVRaceOne-Flasher  flasher/config.py -> LOCAL_LAYOUT["offsets"]
+#     (its FALLBACK_MANIFEST is frozen at the OLD layout on purpose — that one
+#     describes pre-manifest releases and must NOT be updated.)
 
 nvs,        data, nvs,      0x9000,   0x5000
 otadata,    data, ota,      0xE000,   0x2000

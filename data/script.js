@@ -331,21 +331,21 @@ async function initializeTransport() {
           comPortSelect.appendChild(option);
         });
         
-        // Auto-connect to first FPVGate device in auto mode
+        // Auto-connect to first device in auto mode
         if (currentConnectionMode === 'auto') {
           // Try to find by manufacturer first
-          let fpvgatePort = ports.find(p => 
+          let fpvraceonePort = ports.find(p =>
             p.manufacturer && (p.manufacturer.includes('Espressif') || p.manufacturer.includes('Silicon Labs'))
           );
-          
-          // If not found, look for COM12 specifically (common FPVGate port on Windows)
-          if (!fpvgatePort) {
-            fpvgatePort = ports.find(p => p.path === 'COM12');
+
+          // If not found, look for COM12 specifically (common port on Windows)
+          if (!fpvraceonePort) {
+            fpvraceonePort = ports.find(p => p.path === 'COM12');
           }
-          
-          console.log('[Init] FPVRaceOne port found:', fpvgatePort);
-          if (fpvgatePort) {
-            await connectUSB(fpvgatePort.path);
+
+          console.log('[Init] FPVRaceOne port found:', fpvraceonePort);
+          if (fpvraceonePort) {
+            await connectUSB(fpvraceonePort.path);
             return;
           }
         }
@@ -647,6 +647,11 @@ function setupWiFiEvents() {
         startRaceButton.disabled = true;
         stopRaceButton.disabled = false;
         addLapButton.disabled = false;
+        // Re-apply the gate straight after enabling.  This branch serves BOTH
+        // master and client and then returns, so without this a client racing
+        // under a director was left with a live-looking Add Lap button —
+        // addManualLap() would refuse it, but the UI would not say so.
+        applyAddLapButtonUI();
         // Master: this is where the host's race clock and the GO cue belong.
         // The fleet start is scheduled ahead so every unit begins on one
         // instant (§8), and the firmware emits this event when that instant
@@ -705,6 +710,7 @@ function setupWiFiEvents() {
       startRaceButton.disabled = true;
       stopRaceButton.disabled = false;
       addLapButton.disabled = false;
+      applyAddLapButtonUI();
       // Self-heal: if we didn't originate this locally (missed prearming,
       // late-join replay, cross-tab), enter spectator mode now.
       if (!isLocalOrigin) {
@@ -1092,11 +1098,17 @@ onload = async function (e) {
       console.error('[Script] Debug Listener failed:', err);
   }
 
-  // Dev mode: click pilot name display on single/client Race view to inject a simulated lap
+  // Dev mode: click pilot name display on single/client Race view to inject a
+  // simulated lap.  This is the OTHER route into addManualLap() — it does not
+  // go near the Add Lap button, so hiding or disabling that button never
+  // covered it.  addManualLap() carries the real guard against injecting a lap
+  // while racing under a director; the check is repeated here so the rule is
+  // visible at the call site rather than only at the far end.
   const pilotNameDisplay = document.getElementById('pilotNameDisplay');
   if (pilotNameDisplay) {
     pilotNameDisplay.addEventListener('click', () => {
       if (!mnDevMode) return;
+      if (mnNodeMode === 2 && mnMasterRaceActive) return;
       addManualLap();
     });
   }
@@ -2529,10 +2541,13 @@ function buildConfigSnapshotFromUI() {
     otaIncludePrereleases: parseInt(document.getElementById('otaChannelSelect')?.value || '0', 10) || 0,
 
     // RSSI acquisition: 0 = polled analogRead, 1 = DMA continuous peak-hold.
-    // Latched by the firmware at boot, so a change needs a reboot to apply.
-    // Fallback is '1' (DMA) to match the firmware default, so a missing
-    // selector cannot silently downgrade a unit to the polled path on save.
-    // The trailing || 0 is a NaN guard only — a legitimate "0" stays 0.
+    // The selector this read was written for is GONE (removed 2026-09-12 — see
+    // the note in index.html).  That turns this line into the migration path
+    // rather than a dead read: `?.value` is now always undefined, so the '1'
+    // fallback fires and every save writes DMA.  A unit whose stored config
+    // still says polled heals itself the first time any setting is saved.
+    // Keep the line for exactly that reason; deleting it would leave a stale
+    // adcMode=0 in NVS with nothing to correct it.
     adcMode: parseInt(document.getElementById('adcModeSelect')?.value || '1', 10) || 0,
 
     // Spoken lap-time precision: 1=tenths, 2=hundredths, 3=thousandths.
@@ -4430,6 +4445,11 @@ async function startRace() {
   startRaceButton.classList.remove('active');
   stopRaceButton.disabled = false;
   addLapButton.disabled = false;
+  // Every site that enables this button re-applies the gate immediately after.
+  // Keeping that uniform is cheaper than reasoning about which paths a client
+  // under a race director can reach — the call only ever forces disabled, so
+  // it is harmless where the lockout does not apply.
+  applyAddLapButtonUI();
 
   // A fresh race: no crossing yet, so the current lap begins at race zero.
   raceDisplayStartMs = Date.now();
@@ -4736,6 +4756,26 @@ function loadDarkMode() {
 
 // Manual lap addition
 function addManualLap() {
+  // ── Enforcement, not decoration ───────────────────────────────────────────
+  //
+  // A client racing under a race director must not be able to fabricate a
+  // crossing.  Its laps sync upstream, so an injected lap does not merely
+  // mislead the pilot — it corrupts the director's record of the race.
+  //
+  // This guard lives HERE, at the single chokepoint every route passes through,
+  // because hiding and disabling the button only covers one of them.  The Dev
+  // Mode pilot-name click calls this function directly, and did so regardless
+  // of master-race state until this check existed.
+  //
+  // Deliberately scoped to mnMasterRaceActive rather than "connected to a
+  // master": a client running its OWN solo race, or one with "ignore race
+  // director" set, never has that flag raised, and its manual laps are its own
+  // business.
+  if (mnNodeMode === 2 && mnMasterRaceActive) {
+    console.warn('[DevMode] Manual lap blocked — racing under the race director.');
+    return;
+  }
+
   // Get current timer value and convert to milliseconds
   const timerText = timer.innerHTML;
   const match = timerText.match(/(\d{2}):(\d{2}):(\d{2})s/);
@@ -7883,19 +7923,13 @@ function openSettingsModal() {
           if (devModeLabel) devModeLabel.textContent = config.devMode ? 'On' : 'Off';
           const _pnd = document.getElementById('pilotNameDisplay');
           if (_pnd) _pnd.style.cursor = config.devMode ? 'pointer' : 'default';
-          applyAddLapButtonUI();   // Dev Mode gates the button's visibility
+          applyAddLapButtonUI();    // Dev Mode gates the button's visibility
+          applySystemMonitorUI();   // ...and the Diagnostics log panel
         }
 
         const otaChannelSel = document.getElementById('otaChannelSelect');
         if (otaChannelSel && config.otaIncludePrereleases !== undefined) {
           otaChannelSel.value = config.otaIncludePrereleases ? '1' : '0';
-        }
-
-        // RSSI acquisition mode (0 = polled analogRead, 1 = DMA continuous).
-        // Takes effect on reboot — the firmware latches it in RX5808::init().
-        const adcModeSel = document.getElementById('adcModeSelect');
-        if (adcModeSel && config.adcMode !== undefined) {
-          adcModeSel.value = String(config.adcMode);
         }
 
         // All UI fields populated — now unlock staging so user changes can be tracked
@@ -7964,6 +7998,28 @@ function applyAddLapButtonUI() {
   if (mnNodeMode === 2 && mnMasterRaceActive) {
     btn.disabled = true;
   }
+}
+
+// Show the Diagnostics System Monitor only in Dev Mode.
+//
+// The log stream is engineering output — slot letters, lap-sync state, RSSI
+// internals — and a pilot has no use for it.  Same reasoning as Add Lap, and
+// deliberately the same switch, so there is one "show me the internals" control
+// rather than two.
+//
+// Only the PANEL is hidden.  The log ring behind it keeps filling in every
+// build: the calibration banner reads that same stream through
+// startDebugListener() to know when a retune has finished, so the background
+// poll must survive being hidden.  stopSerialMonitor() drops the poll back to
+// its slow 3 s cadence rather than ending it, which is exactly what we want.
+function applySystemMonitorUI() {
+  const section = document.getElementById('systemMonitorSection');
+  if (!section) return;
+  section.hidden = !mnDevMode;
+
+  // Turning Dev Mode off with the monitor running would otherwise leave it
+  // polling at 300 ms behind a hidden panel, forever.
+  if (!mnDevMode && serialMonitorActive) stopSerialMonitor();
 }
 let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE / polling
 // ── Node-list freshness ──────────────────────────────────────────────────────
@@ -10825,6 +10881,11 @@ document.addEventListener('DOMContentLoaded', () => {
     if (_dl) _dl.textContent = 'On';
     const _pnd = document.getElementById('pilotNameDisplay');
     if (_pnd) _pnd.style.cursor = 'pointer';
+    // Both Dev-Mode-gated surfaces, applied here too.  The /config load below
+    // is the authority and calls these as well — but if that fetch fails, this
+    // path would otherwise leave Dev Mode "on" with both surfaces still hidden.
+    applyAddLapButtonUI();
+    applySystemMonitorUI();
   }
 
   (async () => {

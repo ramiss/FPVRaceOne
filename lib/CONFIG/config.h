@@ -62,6 +62,33 @@
 #define TIMING_STATS_ENABLED 1
 #define CPU_MONITOR_ENABLED  1
 
+// ── Bench telemetry on the serial port ──────────────────────────────────────
+//
+// Gates ONLY the periodic bench lines that exist to feed the timing harness:
+//   [TIMING]     sample-interval statistics          (laptimer.cpp)
+//   [CORE0]      sub-call durations + 10 s window    (main.cpp)
+//   [STACK]      per-task stack watermarks           (main.cpp)
+//   [HEAP] free= periodic heap watermark             (webserver.cpp)
+//   [MULTINODE] step / directorState fanout          (multinode.cpp)
+//
+// It does NOT touch ordinary operational logging — lap detection, RACE
+// ENTER/EXIT, MULTINODE connect/timeout, LAPSYNC, RX5808 tuning, and the
+// [HEAP] WARN/FATAL/OK safety messages all keep printing in every build, on
+// USB and in the web Serial Monitor alike.  Those are how you work out what a
+// device did; the lines above are how a bench harness measures it.
+//
+// CRUCIALLY THIS GATES EMISSION, NOT MEASUREMENT.  TIMING_STATS_ENABLED and
+// CPU_MONITOR_ENABLED above keep running, so Diagnostics -> RSSI Sample Timing
+// and CPU Load report exactly the same numbers with this off.  Turning it off
+// costs the harness its "Load evidence" section and costs the UI nothing.
+//
+// Forced to 0 by the release environment (targets/ESP32C6.ini).  #ifndef so
+// that -D wins; a bare #define here would be processed after the command line
+// and silently override it.
+#ifndef HARNESS_LOG_ENABLED
+#define HARNESS_LOG_ENABLED 1
+#endif
+
 // Reporting window for the sample-interval statistics, and the threshold
 // above which an interval is counted as "late".  10 ms is ~2-5x the expected
 // interval at 200-500 Hz, so a healthy system should report zero late samples.
@@ -88,11 +115,22 @@
 // whether the host is draining the port, which would land squarely inside the
 // quantity being measured.
 //
-// Bench equipment, not a product feature — ship as 0, set to 1 when the
-// emulator rig is wired up.
+// Bench equipment, not a product feature — set to 1 while the emulator rig is
+// wired up.  You do NOT have to remember to set it back for a release: the
+// release environment forces it off (targets/ESP32C6.ini).
+//
+// #ifndef-guarded so that -D can win.  A bare #define here is processed AFTER
+// the command-line define and silently overrides it — which would mean
+// `pio run -e seeed_xiao_esp32c6_release` shipping with the bench marker still
+// driving GPIO21, the exact failure a release switch exists to prevent.
+#ifndef TIMING_MARKER_ENABLED
 #define TIMING_MARKER_ENABLED 0
+#endif
 
-// USB serial log output is gated by DEBUG_SERIAL_ENABLED, which lives in
+// (Historical note: a DEBUG_SERIAL_ENABLED flag briefly gated ALL serial
+// output.  It was removed — operational logging always prints; only the bench
+// telemetry above is gated, by HARNESS_LOG_ENABLED.  Original text follows.)
+// USB serial log output was gated by DEBUG_SERIAL_ENABLED, which lived in
 // lib/DEBUG/debuglogger.h rather than here.  It has to sit in a header that
 // every user of DEBUG() already includes (log() is inline), and config.h cannot
 // serve that role — it pulls in ArduinoJson/AsyncJson, which several libraries

@@ -108,6 +108,28 @@ void MultiNodeManager::init(Config* config, Led* led, Webserver* webserver) {
     // process() opens it lazily once the stack is actually up.
 }
 
+// ── Sub-step timing inside process() ────────────────────────────────────────
+//
+// main.cpp wraps this entire function in ONE CORE0_TIME("multinode", ...), so a
+// long tick is reported as a single number covering every step below.  That is
+// how the 7271 ms stall on 2026-09-11 came back "NOT ATTRIBUTED": the harness
+// looks for a broadcast log line inside the stall window and
+// _broadcastDirectorState() does not emit one, so the prime suspect was also
+// the one step that leaves no trace.  A sum is not an attribution.
+//
+// DIAGNOSTIC ONLY — no behaviour change.  Only fires above a threshold, so the
+// DEBUG() write (itself a blocking CDC call) stays rare enough that it cannot
+// become the thing it is measuring.
+#define MN_STEP_WARN_MS 250
+#define MN_STEP(NAME, EXPR) do {                                               \
+    const uint32_t _mnT0 = millis();                                           \
+    EXPR;                                                                      \
+    const uint32_t _mnDt = millis() - _mnT0;                                   \
+    if (HARNESS_LOG_ENABLED && _mnDt > MN_STEP_WARN_MS) {                      \
+        DEBUG("[MULTINODE] step %s took %lu ms\n", NAME, (unsigned long)_mnDt); \
+    }                                                                          \
+} while (0)
+
 void MultiNodeManager::process(uint32_t currentTimeMs) {
     if (!_conf) return;
 
@@ -143,7 +165,7 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
                                                     : MULTINODE_RECONNECT_INTERVAL_MS;
             if (_lastRegistrationMs == 0 ||
                 (currentTimeMs - _lastRegistrationMs) > regInterval) {
-                _sendRegistration();
+                MN_STEP("registration", _sendRegistration());
                 _lastRegistrationMs = currentTimeMs;
             }
 
@@ -152,7 +174,7 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
                 bool force = _heartbeatForcePending;
                 if (force) _heartbeatForcePending = false;
                 if (force || (currentTimeMs - _lastHeartbeatMs) > MULTINODE_HEARTBEAT_INTERVAL_MS) {
-                    _sendHeartbeat();
+                    MN_STEP("heartbeat", _sendHeartbeat());
                     _lastHeartbeatMs = currentTimeMs;
                 }
             }
@@ -166,7 +188,7 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         // Drain queued lap (written by Core 1)
         if (_lapPending) {
             _lapPending = false;  // clear before sending to avoid double-send
-            _processQueuedLap();
+            MN_STEP("queuedLap", _processQueuedLap());
         }
 
         // Unacked laps can also exist without _lapPending — a lap detected
@@ -184,12 +206,12 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
 
         // Pull our own laps back from the master, one bounded chunk per tick,
         // and only while holding the fleet-wide grant (§7).
-        _processResyncPull();
+        MN_STEP("resyncPull", _processResyncPull());
 
         // Drain quit notification (set when pilot stops during a master race)
         if (_quitPending) {
             _quitPending = false;
-            _sendQuitNotification();
+            MN_STEP("quitNotify", _sendQuitNotification());
         }
 
     } else if (isMasterMode()) {
@@ -197,13 +219,13 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         // removeNode() on the async_tcp task are erased here, on the one task
         // that walks the vector, so the erase can never invalidate an
         // iterator underneath a reader.
-        _reapRemovedNodes();
+        MN_STEP("reapRemoved", _reapRemovedNodes());
 
-        _checkNodeTimeouts(currentTimeMs);
+        MN_STEP("nodeTimeouts", _checkNodeTimeouts(currentTimeMs));
 
         // §7 — decide who, if anyone, may repair right now.  Detection already
         // happened in handleHeartbeatSync; this only rations the repair.
-        _runResyncGovernor(currentTimeMs);
+        MN_STEP("resyncGovernor", _runResyncGovernor(currentTimeMs));
 
         // Periodic "who's actually connected right now" summary.  Every 10 s
         // log a single line listing slot=name for every online node — replaces
@@ -239,21 +261,21 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         static uint32_t lastDirectorHeartbeatMs = 0;
         if (currentTimeMs - lastDirectorHeartbeatMs > 10000 && _webserver) {
             lastDirectorHeartbeatMs = currentTimeMs;
-            _webserver->pushMultiNodeState();
+            MN_STEP("pushState", _webserver->pushMultiNodeState());
         }
 
         // Deferred broadcasts — queued by the async handler, executed here on Core 0
         if (_racePreArmPending) {
             _racePreArmPending = false;
-            _broadcastRacePreArm();
+            MN_STEP("preArmFanout", _broadcastRacePreArm());
         }
         if (_raceStartPending) {
             _raceStartPending = false;
-            _broadcastRaceStart();
+            MN_STEP("startFanout", _broadcastRaceStart());
         }
         if (_raceStopPending) {
             _raceStopPending = false;
-            _broadcastRaceStop();
+            MN_STEP("stopFanout", _broadcastRaceStop());
         }
         // Throttled director-state broadcast.  When the pending flag is set
         // but it's been less than MIN_DIRECTOR_BROADCAST_INTERVAL_MS since
@@ -280,24 +302,24 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
             (currentTimeMs - _lastDirectorBroadcastMs) >= MIN_DIRECTOR_BROADCAST_INTERVAL_MS) {
             _directorStateBroadcastPending = false;
             _lastDirectorBroadcastMs       = currentTimeMs;
-            _broadcastDirectorState();
+            MN_STEP("directorFanout", _broadcastDirectorState());
         }
         if (_recruitPending) {
             _recruitPending = false;
             bool force = _recruitForce;
-            _runRecruitJob(force);
+            MN_STEP("recruit", _runRecruitJob(force));
         }
         // GO acks arrive on the LwIP task, which must not touch _nodes.  This
         // is where they land in NodeInfo — on the task that owns the vector.
-        _foldStartAcks();
+        MN_STEP("foldStartAcks", _foldStartAcks());
         // Did everyone actually start?  (§8 — the GO datagram has no ack.)
         if (_startVerifyAtMs != 0 &&
             (int32_t)(currentTimeMs - _startVerifyAtMs) >= 0) {
-            _verifyRaceStarts();
+            MN_STEP("verifyStarts", _verifyRaceStarts());
         }
         // Clock sync (§8).  Last in the tick, and at most one probe per tick,
         // so it can never be the thing that delays a race command.
-        _runClockSync(currentTimeMs);
+        MN_STEP("clockSync", _runClockSync(currentTimeMs));
     }
 }
 
@@ -2780,8 +2802,22 @@ void MultiNodeManager::_runRecruitJob(bool force) {
 
 void MultiNodeManager::_broadcastDirectorState() {
     if (!_directorStatePayloadValid || _directorStatePayload.isEmpty()) return;
+
+    // Per-node attribution.  This loop is sequential and each unreachable node
+    // costs the FULL 300 ms connect + 300 ms read below, so seven of them is a
+    // 4.2 s worst case — and until now the whole thing was silent, which is why
+    // the 7271 ms stall of 2026-09-11 could not be pinned on it.  One line per
+    // fanout, only when slow, naming the node that cost the most: on that run
+    // node A was unreachable for 41 timeout cycles and is the expected culprit.
+    const uint32_t fanoutT0 = millis();
+    uint32_t worstNodeMs    = 0;
+    char     worstNodeSlot  = '?';
+    uint8_t  nodesTried     = 0;
+
     for (auto& n : _nodes) {
         if (!n.online || n.staIP.isEmpty()) continue;
+        const uint32_t nodeT0 = millis();
+        nodesTried++;
         HTTPClient http;
         String url = "http://" + n.staIP + "/api/multinode/directorState";
         if (http.begin(url)) {
@@ -2799,8 +2835,22 @@ void MultiNodeManager::_broadcastDirectorState() {
             http.POST(_directorStatePayload);
             http.end();
         }
+        const uint32_t nodeMs = millis() - nodeT0;
+        if (nodeMs > worstNodeMs) {
+            worstNodeMs   = nodeMs;
+            worstNodeSlot = slotLetter(n.nodeId);
+        }
         vTaskDelay(1);
     }
+
+    const uint32_t fanoutMs = millis() - fanoutT0;
+    if (HARNESS_LOG_ENABLED && fanoutMs > MN_STEP_WARN_MS) {
+        DEBUG("[MULTINODE] directorState fanout %lu ms across %u node(s); "
+              "slowest %c at %lu ms\n",
+              (unsigned long)fanoutMs, (unsigned)nodesTried,
+              worstNodeSlot, (unsigned long)worstNodeMs);
+    }
+
     // Empty WITHOUT releasing the buffer — see the note on _directorStatePayload
     // in multinode.h.  `= String()` here used to hand back ~17 KB after every
     // fanout, guaranteeing the next one had to re-find a contiguous block.

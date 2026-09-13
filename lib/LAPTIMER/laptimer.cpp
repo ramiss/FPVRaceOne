@@ -457,6 +457,9 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             _ts.sampleCount > 0) {
             const uint32_t meanUs = (uint32_t)(_ts.sumIntervalUs / _ts.sampleCount);
             const uint32_t hz     = meanUs ? (1000000UL / meanUs) : 0;
+            // Bench line only.  The stats themselves keep accumulating for
+            // Diagnostics -> RSSI Sample Timing, which is unaffected by this.
+            if (HARNESS_LOG_ENABLED)
             DEBUG("[TIMING] %lu Hz | interval min/mean/max = %lu/%lu/%lu us | late(>%ums)=%lu of %lu | median N=%u (~%lu ms)\n",
                   (unsigned long)hz,
                   (unsigned long)_ts.minIntervalUs,

@@ -121,7 +121,7 @@ static inline void timeCall(const char* name, void (*invoke)()) {
         worstCallThisWindow.ms   = _dt;                                     \
         worstCallThisWindow.name = NAME;                                    \
     }                                                                       \
-    if (_dt >= 100) {                                                       \
+    if (HARNESS_LOG_ENABLED && _dt >= 100) {                                \
         DEBUG("[CORE0] %s blocked for %u ms at t=%us%s\n", NAME,            \
               (unsigned)_dt, (unsigned)(_t0 / 1000),                        \
               (_t0 < CORE0_BOOT_SETTLE_MS) ? "  (boot bring-up)" : "");     \
@@ -176,10 +176,14 @@ static void parallelTask(void *pvArgs) {
         // Core 0 is healthy across the whole period.
         if (tickEnd - coreReportLastMs >= 10000) {
             coreReportLastMs = tickEnd;
-            DEBUG("[CORE0] window 10s: longest sub-call %s=%u ms, longest tick gap=%u ms\n",
-                  worstCallThisWindow.name ? worstCallThisWindow.name : "(idle)",
-                  (unsigned)worstCallThisWindow.ms,
-                  (unsigned)worstTickGapThisWindow);
+            // Counters are reset below either way — only the reporting is
+            // gated, so a release build still measures, it just stays quiet.
+            if (HARNESS_LOG_ENABLED) {
+                DEBUG("[CORE0] window 10s: longest sub-call %s=%u ms, longest tick gap=%u ms\n",
+                      worstCallThisWindow.name ? worstCallThisWindow.name : "(idle)",
+                      (unsigned)worstCallThisWindow.ms,
+                      (unsigned)worstTickGapThisWindow);
+            }
             worstCallThisWindow.ms   = 0;
             worstCallThisWindow.name = nullptr;
             worstTickGapThisWindow   = 0;
@@ -195,7 +199,7 @@ static void parallelTask(void *pvArgs) {
             // Under ~2000 bytes on any task, stop shrinking stacks: an overflow
             // here is an immediate crash with no warning and no diagnostic.
             const CpuMonitor::Snapshot& cs = CpuMonitor::getInstance().getLast();
-            if (cs.valid && cs.minStackFreeBytes != 0xFFFF) {
+            if (HARNESS_LOG_ENABLED && cs.valid && cs.minStackFreeBytes != 0xFFFF) {
                 DEBUG("[STACK] tightest: %s=%u B free | loop=%u parallel=%u asyncTcp=%u\n",
                       cs.minStackTask, (unsigned)cs.minStackFreeBytes,
                       (unsigned)cs.stackLoopTask,

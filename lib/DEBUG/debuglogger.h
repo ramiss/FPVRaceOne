@@ -3,30 +3,25 @@
 #include <Arduino.h>
 #include <vector>
 
-// ── USB serial log output ───────────────────────────────────────────────────
+// ── There is deliberately no flag to silence this logger ────────────────────
 //
-// Gates ONLY the Serial.printf in log() below.  The in-memory ring is filled
-// either way, so /api/debuglog and the web Serial Monitor keep the complete
-// record — turning this off costs no diagnostic the UI can reach, it only stops
-// the bytes leaving the USB port.
+// A DEBUG_SERIAL_ENABLED gate briefly lived here.  It was removed: ordinary
+// operational logging — lap detection, RACE ENTER/EXIT, MULTINODE connect and
+// timeout, LAPSYNC, RX5808 tuning, heap WARN/FATAL — prints in every build, on
+// USB and in the web Serial Monitor alike.  That output is how anyone works out
+// what a device actually did, and serial is the only view into a failure that
+// happens BEFORE the webserver starts, where /api/debuglog cannot reach.
 //
-// DEFINED HERE, not in config.h, for two reasons.  log() is an inline function
-// in this header, so every translation unit must see the same value or they
-// compile different bodies for one function — which means the flag has to live
-// in a header everyone including this one already gets.  And config.h cannot be
-// that header: it pulls in ArduinoJson/AsyncJson, which the WEBHOOK, STORAGE
-// and RACEHISTORY libraries do not carry, so including it here fails to build.
+// What a release build does want quiet is the periodic BENCH telemetry that
+// exists to feed the timing harness — [TIMING], [CORE0], [STACK], the [HEAP]
+// watermark, [MULTINODE] step.  Those are gated individually at their emission
+// sites by HARNESS_LOG_ENABLED (lib/CONFIG/config.h), which is the right
+// granularity: it silences the measurement chatter without silencing the device.
 //
-// NOT tied to TIMING_MARKER_ENABLED: that flag means "the rig's marker wire is
-// on GPIO21".  Bench work without the marker wired is normal, and coupling the
-// two would silently kill logging for anyone doing it.
-//
-// DEFAULTS ON because serial is the only view into a failure that happens
-// BEFORE the webserver starts — /api/debuglog cannot report a boot that never
-// reaches it. Set to 0 for a silent shipping build.
-#ifndef DEBUG_SERIAL_ENABLED
-#define DEBUG_SERIAL_ENABLED 1
-#endif
+// The original reason for a blanket gate was that a blocked USB CDC write cost
+// 100 ms and stalled the sampler.  setup() now calls Serial.setTxTimeoutMs(1),
+// which bounds that to ~2 ms and was measured at late(>10ms)=0 afterwards, so
+// the cost of leaving this logger on is no longer a timing argument.
 
 // Ring depth and per-line length.
 //
@@ -106,9 +101,7 @@ public:
         // fills and this call blocks; setup() calls Serial.setTxTimeoutMs(1) to
         // bound that to ~2 ms.  Without that bound it is 100 ms, which is what
         // made this very logger stall the sampler it reports on.
-#if DEBUG_SERIAL_ENABLED
         Serial.printf("[%lu] %s", entry.timestamp, entry.message);
-#endif
     }
 
     // Number of entries currently held (0..DEBUG_BUFFER_SIZE).

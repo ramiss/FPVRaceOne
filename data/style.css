@@ -884,16 +884,136 @@ main {
 @media (max-width: 700px) {
   .race-shell {
     grid-template-columns: minmax(0, 1fr);
+    /* THIS is where the stubborn gap under the summary came from, not any
+     * margin.  .race-shell is `flex: 1 1 auto` inside a full-height <main>, so
+     * on a page with few laps the grid gets spare height to distribute, and a
+     * grid's default align-content stretches its ROWS to absorb it.  The
+     * console keeps `align-self: start` from the base rule, so it stays pinned
+     * to the top of a row that is now taller than it — and the remainder of
+     * that row renders as blank space before .race-right begins.
+     *
+     * Stacked into one column that row is full width, which is why the effect
+     * only shows here.  It also scaled with emptiness: more laps, smaller gap,
+     * which is what made it look like an inconsistent margin.
+     *
+     * align-content: start sizes rows to their content and lets the spare
+     * height fall off the bottom of the page, where nothing needs it. */
+    align-content: start;
   }
   /* Stacked: the console is a block above the content, so sticky would pin it
-   * and eat a third of a phone screen. */
+   * and eat a third of a phone screen.
+   *
+   * Everything below this point exists for the same reason: once the console is
+   * a full-width block rather than a 224px column, the layout decisions that
+   * made sense in that column all waste vertical space — which is the one thing
+   * a phone has least of.  The base rules stay as they are; these override only
+   * where the width constraint has gone away. */
   .race-console {
     position: static;
     border-bottom: 1px solid var(--border-color);
-    padding: 14px 12px;
+    /* Top halved from 14px — the console is the first thing under the tabs
+     * here, and the RACE CLOCK label was sitting a long way below the card's
+     * edge for no reason once the header above it tightened up.
+     *
+     * Bottom trimmed from 14px for a different reason: it stacked with
+     * #lapTable's top margin to put ~26px of dead space between the summary's
+     * last rule and the LAP NO header row. */
+    padding: 7px 12px 8px;
+    /* Centres the clock label, the time itself and the racing pill.  #timer is
+     * an inline <span> and .race-state is inline-flex, so both take the
+     * parent's text-align — no wrapper needed.  .race-meta opts back out. */
+    text-align: center;
   }
+
   .race-right {
     border-left: 0;
+  }
+
+  /* Label to clock, halved from 5px.  Scoped to .race-console rather than
+   * changed on .race-label directly — that class is also used elsewhere in the
+   * right column, where the desktop spacing is still right. */
+  .race-console .race-label {
+    margin-bottom: 3px;
+  }
+
+  /* Clock to buttons.  There was no gap at all: #timer has no margins and
+   * `.race-controls button { margin: 0 }`, so the first button sat directly on
+   * the clock's line box.  3px matches the label-to-clock gap above, which
+   * makes the three lines read as one block with even internal spacing rather
+   * than a label floating above a number jammed against a button row.
+   *
+   * Additive with the base rule's margin-bottom: 16px — only the top is set. */
+  .race-console .race-controls {
+    margin-top: 3px;
+  }
+
+  /* One row instead of a stack.  The base rule stacks these because the desktop
+   * console is 224px wide and "Clear Laps" cannot share that with two siblings;
+   * at full width all three fit side by side and save ~70px of height.
+   *
+   * flex-wrap is the safety valve, not decoration: with Dev Mode on there is a
+   * fourth button (Add Lap), and on a ~360px screen four labels would otherwise
+   * compress until the text clipped.  min-width forces a wrap instead. */
+  .race-controls {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+  .race-controls button {
+    width: auto;
+    flex: 1 1 0;
+    min-width: 92px;
+  }
+
+  /* Two columns.  Each readout is a short label and a short figure, so a single
+   * full-width column left most of the row empty and doubled the block's height
+   * — six rows became three.  The per-row bottom border comes from the base
+   * rule and lines up across both columns because the grid rows share a height. */
+  .race-meta {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 0;      /* the divider below supplies the separation instead */
+    text-align: left;   /* undo .race-console's centring for the readouts */
+  }
+
+  /* Divider between the two columns.
+   *
+   * Drawn as a border-left on every RIGHT-column cell rather than as a single
+   * element: the cells stack, so their left borders meet and read as one
+   * continuous rule down the block, and it automatically ends with the last row
+   * however many readouts a mode happens to render.
+   *
+   * column-gap is 0 and the space is made with symmetric padding on each side
+   * instead — with a gap the border would sit hard against the right column's
+   * text rather than centred between the two. */
+  .race-meta > div:nth-child(odd) {
+    padding-right: 16px;
+  }
+  .race-meta > div:nth-child(even) {
+    padding-left: 16px;
+    border-left: 1px solid var(--rule-color);
+  }
+
+  /* The readouts are TWO .race-meta blocks — Pilot/Progress, then the four
+   * statistics — and in the desktop column a 14px margin plus the second
+   * block's own top rule separated them sensibly.  Side by side in two columns
+   * that same separation reads as a blank row in the middle of the grid.
+   * Dropping both makes the pair render as one continuous three-row block; the
+   * first block's last row border already supplies the line, and the column
+   * divider carries straight through because the nth-child counting restarts
+   * evenly in each block. */
+  .race-summary {
+    margin-top: 0;
+    border-top: 0;
+  }
+
+  /* Specificity, not source order, is doing the work here: the base
+   * `#lapTable { margin-top: 12px }` is declared AFTER this media block, and a
+   * media query adds no specificity — so a plain `#lapTable` rule here would be
+   * silently overridden and the gap would stay. `.race-right #lapTable` outranks
+   * it.  6px + .race-console's 8px bottom padding = the same 14px that
+   * .lap-analysis uses to clear the table below it. */
+  .race-right #lapTable {
+    margin-top: 6px;
   }
 }
 
@@ -2585,27 +2705,35 @@ button.update-btn {
   }
   
   /* Stacked here, so there is no shared baseline to align to — flex-end would
-   * just push the logo to the right-hand edge. */
+   * just push the logo to the right-hand edge.
+   *
+   * 10px, down from 12 + a 20px padding-top on .nav-links below.  That 32px
+   * total was set to stop the tabs crowding the logo once they stack, but it
+   * over-corrected: on a phone it pushed the race clock most of the way down
+   * the first screen.  5px keeps the lockup and the tabs reading as one header
+   * block rather than two stacked elements, which is what the extra space was
+   * making them look like. */
   nav {
     flex-direction: column;
     align-items: flex-start;
-    gap: 12px;
+    gap: 5px;
   }
-  
+
   .nav-links {
     flex-wrap: wrap;
     justify-content: center;
     gap: 8px;
-    /* This was 8px — HALF the base 16px — so the tabs crowded the logo at
-     * exactly the width where they stop sitting beside it and stack under it
-     * instead.  Narrow layouts need more separation there, not less, because
-     * the two are no longer distinguished by being on different axes. */
-    padding-top: 20px;
+    padding-top: 0;
     width: 100%;
   }
-  
+
+  /* Bottom padding back to 0, matching the base rule.  At 8px the active tab's
+   * underline floated a visible distance below its own label — the border is
+   * drawn at the bottom of the LINK BOX, so any bottom padding separates the
+   * two.  Horizontal padding stays for the tap target; the vertical tap area
+   * comes from the 6px top plus the line box. */
   .nav-links a {
-    padding: 8px 12px;
+    padding: 6px 12px 0;
     font-size: 13px;
     flex: 1 1 auto;
     text-align: center;

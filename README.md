@@ -14,8 +14,9 @@ A single node personal lap timing solution for 5.8 GHz FPV drones that can be ne
 
 **Documentation**  
 [Quick Start](QUICKSTART.md) - To get started as a single pilot with the bare minimum information  
-[Getting Started](GETTING_STARTED.md) - For a more comprehensive step by step guide  
-[User Guide](USER_GUIDE.md) - The full manual, but not necessarily a step by step
+[Getting Started](docs/GETTING_STARTED.md) - For a more comprehensive step by step guide  
+[User Guide](docs/USER_GUIDE.md) - The full manual, but not necessarily a step by step  
+[Build From Scratch](docs/BUILD_FROM_SCRATCH.md) - Wiring, assembly and flashing, if you'd rather build your own
 
 ---
 
@@ -156,6 +157,8 @@ Network **up to 8 devices** together using on-board Wifi (no router or extra har
 
 Pre-made and flashed hardware — [- Click here to purchase your FPVRaceOne at our store -](https://fpvwidgets.square.site)
 
+Prefer to build your own? The wiring diagram, bill of materials, SPI conversion and a step-by-step flashing guide are in **[Build From Scratch →](docs/BUILD_FROM_SCRATCH.md)**. KiCad files are in [`PCB/`](PCB/) and printable cases in [`case/`](case/).
+
 **[Detailed hardware setup →](docs/GETTING_STARTED.md)**
 
 ### Connect via WiFi
@@ -192,7 +195,7 @@ Updates are automatically blocked while a race is running.
 **Product:** FPVRaceOne  
 **Platform:** Seeed XIAO ESP32-C6  
 **License:** MIT  
-**Status:** Stable Beta — actively maintained
+**Status:** Stable Release — actively maintained
 
 ### Changelog
 
@@ -202,9 +205,10 @@ See [CHANGELOG.md](CHANGELOG.md) for the version history.
 
 ## Credits
 
-FPVRaceOne is derived from [FPVGate](https://github.com/LouisHitchcock/FPVGate) v1.2.0 by LouisHitchcock, which is itself a heavily modified fork of [PhobosLT](https://github.com/phobos-/PhobosLT) by phobos-. The original project provided the foundation for RSSI-based lap timing on ESP32.
+FPVRaceOne originated from FPVGate v1.2.0 by Louis Hitchcock, which itself originated as a fork and substantial rewrite of PhobosLT by Phobos. FPVRaceOne has since diverged into an independently developed project.
+FPVGate is a fork of [PhobosLT](https://github.com/phobos-/PhobosLT) by phobos-. 
 
-Note that prior or alternate versions of FPVGate will not flash to FPVRaceOne official hardware.
+Thanks goes out to Louis Hitchcock for his understanding, patience and partnership.  Feel free to check out his work over at the FPVGate project.
 
 ---
 

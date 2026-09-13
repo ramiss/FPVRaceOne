@@ -44,11 +44,16 @@ bool SelfTest::runAllTests() {
 
     // Test RX5808
     // Must be explicitly nullptr: an uninitialized pointer is indeterminate, and if it
-    // happened to be non-null testRX5808()'s null-check would pass and then dereference
-    // a wild pointer. testRX5808() handles nullptr gracefully.
+    // happened to be non-null the null-check would pass and then dereference a wild
+    // pointer. testRX5808Noise() handles nullptr gracefully.
+    //
+    // NOTE: this whole function is currently unreachable — the /api/selftest route
+    // that called it is commented out in webserver.cpp, and the live route calls each
+    // test directly with real pointers.  Kept compiling, but it can only ever report
+    // the null-pointer path from here.
     RX5808 *rx = nullptr;
-    TestResult RX5808Test = testRX5808(rx);
-    results.push_back(RX5808Test);  
+    TestResult RX5808Test = testRX5808Noise(rx, nullptr, nullptr);
+    results.push_back(RX5808Test);
     if (!RX5808Test.passed) allPassed = false;
     
     // Test storage
@@ -441,273 +446,191 @@ TestResult SelfTest::testBattery() {
     return result;
 }
 
-TestResult SelfTest::testRX5808(RX5808* rx5808) {
+// ── RSSI noise floor and detection margin ───────────────────────────────────
+//
+// Replaces two tests that each claimed more than their data could support:
+//
+//   "RX5808 RF Receive" swept 13 frequencies and passed when any reading
+//   cleared 8 counts.  Measured floors on real units run 12-56, so that bar sat
+//   BELOW the noise — the test could not fail on working hardware, and it
+//   reported "RF receive" with nothing transmitting.
+//
+//   "RX5808 SPI Programming" looked for RSSI to track the commanded frequency.
+//   Measured on a client 2026-09-12: 5800 MHz read 23 in one sweep and 53 in
+//   the next, 1.4 s apart.  Band-spread and time-drift are indistinguishable in
+//   a single-visit sweep, so "span" proved nothing — it could as easily have
+//   false-CONFIRMED as false-failed.
+//
+// These modules do not drive the SPI data line, so there is no register
+// readback and therefore no honest SPI test.  This one does not pretend to be
+// one.  It measures what actually decides whether the timer works on the day:
+// how close ambient noise sits to the thresholds detection compares against.
+//
+// Stays on the configured frequency — no retuning at all.  That removes the
+// save/restore dance, the "Calibrating pilot frequency" banner handshake, and
+// 2.16 s of blocking inside an AsyncWebServer handler.
+TestResult SelfTest::testRX5808Noise(RX5808* rx5808, Config* config, LapTimer* timer) {
     TestResult result;
-    result.name = "RX5808 RF Receive";
+    result.name = "RSSI Noise Floor";
     uint32_t start = millis();
 
-    if (!rx5808) {
+    if (!rx5808 || !config) {
         result.passed = false;
-        result.details = "RX5808 pointer is null";
+        result.details = "RX5808 or Config pointer is null";
         result.duration_ms = millis() - start;
         return result;
     }
 
-    // Save the frequency the RX was on before we start sweeping so we can
-    // restore it — AND run verifyFrequency() at the end — for the sake of
-    // the UI's "Calibrating pilot frequency" banner.  The banner is toggled
-    // by parsing debug-log lines: "Setting frequency to" shows it, "RX5808
-    // frequency verified properly" hides it.  Without an explicit restore
-    // + verify here, the natural post-selftest cleanup path never emits the
-    // "verified properly" line and the banner sticks on forever.  Root
-    // cause: selftest clears `recentSetFreqFlag = false` after each
-    // setFrequency, which also clobbers the flag set by the concurrent
-    // parallelTask's own setFrequency(config) preemption — so
-    // handleFrequencyChange's verify branch never triggers.
-    const uint16_t initialFreq = rx5808->getCurrentFrequency();
-
-    // We can't truly "verify frequency" (RX5808 has no readback).
-    // Instead, infer operation by scanning a few common channels and looking
-    // for RSSI variation / peaks that suggest real RF energy is being received.
-
-    // Common channels (mix of bands) - chosen to catch typical VTX usage.
-    const uint16_t freqs[] = {
-        5645, 5685, 5705, 5740, 5760, 5780, 5800, 5806, 5820, 5840, 5860, 5880, 5917
-    };
-    const int nFreqs = (int)(sizeof(freqs) / sizeof(freqs[0]));
-
-    // Sampling params
-    const uint16_t tuneDelayMs = RX5808_MIN_TUNETIME;       // allow RX to settle after tune
-    const uint8_t samplesPerFreq = 6;      // average a few reads
-    const uint16_t sampleDelayMs = 6;
-
-    uint8_t minRssi = 255;
-    uint8_t maxRssi = 0;
-    uint16_t minFreq = 0;
-    uint16_t maxFreq = 0;
-
-    // For reporting: keep a couple representative points
-    uint8_t firstAvg = 0;
-    uint8_t midAvg = 0;
-    uint8_t lastAvg = 0;
-
-    for (int i = 0; i < nFreqs; i++) {
-        rx5808->setFrequency(freqs[i]);
-        delay(tuneDelayMs);
-        rx5808->recentSetFreqFlag = false;  // Allow RSSI reads now
-
-        // Two bugs removed here.  The loop used to call readRssi() TWICE per
-        // iteration — printing one reading and summing a different one, so the
-        // average was never of the values shown.  And the Serial.println() was
-        // raw and unconditional (not DEBUG()), putting 78 USB CDC writes inside
-        // the sweep; each blocks for as long as the host takes to drain the
-        // port, which stalls the loop task and shows up as a sampling gap in
-        // the RSSI Sample Timing test.  A diagnostic must not perturb the thing
-        // it is measuring.
-        uint16_t sum = 0;
-        for (uint8_t s = 0; s < samplesPerFreq; s++) {
-            sum += rx5808->readRssi();
-            delay(sampleDelayMs);
-        }
-        uint8_t avg = (uint8_t)(sum / samplesPerFreq);
-
-        if (i == 0) firstAvg = avg;
-        if (i == nFreqs / 2) midAvg = avg;
-        if (i == nFreqs - 1) lastAvg = avg;
-
-        if (avg < minRssi) { minRssi = avg; minFreq = freqs[i]; }
-        if (avg > maxRssi) { maxRssi = avg; maxFreq = freqs[i]; }
-    }
-
-    const uint8_t span = (uint8_t)(maxRssi - minRssi);
-
-    // ── Cleanup helper — MUST run before every return path ────────────────
-    // Restore the pre-test frequency and explicitly verify.  Emits both the
-    // "Setting frequency to X" (banner-show) AND "RX5808 frequency verified
-    // properly" (banner-hide) log lines the frontend polls for.  Ordering:
-    // set → wait → verify → clear the flag so main loop's handleFreqChange
-    // doesn't re-verify redundantly.  If initialFreq was 0 (device booted
-    // straight into selftest — unlikely), skip the restore; main loop will
-    // set it on its next tick.
-    auto restoreRx = [rx5808, initialFreq]() {
-        if (!rx5808 || initialFreq == 0) return;
-        rx5808->setFrequency(initialFreq);
-        delay(RX5808_MIN_TUNETIME + 100);
-        rx5808->verifyFrequency();
-        rx5808->recentSetFreqFlag = false;
-    };
-
-    // Heuristics:
-    // - If maxRssi is non-zero and we see a meaningful span, we're likely receiving RF energy.
-    // - If everything is 0 (min=max=0), we cannot infer anything -> FAIL (but with clear guidance).
-    // Tune these thresholds based on your typical environment.
-    const uint8_t kMinPeak = 8;     // "saw something above dead-flat"
-    const uint8_t kMinSpan = 6;     // "variation indicates signal vs flatline"
-
-    if (maxRssi == 0 && minRssi == 0) {
-        result.passed = false;
-        result.details =
-            "RSSI flatlined at 0 across scan. "
-            "If receiver works elsewhere, this may be ADC scaling/attenuation or no RF present.";
-        restoreRx();
+    // A drone at the gate is precisely what this must not measure — one pass
+    // turns the "noise floor" into the peak of a real crossing.  Not a failure;
+    // the operator just ran it at the wrong moment.
+    if (timer && timer->isRunning()) {
+        result.passed = true;
+        result.details = "Not measured — a race is running. Stop the race and "
+                         "re-run with nothing at the gate.";
         result.duration_ms = millis() - start;
         return result;
     }
 
-    // Pass if we saw either a decent peak or decent variation.
-    const bool inferred = (maxRssi >= kMinPeak) || (span >= kMinSpan);
+    const uint8_t  enterRssi = config->getEnterRssi();
+    const uint8_t  exitRssi  = config->getExitRssi();
+    const uint16_t freq      = rx5808->getCurrentFrequency();
 
-    if (!inferred) {
-        result.passed = false;
-        result.details =
-            "RX5808 RSSI is very low/flat during scan (min=" + String(minRssi) + " @ " + String(minFreq) +
-            " MHz, max=" + String(maxRssi) + " @ " + String(maxFreq) +
-            " MHz, span=" + String(span) + "). "
-            "Try powering a VTX near the gate and re-run selftest.";
-        restoreRx();
+    // Sample the same value stream lap detection sees: readRssi() is the
+    // detector's own accessor, so DMA peak-hold and the mode-dependent scaling
+    // are applied identically.  Reading the raw ADC here would report a floor
+    // the detector never actually compares against.
+    //
+    // ONE SECOND, not the 400 ms this started at.  The live calibration trace
+    // shows a mostly-flat floor punctuated by intermittent spikes seconds
+    // apart, and `peak` is the number the verdict turns on.  A short window can
+    // land entirely between spikes, report peak == mean, and print a margin
+    // that is better than reality — precise, wrong, and wrong in the direction
+    // that looks safe, which is the worst way for a pre-race check to fail.
+    //
+    // Still 1.16 s faster than the two band sweeps this replaced, and the cost
+    // is paid in an AsyncWebServer handler, so do not grow it further without
+    // weighing it against the TCP-slot headroom.  If a longer observation is
+    // ever needed, track the floor continuously on loop() and read a closed
+    // window here — the pattern TIMING_STATS and CpuMonitor already use.
+    const uint16_t kSamples       = 1000;
+    const uint8_t  kSampleDelayMs = 1;
+
+    uint16_t peak      = 0;
+    uint16_t floorRssi = 255;
+    uint32_t sum       = 0;
+    for (uint16_t i = 0; i < kSamples; i++) {
+        const uint8_t v = rx5808->readRssi();
+        if (v > peak)      peak      = v;
+        if (v < floorRssi) floorRssi = v;
+        sum += v;
+        delay(kSampleDelayMs);
+    }
+    const uint8_t mean = (uint8_t)(sum / kSamples);
+
+    const String reading = "floor " + String(floorRssi) + ", mean " + String(mean) +
+                           ", peak " + String(peak) + " at " + String(freq) + " MHz";
+
+    // readRssi() returns 0 while recentSetFreqFlag is set.  An all-zero run
+    // means we sampled a tuning window, not the floor, and would then compute a
+    // huge and entirely fictional margin.
+    if (peak == 0) {
+        result.passed = true;
+        result.details = "Not measured — RSSI read zero throughout (" + reading +
+                         "). The receiver was mid-tune; re-run in a moment.";
         result.duration_ms = millis() - start;
         return result;
     }
 
-    result.passed = true;
-    result.details =
-        "RF receive (min=" + String(minRssi) + " @ " + String(minFreq) +
-        " MHz, max=" + String(maxRssi) + " @ " + String(maxFreq) +
-        " MHz, span=" + String(span) +
-        ", samples=" + String(firstAvg) + "/" + String(midAvg) + "/" + String(lastAvg) + ").";
-    restoreRx();
+    if (enterRssi <= exitRssi) {
+        result.passed = false;
+        result.details = "Thresholds inverted — Enter " + String(enterRssi) +
+                         " is not above Exit " + String(exitRssi) +
+                         ". Lap detection cannot work. Re-run calibration.";
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    // ── Each threshold judged against the statistic whose failure it causes ──
+    //
+    // The first version of this compared PEAK against Exit and demanded room for
+    // another excursion the size of the one just measured.  Measured on real
+    // hardware 2026-09-12 (floor 37, mean 38, peak 55, Enter 80, Exit 66) it
+    // warned on a perfectly healthy unit, and the reasoning was wrong twice
+    // over: excursions do not stack — the next spike starts from the mean, not
+    // from the previous peak — and a transient was being judged against a
+    // threshold whose failure mode is a SUSTAINED level.
+    //
+    //   Exit  fails on a sustained floor.  A lap completes when RSSI falls back
+    //         through Exit; the detector samples at ~1 kHz and needs one sample
+    //         at or below it.  A brief spike merely delays that by milliseconds,
+    //         and lap TIME is anchored to the peak, so even then the recorded
+    //         time does not move.  What actually hangs a lap is ambient sitting
+    //         above Exit — so compare the MEAN.
+    //
+    //   Enter is NOT judged here at all, and that is deliberate.  This test
+    //         samples rx->readRssi(), which is the RAW value; detection runs it
+    //         through the median filter first (laptimer.cpp: `rawRssi` ->
+    //         medianFilter), and kEnterHoldMin then requires 2 consecutive
+    //         at-or-above-enter FILTERED samples.  An isolated ambient spike is
+    //         rejected twice over before detection can see it — the enter
+    //         debounce exists precisely so "a 4-sample noise burst that lifts
+    //         the median to enter can't start a false crossing".
+    //
+    //         An earlier version warned when the raw peak came near Enter.  On a
+    //         bench with ordinary RF noise that fired on a healthy unit and told
+    //         the operator to recalibrate, which would not have reduced the
+    //         noise — it would only have moved a threshold that was never the
+    //         problem.  Peak is now reported as context and nothing else.  Noise
+    //         sustained enough to survive both filters would raise the MEAN,
+    //         which is the check below.
+    if (mean >= exitRssi) {
+        result.passed = false;
+        result.details = "Ambient noise sits at " + String(mean) +
+                         ", at or above the Exit threshold (" + String(exitRssi) +
+                         ") — a lap can start but never complete (" + reading +
+                         "). Recalibrate, or move the gate away from the interference.";
+        result.duration_ms = millis() - start;
+        return result;
+    }
+
+    // Guaranteed positive by the check above.
+    const uint8_t exitMargin = (uint8_t)(exitRssi - mean);
+
+    // How much headroom is "enough" scales with the calibration rather than
+    // being a constant: the Enter-Exit hysteresis band IS the amplitude this
+    // operator decided separates "in the gate" from "out of it", so an ambient
+    // floor within one band of Exit is inside the range the system treats as
+    // meaningful.  The absolute floor covers a very tight hysteresis, where one
+    // band would set a trivially low bar.
+    //
+    // Advisory, never a failure — only the definite fault above fails.
+    const uint8_t kAbsoluteMargin = 10;
+    const uint8_t hysteresis      = (uint8_t)(enterRssi - exitRssi);
+    const uint8_t wantMargin      = (hysteresis > kAbsoluteMargin) ? hysteresis
+                                                                   : kAbsoluteMargin;
+
+    result.passed  = true;
+    result.details = reading +
+        ". Floor to Exit (" + String(exitRssi) + "): " + String(exitMargin) +
+        ". Peak is pre-filter; isolated spikes are rejected by the median filter.";
+    if (exitMargin < wantMargin) {
+        // No "recalibrate" here.  A floor this close to Exit is usually
+        // interference rather than a mis-set threshold, and the two want
+        // opposite responses — so state the measurement and the consequence and
+        // let the operator decide which it is.
+        result.details += "  FLOOR CLOSE TO EXIT — ambient sits only " +
+                          String(exitMargin) + " counts below it. If it rises further, "
+                          "laps will start and never complete.";
+    }
     result.duration_ms = millis() - start;
     return result;
 }
 
 
-TestResult SelfTest::testRX5808SpiMode(RX5808* rx5808) {
-    TestResult result;
-    result.name = "RX5808 SPI Programming";
-    uint32_t start = millis();
 
-    if (!rx5808) {
-        result.passed = false;
-        result.details = "RX5808 pointer is null";
-        result.duration_ms = millis() - start;
-        return result;
-    }
 
-    // Save the RX's initial frequency so we can restore it at the end.
-    // Same rationale + banner-hide handshake as testRX5808 — see that
-    // function's comments for the full explanation.
-    const uint16_t initialFreq = rx5808->getCurrentFrequency();
 
-    auto restoreRx = [rx5808, initialFreq]() {
-        if (!rx5808 || initialFreq == 0) return;
-        rx5808->setFrequency(initialFreq);
-        delay(RX5808_MIN_TUNETIME + 100);
-        rx5808->verifyFrequency();
-        rx5808->recentSetFreqFlag = false;
-    };
-
-    // ── Retune-response sweep (NO register readback) ──────────────────────
-    //
-    // This test used to write a frequency and read register 0x01 back, passing
-    // only if the readback matched.  That can never pass on this hardware: the
-    // RX5808 / RTC6715 modules used here do not drive the DATA line, so
-    // verifyFrequency() clocks in the MCU's own INPUT_PULLUP and returns
-    // 0xFFFF (65535) every time.  testRX5808() states the same limitation
-    // outright — "We can't truly verify frequency (RX5808 has no readback)" —
-    // so the two tests in this file disagreed about whether readback exists.
-    // The old failure text blamed MODE-pin strapping, sending people to chase a
-    // PCB fault that was not there.
-    //
-    // What actually separates a working SPI path from a module stuck in manual
-    // mode is whether the receiver RESPONDS to what we command.  Sweep the band
-    // and watch RSSI:
-    //
-    //   moves with the commanded frequency -> programming works.
-    //   high and identical at every step   -> receiving something it cannot be
-    //                                         tuned away from, i.e. ignoring
-    //                                         register writes.  This is the
-    //                                         real manual-mode signature.
-    //   low and flat                       -> no RF in range.  A working tuner
-    //                                         and a stuck one look identical
-    //                                         here, so report UNCONFIRMED
-    //                                         rather than invent a verdict.
-    //
-    // Note this asks a different question from testRX5808(), which only asks
-    // "is any RF being received" — a manual-mode module passes that trivially
-    // by sitting on its hardwired channel.
-    const uint16_t freqs[] = { 5645, 5705, 5760, 5800, 5860, 5917 };
-    const int nFreqs = (int)(sizeof(freqs) / sizeof(freqs[0]));
-
-    const uint8_t  samplesPerFreq = 6;
-    const uint16_t sampleDelayMs  = 6;
-
-    uint8_t  minRssi = 255, maxRssi = 0;
-    uint16_t minFreq = 0,   maxFreq = 0;
-
-    for (int i = 0; i < nFreqs; i++) {
-        rx5808->setFrequency(freqs[i]);
-        delay(RX5808_MIN_TUNETIME);
-        // readRssi() returns 0 while this flag is set, so it has to be cleared
-        // before sampling or every reading would be zero.
-        rx5808->recentSetFreqFlag = false;
-
-        uint16_t sum = 0;
-        for (uint8_t s = 0; s < samplesPerFreq; s++) {
-            sum += rx5808->readRssi();
-            delay(sampleDelayMs);
-        }
-        const uint8_t avg = (uint8_t)(sum / samplesPerFreq);
-
-        if (avg < minRssi) { minRssi = avg; minFreq = freqs[i]; }
-        if (avg > maxRssi) { maxRssi = avg; maxFreq = freqs[i]; }
-    }
-
-    const uint8_t span = (uint8_t)(maxRssi - minRssi);
-
-    // kSpanConfirm matches testRX5808()'s kMinSpan so both tests agree on what
-    // counts as "RSSI actually moved".  kStuckHigh is deliberately well above
-    // that test's kMinPeak of 8: a fault is only asserted when the receiver is
-    // pinned to a STRONG signal at every commanded frequency, which no working
-    // tuner does.  Anything weaker is treated as "nothing to test against".
-    const uint8_t kSpanConfirm = 6;
-    const uint8_t kStuckHigh   = 60;
-
-    const String sweep = "min=" + String(minRssi) + " @ " + String(minFreq) +
-                         " MHz, max=" + String(maxRssi) + " @ " + String(maxFreq) +
-                         " MHz, span=" + String(span);
-
-    if (span >= kSpanConfirm) {
-        result.passed = true;
-        result.details =
-            "SPI programming confirmed — RSSI tracked the commanded frequency "
-            "across " + String(nFreqs) + " points (" + sweep + ").";
-    } else if (minRssi >= kStuckHigh) {
-        result.passed = false;
-        result.details =
-            "RSSI stayed at " + String(minRssi) + "-" + String(maxRssi) +
-            " at every commanded frequency (" + sweep + "). The receiver is "
-            "locked to a signal it cannot be tuned away from, so the module is "
-            "ignoring register writes — check the MODE pin strapping on the PCB "
-            "and the CH1/CH2/CH3 (DATA/SELECT/CLK) wiring. In manual mode the "
-            "chip picks its channel from hardwired CH0-CH2/BS pins and this "
-            "timer reads a fixed RSSI regardless of the configured channel.";
-    } else {
-        // Not a fault — we simply had nothing to test against.  Reported as a
-        // pass so a bench with no VTX powered does not raise a false alarm, but
-        // the wording makes the limitation explicit rather than implying the
-        // SPI path was verified.
-        result.passed = true;
-        result.details =
-            "UNCONFIRMED — no RF in range to test against (" + sweep + "). "
-            "A working tuner and a stuck one both read a flat noise floor when "
-            "nothing is transmitting, so this cannot be proven either way. "
-            "Power a VTX near the gate and re-run to confirm.";
-    }
-
-    restoreRx();
-    result.duration_ms = millis() - start;
-    return result;
-}
 
 
 TestResult SelfTest::testLapTimer(LapTimer* timer) {

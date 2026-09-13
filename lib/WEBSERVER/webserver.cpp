@@ -912,6 +912,10 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
         // SSE backlog from any other leak — if sseQ stays at 0-1 while heap
         // bleeds, the cause is elsewhere.
         size_t   sseQ     = events.avgPacketsWaiting();
+        // Periodic watermark — bench telemetry, gated.  The WARN / FATAL / OK
+        // messages below are NOT: they report a device heading for a self-reboot
+        // and must reach the log in every build.
+        if (HARNESS_LOG_ENABLED)
         DEBUG("[HEAP] free=%u min=%u maxBlk=%u sta=%u sse=%u sseQ=%u\n",
               (unsigned)freeHeap, (unsigned)minHeap, (unsigned)maxBlk,
               (unsigned)sta, (unsigned)sseCnt, (unsigned)sseQ);
@@ -2765,14 +2769,11 @@ EEPROM:\n";
         TestResult cpuTest = selftest->testCpuLoad();
 
         // ── Active tests, which block this handler ────────────────────────
-        // Run RX5808 test (RF receive smoke test)
-        TestResult rxTest = selftest->testRX5808(rx);
-
-        // Run RX5808 SPI-mode test — confirms the module accepts SPI
-        // register writes rather than being in the legacy manual-channel
-        // mode.  Run this AFTER testRX5808 so its own frequency restore
-        // finishes before we start our own set-and-verify sweep.
-        TestResult rxSpiTest = selftest->testRX5808SpiMode(rx);
+        // Ambient noise floor at the configured frequency, against the
+        // Enter/Exit thresholds.  Replaces the two band sweeps that used to sit
+        // here: together they blocked this handler for 2.16 s and neither could
+        // support the conclusion it printed (see testRX5808Noise's comment).
+        TestResult rxTest = selftest->testRX5808Noise(rx, conf, timer);
 
         // Run Lap Timer test
         TestResult timerTest = selftest->testLapTimer(timer);
@@ -2837,7 +2838,6 @@ EEPROM:\n";
         };
         
         addTest(rxTest, true);
-        addTest(rxSpiTest);
         addTest(timerTest);
         addTest(jitterTest);
         addTest(cpuTest);

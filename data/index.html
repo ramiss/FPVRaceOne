@@ -471,11 +471,15 @@
           Calibration updated. Tweak as necessary to your peaks and click one of the buttons below to continue
         </div>
         <button id="saveRssiBtn" onclick="saveRSSIThresholds()">Save RSSI Thresholds</button>
+        <!-- No margin-left here.  It was a leftover from when these two sat
+             side by side and needed horizontal separation; the container is a
+             stretch column now, so the 10px did not space anything — it just
+             indented this button and made it 10px narrower than its sibling.
+             Vertical spacing comes from the shared `button { margin: 6px 0 }`. -->
         <button
           id="pauseCalibBtn"
           class="btn"
           type="button"
-          style="margin-left:10px;"
         >
           Pause Scanner
         </button>
@@ -1373,22 +1377,23 @@
                 Sets the running-median window used for lap detection: <strong>5 (default)</strong> maps to a 7-sample window. Lower values preserve more of a fast pass's peak at the cost of letting more noise through; higher values smooth more but add lag.
               </div>
 
-              <h3>RSSI Acquisition</h3>
-              <div class="config-item">
-                <label for="adcModeSelect">Sampling mode:</label>
-                <select id="adcModeSelect" onchange="stagedConfig['adcMode']=parseInt(this.value,10); stagedDirty=true; updateSaveButton()">
-                  <option value="1">DMA continuous (default)</option>
-                  <option value="0">Polled (legacy)</option>
-                </select>
-              </div>
-              <div style="font-size: 12px; color: var(--secondary-color); margin-left: 170px; margin-top: -8px; margin-bottom: 16px;">
-                <strong>DMA continuous</strong> (default): the ADC samples at 20&nbsp;kHz on its own into a hardware buffer, and each read returns the highest value seen since the previous one — so a fast gate pass can't slip between samples even if the loop is briefly busy.
-                <strong>Polled</strong>: one ADC read per main-loop pass. Kept for comparison.
-                <br><br>
-                Measured on a signal generator, 30 passes 1.5&nbsp;s apart: DMA reported <strong>every lap exactly</strong> (0.00&nbsp;ms variation) and detected passes as short as <strong>4&nbsp;ms</strong>; polled varied by ±3&nbsp;ms and needed <strong>9&nbsp;ms</strong>. DMA adds ~3&nbsp;ms of detection delay, which does not affect lap times — the same delay applies to both ends of a lap and cancels out.
-                <br><br>
-                <strong>Requires a reboot to take effect.</strong> Your enter/exit thresholds <em>do</em> carry over — both modes report RSSI on the same 0–255 scale — but re-running the Calibration wizard after switching is still worth doing if detection looks marginal.
-              </div>
+              <!-- RSSI Acquisition (sampling mode) removed from the UI 2026-09-12.
+                   DMA continuous is the only supported mode: measured against the
+                   emulator it reported every lap exactly where polled varied by
+                   +/-3 ms, and it detects 6 ms passes where polled needed 9 ms.
+                   There is no configuration in which polled is the better choice,
+                   so offering it only invited a unit being quietly downgraded.
+
+                   The `adcMode` config field is DELIBERATELY KEPT.  Two reasons:
+                   removing it would need a CONFIG_VERSION migration for no gain,
+                   and the timing harness still needs to be able to select polled
+                   to reproduce the A/B - it can POST adcMode=0 to /config.
+
+                   Anyone whose saved config still says polled is migrated on
+                   their next save without doing anything: buildStagedConfig()
+                   reads `adcModeSelect?.value || '1'`, and with the selector gone
+                   that is always '1'.  Diagnostics -> RSSI Sample Timing prints
+                   the mode actually running, so a stranded unit is visible. -->
 
               <!-- Disabled until tested
               <h3>Gate-1 Bootstrap</h3>
@@ -1586,7 +1591,7 @@
                 <label for="devModeToggle">Dev Mode (Simulate Laps):</label>
                 <div style="flex: 1;">
                   <label class="switch">
-                    <input type="checkbox" id="devModeToggle" onchange="mnDevMode=this.checked; document.getElementById('devModeLabel').textContent=this.checked?'On':'Off'; mnRenderRaceTab(mnCurrentNodes); const _pnd=document.getElementById('pilotNameDisplay'); if(_pnd) _pnd.style.cursor=this.checked?'pointer':'default'; applyAddLapButtonUI(); stageConfig('devMode', this.checked?1:0); stagedDirty=true; updateSaveButton();">
+                    <input type="checkbox" id="devModeToggle" onchange="mnDevMode=this.checked; document.getElementById('devModeLabel').textContent=this.checked?'On':'Off'; mnRenderRaceTab(mnCurrentNodes); const _pnd=document.getElementById('pilotNameDisplay'); if(_pnd) _pnd.style.cursor=this.checked?'pointer':'default'; applyAddLapButtonUI(); applySystemMonitorUI(); stageConfig('devMode', this.checked?1:0); stagedDirty=true; updateSaveButton();">
                     <span class="slider"></span>
                   </label>
                   <span style="margin-left: 10px; font-size: 13px; color: var(--secondary-color);" id="devModeLabel">Off</span>
@@ -1617,9 +1622,18 @@
                 <p style="margin: 0; font-size: 14px; color: var(--primary-color);">Running tests...</p>
               </div>
 
+              <!-- Dev Mode only.  The log stream is engineering output — slot
+                   letters, lap-sync state, RSSI internals — and a pilot has no
+                   use for it, so it is hidden the way Add Lap is.  The log RING
+                   itself is NOT optional and keeps filling regardless: the
+                   calibration banner parses this same stream to know when a
+                   retune has finished, so removing the mechanism would stop
+                   "Calibrating pilot frequency" ever clearing.
+                   Revealed by applySystemMonitorUI() in script.js. -->
+              <div id="systemMonitorSection" hidden>
               <h3>System Monitor</h3>
               <div style="margin-bottom: 8px; padding: 12px; background-color: var(--bg-secondary); border-radius: 8px; font-size: 14px;">
-                <p style="margin: 0;">Monitor real-time system events including WiFi status, race events, RSSI changes, and webhooks.</p>
+                <p style="margin: 0;">Live firmware log — WiFi, race events, RSSI and multi-node activity. Shown because Dev Mode is on.</p>
               </div>
               <div style="margin-bottom: 12px; display: flex; gap: 8px; align-items: center;">
                 <button id="serialMonitorToggle" onclick="toggleSerialMonitor()" style="padding: 8px 16px; background-color: var(--accent-color); color: var(--highlight-text);">Start Monitor</button>
@@ -1632,6 +1646,7 @@
               <div id="serialMonitor" style="height: 300px; overflow-y: auto; background-color: #1a1a1a; color: #00ff00; padding: 12px; border-radius: 4px; font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.4; border: 1px solid var(--border-color);">
                 <div style="color: #888;">System monitor stopped. Click "Start Monitor" to begin.</div>
               </div>
+              </div><!-- /systemMonitorSection -->
             </div>
           </div>
           <div class="settings-footer">

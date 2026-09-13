@@ -1,10 +1,14 @@
 #include "nodemode.h"
 
-// Firmware version strings (for RotorHazard identification)
-const char *firmwareVersionString = "FIRMWARE_VERSION: FPVGate_RH_1.0.0";
+// Firmware version strings (for RotorHazard identification).
+// NOTE: handleReadCommand() copies these into a 32-byte response buffer and
+// stops at 31 characters, so each string INCLUDING its prefix must fit in 31.
+// "FIRMWARE_VERSION: " is 18, leaving 13 for the value -- keep it short or the
+// version silently loses its tail on the wire.
+const char *firmwareVersionString = "FIRMWARE_VERSION: FPVRaceOne1.0";
 const char *firmwareBuildDateString = "FIRMWARE_BUILDDATE: " __DATE__;
 const char *firmwareBuildTimeString = "FIRMWARE_BUILDTIME: " __TIME__;
-const char *firmwareProcTypeString = "FIRMWARE_PROCTYPE: ESP32-S3";
+const char *firmwareProcTypeString = "FIRMWARE_PROCTYPE: ESP32-C6";
 
 NodeMode::NodeMode() {
     // Constructor
