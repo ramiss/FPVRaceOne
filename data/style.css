@@ -1402,6 +1402,61 @@ table tr.fastest-lap td {
   font-size: 0.95em;
 }
 
+/* Calibration wizard — armed state, before Start Recording is pressed.  Quiet
+ * on purpose: it sits where the live red recording indicator will appear, and
+ * the two must never be mistakable for one another at a glance. */
+.wizard-armed-hint {
+  color: var(--secondary-color);
+  font-size: 14px;
+}
+
+/* The Start/Stop button while recording is live.  Takes the danger colour so
+ * "this is running, press to stop" is readable without reading the label. */
+.wizard-record-active {
+  background-color: var(--danger-color) !important;
+  color: #fff !important;
+}
+
+/* Calibration wizard — the Results screen's save confirmation.  Reads as a
+ * status line, not as another note box, so it is distinguishable at a glance
+ * from the advisory text directly above it. */
+.wizard-saved-note {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border-left: 3px solid var(--accent-color);
+  background-color: var(--table-even-bg);
+  color: var(--text-color);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Failure is the one case where the pilot must act, so it takes the danger
+ * colour on both the rule and the text. */
+.wizard-saved-note-failed {
+  border-left-color: var(--danger-color);
+  color: var(--danger-color);
+  font-weight: 600;
+}
+
+/* Lap 0 — the first gate crossing.  One cell spanning Lap Time / Gap / Total
+ * Time (see _renderFirstCrossingCell), labelled rather than dashed out.
+ *
+ * It is still nth-child(2), so it inherits that column's mono / bold / 1.15em
+ * lap-time treatment and its 190px width.  This rule has to undo all of that,
+ * and it has the SAME specificity as the rules it is overriding — (0,1,1) plus
+ * the id either way — so it only wins by sitting after them.  Do not move it
+ * above #lapTable td:nth-child(2). */
+#lapTable td.lap-first-crossing {
+  width: auto;
+  font-family: inherit;
+  font-weight: 600;
+  font-size: 0.85em;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--secondary-color);
+  text-align: left;
+}
+
 #lapTable tr:nth-child(even) {
   background-color: var(--table-even-bg);
 }

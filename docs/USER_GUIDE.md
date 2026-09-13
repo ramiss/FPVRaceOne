@@ -131,24 +131,53 @@ Band and channel changes are **auto-saved** immediately on selection.
 
 ### Signal Processing
 
-A single RSSI processing pipeline based verbatim on the upstream FPVGate algorithm.
+#### How RSSI is sampled
 
-Applies a chain of filters in sequence:
+The ADC runs in **continuous DMA mode at 20 kHz**, sampling the RX5808's RSSI
+line into a hardware ring buffer with no CPU involvement. An interrupt reduces
+each completed 32-conversion frame to its **maximum** — about 625 times per
+second — and each read returns and clears that running peak.
 
-1. **Kalman filter** — Tracks signal dynamics while rejecting ADC noise
-2. **Median-of-3** — Removes isolated spike samples
-3. **Moving average (7 samples)** — Smooths the signal
-4. **EMA** — User-tunable low-pass via the **Pipeline Smoothing** slider (default level 5 = α 0.15 = upstream behaviour; lower = less lag, higher = more smoothing)
-5. **Step limiter (±12/sample)** — Prevents single-sample teleport jumps
+The point of this is that **a peak can never be missed because software was
+busy**. A timer that calls `analogRead()` once per main-loop iteration samples at
+roughly 200–500 Hz, and a fast gate pass can slip between two of those samples.
+With peak-hold DMA, every read carries the highest value the hardware saw since
+the last read, whatever the software was doing in between.
+
+#### How RSSI is filtered
+
+**One stage: a running median.** Window size is odd and comes from the
+**Pipeline Smoothing** slider:
+
+| Slider | Window | Suited to |
+|--------|--------|-----------|
+| 0–1 | N = 3 | Near-raw, maximum peak fidelity |
+| 2–3 | N = 5 | High-speed racing (100+ mph), clean RF |
+| 4–5 | N = 7 | **Default** — race speeds, mixed RF |
+| 6 | N = 9 | |
+| 7 | N = 11 | Slower race pace / noisier RF |
+| 8–9 | N = 13 | |
+| 10 | N = 15 | Cruise / freestyle / very noisy environment |
+
+A median throws out isolated spike samples while keeping the true peak height of
+a fast pass intact — which is exactly what an averaging filter cannot do. At the
+default N = 7 the window spans roughly 14–35 ms, well inside the 50–100 ms peak
+of a racing pass.
+
+> **Changed from earlier firmware.** This replaced a five-stage cascade
+> (Kalman → median-of-3 → 7-sample moving average → EMA → step limiter). The
+> accumulated lag smeared fast peaks badly enough that real gate crossings
+> sometimes never reached the Enter threshold. The Kalman, moving-average, EMA
+> and step-limiter stages no longer exist in the detection path.
 
 **Detection parameters (built in, not exposed):**
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| Enter hold samples | 4 | Consecutive samples at/above Enter RSSI before peak tracking starts |
-| Exit confirm samples | 2 | Consecutive raw samples below Exit RSSI to confirm exit |
-| Peak min above exit | 5 | Peak must exceed Exit by at least this many counts to count as a lap |
-| Ceiling-drift watchdog | 3 s | If "in gate" longer than this without exit, state is force-reset |
+| Enter hold samples | 2 | Consecutive samples at/above Enter RSSI before a crossing starts. Backs up the median so a short noise burst can't open one |
+| Exit | 1 sample | The crossing ends as soon as the filtered value falls below Exit — no confirm count |
+| Peak margin above exit | none | If the filtered signal reached Enter, the pass is valid by definition; no extra margin is required |
+| Ceiling-drift watchdog | 3 s | If "in gate" longer than this without exit, state is force-reset so a baseline drift up to Enter can't lock detection |
 
 **Gate-1 Bootstrap (toggle):** When on, the first lap of a race is special-cased so a drone already inside the gate at race start still produces a clean first lap (relaxed enter, lower 2-sample debounce, 3-count peak margin). When off, Gate 1 behaves like any other gate.
 
@@ -246,7 +275,7 @@ The Home WiFi fields used by the firmware updater (Settings → Firmware Update)
 
 | Section | Options |
 |---------|---------|
-| **Appearance** | Theme — Material Oceanic (default) and Material Lighter |
+| **Appearance** | Theme — 14 to choose from, including light variants. Default is **FPVRaceOne**; **FPVRaceOne Day** is its light counterpart |
 | **Device** | Reboot button (required for antenna and TX power changes to take effect) |
 | **Race Tab** | "Always hide download reminder banner" — permanently dismiss the *races are lost on flash* banner once you've started downloading races regularly |
 | **Developer** | **Dev Mode (Simulate Laps)** — when on, tap a pilot's name on the Race tab to inject a random simulated lap. Useful for testing multi-node UI without real quads |
@@ -273,12 +302,16 @@ Enter must always be higher than Exit. The lap timestamp is recorded at the peak
 
 ### Using the Calibration Wizard
 
-1. Go to the **Calibration** tab and click **"Start Calibration Wizard"**
-2. Click **Record**, fly **3 gate passes** at race speed, click **Stop**
+1. Go to the **Calibration** tab and click **"Start Calibration Wizard"**. The wizard opens with instructions showing and **nothing recording yet** — take your position at the gate first
+2. Click **Start Recording** (it turns red and becomes **Stop Recording**), fly **3 gate passes** at race speed, then click **Stop Recording**. Recording also stops by itself at 100 seconds
 3. The wizard auto-detects the three highest peaks and overlays markers — drag any marker if a peak was misidentified
-4. Click **Calculate** — the wizard shows the recommended **Enter** and **Exit** thresholds
-5. If the three peaks differ in height by >15 %, the wizard recommends a re-fly. Equal-height peaks calibrate better; re-flying takes 30 seconds and is almost always worth it
-6. Tap **Apply Thresholds** — values are saved immediately
+4. If the three peaks differ in height by >15 %, the wizard recommends a re-fly. Equal-height peaks calibrate better; re-flying takes 30 seconds and is almost always worth it
+5. Click **Calculate Thresholds** — the wizard shows the recommended **Enter** and **Exit** values and **saves them to the timer immediately**. Close with **Done**
+
+You don't need to confirm the result to keep it. To change it afterwards, use the
+Enter/Exit sliders on the Calibration tab and press **Save RSSI Thresholds**. If
+the automatic save fails, the results screen says so in red and offers an
+**Apply Thresholds** button to retry.
 
 **How the thresholds are picked:**
 
@@ -385,11 +418,13 @@ Statistics and charts update immediately. Changes are saved into the same in-mem
 
 ### Pipeline Smoothing
 
-The single Pipeline Smoothing slider in **Settings → Signal Processing** tunes the EMA stage of the detection pipeline:
+The single Pipeline Smoothing slider in **Settings → Signal Processing** sets the
+**window size of the running median** (see [Signal Processing](#signal-processing)
+for the full mapping):
 
-- **Level 5 (default)**
-- **Lower** = less smoothing, faster response, more noise passes through
-- **Higher** = more smoothing, slower response, more noise rejection
+- **Level 5 (default)** = N = 7, roughly a 14–35 ms window
+- **Lower** = smaller window, faster response and better peak fidelity, more noise passes through
+- **Higher** = larger window, more noise rejection, more lag
 
 Most pilots never need to touch this. Adjust it only if calibration consistently misses laps (lower it) or constantly fires twice (raise it).
 

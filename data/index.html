@@ -706,23 +706,32 @@
     <!-- Calibration Wizard Modal -->
     <div id="calibrationWizardModal" class="modal" style="display: none;">
       <div class="modal-content wizard-modal">
+        <!-- One panel, two states, driven by _setWizardRecordingUI():
+             ARMED     - instructions + "Start Recording". Nothing is sampling.
+             RECORDING - live indicator + sample count + "Stop Recording".
+             The device is only asked for a buffer when Start Recording is
+             pressed, so reading the instructions no longer eats the ~100 s
+             recording window. -->
         <div id="wizardRecording" style="display: none;">
-          <h3>Calibration Wizard - Recording<span class="wizardPilotSuffix"></span></h3>
+          <h3>Calibration Wizard<span class="wizardPilotSuffix"></span></h3>
           <div class="wizard-instructions">
             <p><strong>Instructions:</strong></p>
             <ol>
-              <li>Fly to the next gate and back through this gate <strong>3 times at full racing speed</strong> — keep the session under <strong>100 seconds (1:40)</strong></li>
-              <li>The wizard measures your narrowest peak so the smoothing filter doesn't crush fast passes</li>
-              <li>Click "Stop Recording" when finished — <strong>recording stops automatically at 100 seconds</strong></li>
-              <li>Note: It is highly recommended that VTX power be set to the same fixed number for calibration and racing.</li>
+              <li>Click "Start Recording"</li>
+              <li>Fly back and forth through the gate (to the next nearest gate and back) <strong>3 times</strong> — keep the session under <strong>100 seconds (1m:40s)</strong></li>
+              <li>Click "Stop Recording" when finished — <strong>recording stops automatically at 100 seconds (data is saved)</strong></li>
+              <li>Note: It is highly recommended that VTX power be set to the same fixed number (not Auto) for calibration and racing.</li>
             </ol>
           </div>
           <div class="wizard-status">
-            <div class="recording-indicator">
+            <!-- Armed state only. -->
+            <div id="wizardArmedHint" class="wizard-armed-hint">Ready when you are — press Start Recording.</div>
+            <!-- Recording state only; shown by _setWizardRecordingUI(true). -->
+            <div id="wizardRecordingIndicator" class="recording-indicator" style="display: none;">
               <span class="recording-dot"></span>
               <span>Recording RSSI Data...</span>
             </div>
-            <div id="wizardSampleCount" style="margin-top: 8px; font-size: 14px;">Samples: 0</div>
+            <div id="wizardSampleCount" style="display: none; margin-top: 8px; font-size: 14px;">Samples: 0</div>
             <!-- Only shown when the firmware granted less than the full 100 s of
                  recording because the heap was tight.  Hidden otherwise: the
                  limit is not something the user needs to think about normally. -->
@@ -730,7 +739,7 @@
                  style="display: none; margin-top: 8px; font-size: 13px; opacity: 0.8;"></div>
           </div>
           <div style="display: flex; gap: 12px; margin-top: 24px;">
-            <button onclick="stopCalibrationWizard()" style="flex: 1;">Stop Recording</button>
+            <button id="wizardRecordButton" onclick="toggleCalibrationRecording()" style="flex: 1;">Start Recording</button>
             <button onclick="cancelCalibrationWizard()" style="flex: 1; background-color: var(--btn-secondary-bg);">Cancel</button>
           </div>
         </div>
@@ -797,11 +806,16 @@
             </div>
           </div>
           <div style="margin: 16px 0; padding: 12px; background-color: var(--bg-secondary); border-radius: 4px; font-size: 14px;">
-            <strong>Note:</strong> Thresholds are calculated from your lap data with conservative safety margins. The signal you saw on the chart is exactly what lap detection uses — adjust manually after applying if needed.
+            <strong>Note:</strong> Thresholds are calculated from your lap data with conservative safety margins. The signal you saw on the chart is exactly what lap detection uses — adjust manually afterwards if needed.
           </div>
+          <!-- Filled in by _setWizardResultsSaved() once the automatic save in
+               calculateThresholds() has run.  Hidden until then so the screen
+               never claims a result it does not have yet. -->
+          <div id="wizardResultsSavedNote" class="wizard-saved-note" style="display: none;"></div>
           <div style="display: flex; gap: 12px; margin-top: 16px;">
-            <button onclick="applyCalculatedThresholds()" style="flex: 1;">Apply Thresholds</button>
-            <button onclick="closeCalibrationWizard()" style="flex: 1; background-color: var(--btn-secondary-bg);">Close</button>
+            <!-- Retry path only: hidden once the automatic save succeeds. -->
+            <button id="wizardApplyButton" onclick="applyCalculatedThresholds()" style="flex: 1;">Apply Thresholds</button>
+            <button id="wizardResultsCloseButton" onclick="closeCalibrationWizard()" style="flex: 1; background-color: var(--btn-secondary-bg);">Close</button>
           </div>
         </div>
       </div>

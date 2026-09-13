@@ -39,7 +39,16 @@ let _localRaceStartTs = 0;
 let wizardRecordingTimerId = null;
 let wizardAbortController = null;
 
-const CALIBRATION_PAGE_SIZE = 500;  // number of RSSI points per page when fetching calibration data
+// Number of RSSI points per page when fetching calibration data.
+//
+// Briefly lowered to 200 on the theory that the firmware's ~14 KB per-page
+// String was exhausting the heap.  It was not: the failure surfaced as fetch's
+// "Failed to fetch", a connection-level rejection, where a truncated body would
+// have been a JSON SyntaxError.  The pressure is on the connection, not the
+// heap, so keep the page count DOWN — 500 means 10 requests for a full
+// recording instead of 25.  Pacing and retries live in
+// _fetchCalibrationPageRetrying(); the firmware clamps limit to 1000.
+const CALIBRATION_PAGE_SIZE = 500;
 
 // --- Calibration overview mode (draw full wizard dataset on the live scanner canvas) ---
 let calibOverviewMode = false;     // true when we're showing the full recorded dataset on the live chart canvas
@@ -2583,6 +2592,16 @@ function saveRSSIThresholds() {
   _markRssiSaved(enterRssi, exitRssi);
 }
 
+// THE saveConfig.  There is exactly one.
+//
+// An earlier full-snapshot implementation, plus a debounced autoSaveConfig()
+// that called it on every control change, used to sit commented out a few
+// dozen lines below this.  It was removed 2026-09-13: a complete, plausible
+// second `async function saveConfig()` in the file is a trap — it matches a
+// grep, reads as live to anyone skimming, and cost a debugging session in
+// exactly that way.  Git has it.  The reason it was abandoned is worth keeping
+// though, and it is the reason for the staging model below: it wrote to flash
+// on EVERY change.
 async function saveConfig() {
   // Commit staged config to device (single write).  If there's nothing to
   // persist AND nothing in the deferred-apply queue, exit early.  Either
@@ -2682,69 +2701,6 @@ function attachConfigStagingListeners() {
   // inside their updateX() functions, so they are covered.
 }
 
-
-/* Don't use this one because it saves to flash immediately on every change.
-// Debounced auto-save to prevent excessive API calls
-let saveTimeout = null;
-function autoSaveConfig() {
-  clearTimeout(saveTimeout);
-  saveTimeout = setTimeout(() => {
-    saveConfig();
-  }, 1000); // Wait 1 second after last change before saving
-}
-
-
-async function saveConfig() {
-  // Get pilot settings
-  const colorInput = document.getElementById('pilotColor');
-  const themeSelect = document.getElementById('themeSelect');
-  const voiceSelect = document.getElementById('voiceSelect');
-  const lapFormatSelect = document.getElementById('lapFormatSelect');
-  
-  // Convert hex color to integer
-  let pilotColorInt = 0x0080FF; // default
-  if (colorInput && colorInput.value) {
-    pilotColorInt = parseInt(colorInput.value.replace('#', ''), 16);
-  }
-  
-  // Save all settings to device
-  const rssiSensitivitySelect = document.getElementById('rssiSensitivity');
-  const configData = {
-    freq: frequency,
-    minLap: parseInt(minLapInput.value * 10),
-    alarm: parseInt(alarmThreshold.value * 10),
-    anType: announcerSelect.selectedIndex,
-    anRate: parseInt(announcerRate * 10),
-    enterRssi: enterRssi,
-    exitRssi: exitRssi,
-    maxLaps: maxLaps,
-    rssiSens: rssiSensitivitySelect ? parseInt(rssiSensitivitySelect.value) : 1,
-    name: pilotNameInput.value,
-    pilotColor: pilotColorInt,
-    theme: themeSelect ? themeSelect.value : DEFAULT_THEME,
-    selectedVoice: voiceSelect ? voiceSelect.value : 'default',
-    lapFormat: lapFormatSelect ? lapFormatSelect.value : 'full',
-    ssid: ssidInput ? ssidInput.value : '',
-    pwd: pwdInput ? pwdInput.value : '',
-  };
-  
-  if (usbConnected && transportManager) {
-    const response = await transportManager.sendCommand('config', 'POST', configData);
-    console.log("/config:", response);
-  } else {
-    fetch("/config", {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(configData),
-    })
-      .then((response) => response.json())
-      .then((response) => console.log("/config:" + JSON.stringify(response)));
-  }
-}
-*/
 
 function updateChannelOptionsForBand(bandIndex = bandSelect.selectedIndex) {
   if (!bandSelect || !channelSelect) return;
@@ -3402,6 +3358,23 @@ function playBeepTone(duration, frequency, type) {
   }, duration);
 }
 
+// Lap 0 row: one cell spanning Lap Time / Gap / Total Time.
+//
+// Lap 0 is the first gate crossing — where the race clock starts, not a lap
+// that was flown — so none of those three columns has a value to show.  One
+// label reads as "this is the start", where three dashes read as data that
+// failed to arrive.
+//
+// Shared by both lap-row renderers (addLap and _restoreInProgressLaps) and so
+// by all three modes, which all draw into the same #lapTable.  Nothing indexes
+// row.cells, so the short row is safe.
+function _renderFirstCrossingCell(row) {
+  const cell = row.insertCell(1);
+  cell.colSpan = 3;
+  cell.className = 'lap-first-crossing';
+  cell.textContent = 'First Crossing';
+}
+
 // Silently restore in-progress laps after page reload — no TTS, no state side-effects
 function _restoreInProgressLaps(laps) {
   lapNo = -1;
@@ -3427,16 +3400,22 @@ function _restoreInProgressLaps(laps) {
       // Wrapped so CSS can draw the skewed lap badge — a <td> itself cannot be
       // transformed reliably.  See .lap-badge.
       const c1 = row.insertCell(0); c1.innerHTML = `<span class="lap-badge"><b>${lapNo}</b></span>`;
-      const c2 = row.insertCell(1);
-      c2.innerHTML = lapNo === 0 ? '-' : formatMsDisplay(l.lapTimeMs);
-      const gapMs = idx > 0 ? Math.round((newLap - lapTimes[idx - 1]) * 1000) : null;
-      const c3 = row.insertCell(2);
-      c3.innerHTML = (lapNo === 0 || gapMs === null) ? '-' : formatMsGap(gapMs);
-      const c4 = row.insertCell(3);
-      // Cumulative time is only meaningful from lap 0.  If the list was
-      // truncated it starts mid-race, so the running total would be wrong —
-      // show a dash rather than a confidently incorrect number.
-      c4.innerHTML = (lapNo === 0 || lapNo !== idx) ? '-' : formatMsDisplay(cumMs);
+      if (lapNo === 0) {
+        // The first gate crossing carries no lap time, gap or total — see the
+        // matching branch in addLap().
+        _renderFirstCrossingCell(row);
+      } else {
+        const c2 = row.insertCell(1);
+        c2.innerHTML = formatMsDisplay(l.lapTimeMs);
+        const gapMs = idx > 0 ? Math.round((newLap - lapTimes[idx - 1]) * 1000) : null;
+        const c3 = row.insertCell(2);
+        c3.innerHTML = gapMs === null ? '-' : formatMsGap(gapMs);
+        const c4 = row.insertCell(3);
+        // Cumulative time is only meaningful from lap 0.  If the list was
+        // truncated it starts mid-race, so the running total would be wrong —
+        // show a dash rather than a confidently incorrect number.
+        c4.innerHTML = (lapNo !== idx) ? '-' : formatMsDisplay(cumMs);
+      }
     }
   });
   if (table) { highlightFastestLap(); updateLapCounter(); }
@@ -3469,18 +3448,20 @@ function addLap(lapStr) {
   row.setAttribute('data-lap-index', lapTimes.length - 1);
   
   const cell1 = row.insertCell(0);  // Lap No
-  const cell2 = row.insertCell(1);  // Lap Time
-  const cell3 = row.insertCell(2);  // Gap
-  const cell4 = row.insertCell(3);  // Total Time
-  
   // See _restoreInProgressLaps(): the badge needs its own element.
   cell1.innerHTML = `<span class="lap-badge"><b>${lapNo}</b></span>`;
 
   if (lapNo == 0) {
-    cell2.innerHTML = "-";
-    cell3.innerHTML = "-";
-    cell4.innerHTML = "-";
+    // Lap 0 is the first gate crossing — the moment the clock starts, not a
+    // timed lap.  Lap Time, Gap and Total Time have no value yet, and three
+    // dashes read as missing data rather than as "nothing to show here".
+    // Merge the three into one labelled cell.  Kept in step with the same
+    // branch in _restoreInProgressLaps().
+    _renderFirstCrossingCell(row);
   } else {
+    const cell2 = row.insertCell(1);  // Lap Time
+    const cell3 = row.insertCell(2);  // Gap
+    const cell4 = row.insertCell(3);  // Total Time
     cell2.innerHTML = formatMsDisplay(Math.round(newLap * 1000));
     cell3.innerHTML = gapMs !== null ? formatMsGap(gapMs) : "-";
     cell4.innerHTML = formatMsDisplay(totalMs);
@@ -6169,6 +6150,17 @@ function _wizardPath(suffix, extraQuery) {
   return url;
 }
 
+// Open the wizard ARMED — instructions on screen, nothing recording yet.
+//
+// Recording used to begin the instant this ran, which meant the pilot spent the
+// buffer reading the instructions: the window is ~100 s total, and the clock was
+// already going before they had walked back to the gate.  The device only starts
+// sampling when they press Start Recording (beginCalibrationRecording).
+//
+// Every caller of this function means "open the wizard" — the Calibration tab
+// button, the start-over path at the duration cap, the re-fly after a peak
+// spread warning, and the master's client handoff — so they all get the armed
+// state without changing a single call site.
 function startCalibrationWizard() {
   // Stop any previous run cleanly
   if (wizardRecordingTimerId) {
@@ -6201,8 +6193,58 @@ function startCalibrationWizard() {
   document.getElementById('wizardResults').style.display = 'none';
   const capNote = document.getElementById('wizardCapacityNote');
   if (capNote) { capNote.textContent = ''; capNote.style.display = 'none'; }
+  // Clear the previous run's save confirmation.  Without this a second wizard
+  // would open showing a stale "Saved to the timer" and a hidden Apply button
+  // before the new recording has produced anything at all.
+  const savedNote = document.getElementById('wizardResultsSavedNote');
+  if (savedNote) { savedNote.textContent = ''; savedNote.style.display = 'none'; }
+  const applyBtn = document.getElementById('wizardApplyButton');
+  if (applyBtn) applyBtn.style.display = '';
+  const resultsCloseBtn = document.getElementById('wizardResultsCloseButton');
+  if (resultsCloseBtn) resultsCloseBtn.textContent = 'Close';
 
-  // Start recording
+  _setWizardRecordingUI(false);
+}
+
+// Flip the recording panel between its two states.  One button does both jobs,
+// so its label and handler are the state — there is no way for the screen to
+// claim it is recording while the device is not, or the reverse.
+function _setWizardRecordingUI(recording) {
+  const indicator = document.getElementById('wizardRecordingIndicator');
+  const counter   = document.getElementById('wizardSampleCount');
+  const btn       = document.getElementById('wizardRecordButton');
+  const hint      = document.getElementById('wizardArmedHint');
+
+  if (indicator) indicator.style.display = recording ? '' : 'none';
+  if (counter) {
+    counter.style.display = recording ? '' : 'none';
+    if (!recording) counter.textContent = 'Samples: 0';
+  }
+  if (hint) hint.style.display = recording ? 'none' : '';
+  if (btn) {
+    btn.textContent = recording ? 'Stop Recording' : 'Start Recording';
+    btn.classList.toggle('wizard-record-active', !!recording);
+  }
+}
+
+// The single Start/Stop Recording button.  Dispatches on the state the wizard
+// is actually in rather than on which label is showing.
+function toggleCalibrationRecording() {
+  if (wizardState.recording) {
+    stopCalibrationWizard();
+  } else {
+    beginCalibrationRecording();
+  }
+}
+
+// Ask the device for a recording buffer and start sampling.  Everything from
+// here down is what used to run automatically when the modal opened.
+function beginCalibrationRecording() {
+  if (wizardState.recording) return;   // double-click guard
+
+  const btn = document.getElementById('wizardRecordButton');
+  if (btn) btn.disabled = true;        // no second POST while this one is open
+
   fetch(_wizardPath('start'), { method: 'POST', signal: wizardAbortController.signal })
     .then(async (response) => {
       if (!response.ok) {
@@ -6255,13 +6297,21 @@ function startCalibrationWizard() {
       }
 
       wizardState.recording = true;
+      // Only now does the screen claim to be recording — after the device has
+      // confirmed it granted a buffer.
+      if (btn) btn.disabled = false;
+      _setWizardRecordingUI(true);
       wizardRecordingLoop();
     })
     .catch(error => {
+      if (btn) btn.disabled = false;
       if (error?.name === 'AbortError') return;
       console.error('Error starting calibration wizard:', error);
       alert(error?.userMessage || 'Error starting calibration wizard');
-      closeCalibrationWizard();
+      // Stay on the armed screen rather than closing.  A failed start is often
+      // transient (the 503 is "reboot and try again"), and dumping the user out
+      // of the wizard makes them re-open it to find out.
+      _setWizardRecordingUI(false);
     });
 }
 
@@ -6284,6 +6334,49 @@ async function fetchCalibrationPage(offset, limit, signal) {
   return await resp.json(); // { total, offset, limit, count, data:[...] }
 }
 
+// Pause that respects the wizard's AbortController, so cancelling during a
+// download doesn't have to wait out the backoff.
+function _wizardSleep(ms, signal) {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      return reject(new DOMException('Aborted', 'AbortError'));
+    }
+    const id = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    function onAbort() {
+      clearTimeout(id);
+      reject(new DOMException('Aborted', 'AbortError'));
+    }
+    signal?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+// One page, with retries.
+//
+// The device refuses connections when these requests go out back-to-back: the
+// recording loop polls the very same endpoint every 200 ms for minutes without
+// a single failure, while an unpaced download fails with "Failed to fetch"
+// partway through.  Spacing is the variable, so pace the requests and retry the
+// ones that still lose the race.  The offset is carried into the final error
+// because how FAR the download got is the first thing worth knowing.
+async function _fetchCalibrationPageRetrying(offset, limit, signal, attempts = 4) {
+  let lastErr = null;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fetchCalibrationPage(offset, limit, signal);
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      lastErr = e;
+      console.warn(`[calibration] page at offset ${offset} attempt ${attempt}/${attempts} failed:`, e);
+      if (attempt < attempts) await _wizardSleep(150 * attempt, signal);   // 150 / 300 / 450 ms
+    }
+  }
+  throw new Error(
+    `page at offset ${offset} failed after ${attempts} attempts — ${lastErr?.message || lastErr}`);
+}
+
 async function fetchAllCalibrationData(signal) {
   const meta = await fetchCalibrationMeta(signal);
   const total = meta.total || 0;
@@ -6292,10 +6385,16 @@ async function fetchAllCalibrationData(signal) {
   let offset = 0;
 
   while (offset < total) {
-    const page = await fetchCalibrationPage(offset, CALIBRATION_PAGE_SIZE, signal);
+    const page = await _fetchCalibrationPageRetrying(offset, CALIBRATION_PAGE_SIZE, signal);
     if (Array.isArray(page.data) && page.data.length) {
       all.push(...page.data);
       offset += page.data.length;
+      // Breathing room between pages.  200 ms is not a tuned number — it is
+      // exactly the cadence wizardRecordingLoop() sustains against this same
+      // endpoint for the whole recording, hundreds of consecutive connections,
+      // without ever failing.  Ten pages therefore cost ~2 s of deliberate
+      // waiting, which is invisible behind the spinner.
+      if (offset < total) await _wizardSleep(200, signal);
     } else {
       break;
     }
@@ -6362,8 +6461,12 @@ async function wizardHandleMaxDurationReached() {
     // captured data — no special-case handling required downstream.
     await stopCalibrationWizard();
   } else {
-    // Reset back to the recording screen.  startCalibrationWizard's POST to
-    // /calibration/start resets the firmware's sample count to 0.
+    // Back to the armed screen.  The firmware's sample count is not reset here
+    // any more — startCalibrationWizard() no longer posts /calibration/start.
+    // It is reset when the pilot presses Start Recording, since
+    // LapTimer::startCalibrationWizard() frees and reallocates the buffers.
+    // In between, the device keeps sampling into a buffer that is already full
+    // and silently drops the overflow, which costs nothing.
     startCalibrationWizard();
   }
 }
@@ -6406,44 +6509,96 @@ async function stopCalibrationWizard() {
   document.getElementById('wizardRecording').style.display = 'none';
   showWizardProcessing('Processing recording…', 'Downloading samples from the device and detecting peaks.');
 
-  try {
-    const resp = await fetch(_wizardPath('stop'), { method: 'POST', signal: wizardAbortController?.signal });
+  // How many samples the device said it had.  Reported in the failure alert
+  // below, because it is the one fact that separates "the device gave us
+  // nothing" from "we had the data and the rendering broke" — a distinction the
+  // old generic message hid, and the reason the stop-order bug went five weeks
+  // without being understood.
+  let downloaded = 0;
 
-    if (!resp.ok) {
-      const t = await resp.text().catch(() => '');
-      throw new Error(`POST /calibration/stop failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
+  try {
+    // ORDER MATTERS — download the recording BEFORE stopping the device.
+    //
+    // POST /calibration/stop frees the firmware's recording buffers and zeroes
+    // the sample count (LapTimer::stopCalibrationWizard -> _freeCalibrationBuffers).
+    // Downloading afterwards always read back total=0, so EVERY run of the
+    // wizard died on the "Not enough data recorded" check below no matter what
+    // was flown.  Broken 2026-08-09 by 4652937, which moved the buffers from
+    // static arrays to on-demand calloc/free; the stop-then-download order was
+    // correct for the eight months before that.  Do not move the stop back up.
+    //
+    // The device keeps sampling for the second or two this download takes.
+    // Harmless: fetchAllCalibrationData pins `total` before requesting the
+    // first page and the buffer is append-only, so anything recorded during the
+    // download simply isn't read.
+    try {
+      const { total, data } = await fetchAllCalibrationData(wizardAbortController?.signal);
+      downloaded = total;
+      wizardState.data = data;
+      console.log('Calibration data received:', total, 'reported,', data.length, 'rows');
+    } catch (e) {
+      if (e?.name === 'AbortError') throw e;
+      throw new Error(`Downloading the recording failed — ${e?.message || e}`);
     }
 
-    // Consume body safely (may be empty in some builds)
-    await resp.text().catch(() => '');
-
-    // Fetch recorded data (paged)
-    const { total, data } = await fetchAllCalibrationData();
-    console.log('Calibration data received:', total, 'samples');
-    wizardState.data = data;
+    // Recording is in hand — now release the device.  Best-effort on purpose:
+    // a failed stop must not throw away data we already hold, and the next
+    // /calibration/start frees and reallocates regardless.
+    try {
+      const resp = await fetch(_wizardPath('stop'), { method: 'POST', signal: wizardAbortController?.signal });
+      if (!resp.ok) {
+        console.warn(`POST /calibration/stop returned HTTP ${resp.status} ${resp.statusText}`);
+      }
+      await resp.text().catch(() => '');   // consume body (may be empty in some builds)
+    } catch (e) {
+      if (e?.name !== 'AbortError') {
+        console.warn('calibration/stop failed after download (data already held):', e);
+      }
+    }
 
     if (!Array.isArray(wizardState.data) || wizardState.data.length < 10) {
       hideWizardProcessing();
-      alert('Not enough data recorded. Please try again with at least 3 clear gate passes.');
+      // Quote the count.  This message used to be indistinguishable from the
+      // stop-order bug that returned an empty recording no matter what was
+      // flown; "0 sample(s)" says plainly that the device sent nothing, which
+      // is never something the pilot can fix by flying more passes.
+      alert(`Not enough data recorded — the device returned ${wizardState.data?.length ?? 0} sample(s).\n\n`
+          + `Please try again with at least 3 clear gate passes.`);
       closeCalibrationWizard();
       return;
     }
 
-    enterCalibrationOverviewModeFromWizard();
+    try {
+      enterCalibrationOverviewModeFromWizard();
+    } catch (e) {
+      throw new Error(`Drawing the recording overview failed — ${e?.message || e}`);
+    }
 
     hideWizardProcessing();
     document.getElementById('wizardMarking').style.display = 'block';
 
-    drawWizardChart();
-    // After auto-peak-detect runs inside drawWizardChart, evaluate whether the
-    // three detected peaks are reasonably consistent.  Surface a warning if
-    // not — the wizard keys Enter to the weakest peak, so a single off-line
-    // pass would loosen the calibration unnecessarily.
-    evaluatePeakSpreadAndWarn();
+    try {
+      drawWizardChart();
+      // After auto-peak-detect runs inside drawWizardChart, evaluate whether the
+      // three detected peaks are reasonably consistent.  Surface a warning if
+      // not — the wizard keys Enter to the weakest peak, so a single off-line
+      // pass would loosen the calibration unnecessarily.
+      evaluatePeakSpreadAndWarn();
+    } catch (e) {
+      throw new Error(`Peak detection failed — ${e?.message || e}`);
+    }
   } catch (error) {
+    // The download now honours wizardAbortController, so a user who closes the
+    // wizard mid-download lands here.  That is a deliberate cancel, not a
+    // failure — closeCalibrationWizard() has already torn the UI down.
+    if (error?.name === 'AbortError') return;
     console.error('Error stopping calibration wizard:', error);
     hideWizardProcessing();
-    alert('Error processing calibration data');
+    // Say WHICH stage failed and how much data we actually got.  A bare "Error
+    // processing calibration data" costs the user a whole re-fly to learn
+    // nothing, and is indistinguishable from a dozen different causes.
+    alert(`Error processing calibration data.\n\n${error?.message || error}\n\n`
+        + `The device reported ${downloaded} sample(s).`);
     closeCalibrationWizard();
   }
 }
@@ -6499,19 +6654,33 @@ function detectTopPeaks(values, desiredCount = 3) {
   // Sort tallest first so greedy selection picks the strongest passes
   candidates.sort((a, b) => b.value - a.value);
 
-  // Minimum separation: 20% of recording length.  Gate passes for a 3-lap
-  // calibration run are roughly evenly spaced, so this keeps us from picking
-  // three nearby spikes within one pass.
-  const minSep = Math.max(80, Math.floor(n * 0.20));
+  // Minimum separation between two accepted peaks, in SAMPLES.
+  //
+  // This is a physical quantity — how close together two gate crossings can
+  // plausibly be — so it is derived from time, not from the length of the
+  // recording.  It used to be `max(80, n * 0.20)`, which made detection depend
+  // on how long the pilot left the timer running: three passes flown in the
+  // first 15 s of a 100 s recording sit ~4 % of `n` apart, so a 20 % rule threw
+  // away every peak after the tallest and the wizard silently fell back to
+  // manual marking.  Stopping the recording promptly after the same three
+  // passes shrank `n` and made the identical flight work, which is exactly the
+  // symptom that surfaced this.
+  //
+  // 2 s is comfortably below any real lap while being far wider than one pass
+  // (~0.5 s of above-threshold signal), and the r=20 local-max radius already
+  // prevents two candidates landing inside a single peak.
+  const MIN_PASS_SEPARATION_MS = 2000;
+  const minSep = Math.round(MIN_PASS_SEPARATION_MS / WIZARD_SAMPLE_INTERVAL_MS);
   const chosen = [];
   for (const c of candidates) {
     if (chosen.length >= desiredCount) break;
     if (!chosen.some(p => Math.abs(p.index - c.index) < minSep)) chosen.push(c);
   }
 
-  // Relax once if we didn't find enough
+  // Relax once if we didn't find enough — a very tight indoor course can put
+  // crossings closer together than the nominal minimum.
   if (chosen.length < desiredCount) {
-    const relaxedSep = Math.max(40, Math.floor(n * 0.12));
+    const relaxedSep = Math.round(minSep / 2);
     for (const c of candidates) {
       if (chosen.length >= desiredCount) break;
       if (!chosen.some(p => Math.abs(p.index - c.index) < relaxedSep)) chosen.push(c);
@@ -6839,9 +7008,22 @@ async function calculateThresholds() {
   document.getElementById('wizardResults').style.display = 'block';
   document.getElementById('calculatedEnterRssi').textContent = calculatedEnter;
   document.getElementById('calculatedExitRssi').textContent = calculatedExit;
+
+  // Save straight away rather than waiting for an Apply click.  The pilot flew
+  // three passes to get here; a calibration should not be lost because the
+  // obvious-looking "Close" was pressed on a screen that appeared to be just a
+  // summary.  Fine-tuning still happens afterwards on the Calibration tab.
+  _setWizardResultsSaved(await _persistCalculatedThresholds());
 }
 
-async function applyCalculatedThresholds() {
+// Persist the wizard's calculated thresholds.  Returns true on success.
+//
+// Split out of applyCalculatedThresholds() so the Results screen can save the
+// moment it appears.  Reaching that screen means the pilot flew the laps and
+// asked for the numbers; making them click a second button to keep the result
+// only creates a way to lose a calibration that cost three passes to obtain.
+// Deliberately does NOT close the wizard — that is the caller's decision.
+async function _persistCalculatedThresholds() {
   const enter = wizardState.calculatedEnter;
   const exit  = wizardState.calculatedExit;
 
@@ -6866,7 +7048,7 @@ async function applyCalculatedThresholds() {
       if (!r.ok) {
         const target = (nodeId === 0) ? 'master' : 'client';
         alert(`Could not push calibration to ${target} — is the node still connected?`);
-        return;
+        return false;
       }
       // Update the cached node entry so a reopen of the Edit Pilot modal
       // shows the new values without waiting for the next director-state
@@ -6904,10 +7086,9 @@ async function applyCalculatedThresholds() {
       if (calibOverviewMode) exitCalibrationOverviewModeByUserAction();
     } catch (e) {
       alert('Could not push calibration: ' + (e && e.message ? e.message : e));
-      return;
+      return false;
     }
-    closeCalibrationWizard();
-    return;
+    return true;
   }
 
   // Single mode (mnNodeMode === 0): original local behaviour.  The wizard
@@ -6917,9 +7098,55 @@ async function applyCalculatedThresholds() {
   // Save RSSI button.
   if (enterRssiInput) { enterRssiInput.value = enter; updateEnterRssi(enterRssiInput, enter); }
   if (exitRssiInput)  { exitRssiInput.value  = exit;  updateExitRssi(exitRssiInput,  exit);  }
-  saveConfig();
+
+  // Persist ONLY the two values the wizard computed.
+  //
+  // This used to call saveConfig(), which commits the ENTIRE staged delta —
+  // every unsaved Configuration-tab edit the user happens to have in flight.
+  // That was fine while the save sat behind a deliberate "Apply" click, but it
+  // now fires automatically when the Results screen appears, and quietly
+  // committing someone's unrelated pending edits is not something they asked
+  // for.  saveConfig() also early-returns unless stagedDirty is set, which ties
+  // the wizard's save to staging state it does not own.
+  //
+  // saveConfigPatchImmediate sends just these two keys, advances baselineConfig
+  // and drops the matching staged entries, so the Save button doesn't light up
+  // for a change we just persisted.
+  await saveConfigPatchImmediate({ enterRssi: enter, exitRssi: exit });
   _markRssiSaved(enter, exit);
-  closeCalibrationWizard();
+  // Optimistic, matching every other Save path here: saveConfigPatchImmediate
+  // logs a failed POST rather than throwing, so there is nothing to report.
+  return true;
+}
+
+// Results screen "Apply Thresholds" button.  With the automatic save in
+// calculateThresholds() this is now the RETRY path — it stays on screen only
+// when that save failed.  Saving again is harmless either way.
+async function applyCalculatedThresholds() {
+  if (await _persistCalculatedThresholds()) {
+    closeCalibrationWizard();
+  }
+}
+
+// Reflect the outcome of the automatic save on the Results screen: confirm it,
+// or leave the manual Apply button in place so a failure can be retried.
+function _setWizardResultsSaved(saved) {
+  const note  = document.getElementById('wizardResultsSavedNote');
+  const apply = document.getElementById('wizardApplyButton');
+  const close = document.getElementById('wizardResultsCloseButton');
+
+  if (note) {
+    note.textContent = saved
+      ? 'Saved to the timer. Adjust the sliders on the Calibration tab and press Save RSSI Thresholds if you want to fine-tune.'
+      : 'NOT saved — the timer did not accept the new thresholds. Press Apply Thresholds to try again.';
+    note.className = saved ? 'wizard-saved-note' : 'wizard-saved-note wizard-saved-note-failed';
+    note.style.display = 'block';
+  }
+  // Hiding Apply on success keeps the screen honest: there is nothing left to
+  // apply, and a button that re-does what already happened invites the reading
+  // that closing without it would discard the calibration.
+  if (apply) apply.style.display = saved ? 'none' : '';
+  if (close) close.textContent = saved ? 'Done' : 'Close';
 }
 
 // Evaluates the three auto-detected peaks for amplitude consistency and

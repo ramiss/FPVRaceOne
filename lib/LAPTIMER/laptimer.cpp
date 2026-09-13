@@ -973,6 +973,16 @@ uint16_t LapTimer::startCalibrationWizard() {
     return calibrationCapacity;
 }
 
+// WARNING TO CALLERS: this DISCARDS the recording.  It is not "pause" — the
+// buffers are freed and calibrationRssiCount goes to 0, so /calibration/data
+// returns total=0 from here on.  Anything that wants the samples must GET
+// /calibration/data BEFORE posting /calibration/stop.
+//
+// This caught us once already: the wizard downloaded after stopping, which was
+// correct while the buffers were static members, and silently returned an empty
+// recording for five weeks after 4652937 made them on-demand.  The UI reported
+// it as "Not enough data recorded", indistinguishable from real user error.
+// The ordering now lives in stopCalibrationWizard() in data/script.js.
 void LapTimer::stopCalibrationWizard() {
     DEBUG("Calibration wizard stopped, recorded %u samples\n", calibrationRssiCount);
     // Leave state first, so the sampling path in loop() cannot enter the

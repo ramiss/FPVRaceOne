@@ -1,10 +1,11 @@
-![Poster](screenshots/FPVRaceOne_Poster.png)
+![Poster](images/product_files/FPVRaceOne_Poster.png)
 
 # FPVRaceOne
 
 **Personal FPV Lap Timer**
 
-[- Click here to purchase your FPVRaceOne at our store -](https://fpvwidgets.square.site)
+[Build one yourself](docs/BUILD_FROM_SCRATCH.md) OR
+[Purchase FPVRaceOne ready to use](https://fpvwidgets.square.site)
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
@@ -24,21 +25,26 @@ A single node personal lap timing solution for 5.8 GHz FPV drones that can be ne
 
 | Race Screen | Configuration |
 |:-----------:|:-------------:|
-| ![Race Screen](screenshots/FPVRaceOne/Screenshot%202026-06-20%20073924.png) | ![Config Menu](screenshots/FPVRaceOne/Screenshot%202026-06-09%20213816.png) |
+| ![Race Screen](images/screenshots/Screenshot%20Single%20Race%201.png) | ![Config Menu](images/screenshots/Screenshot%20Settings%202.png) |
 
 | Calibration Wizard — Recording | Calibration Wizard — Complete |
 |:------------------------------:|:-----------------------------:|
-| ![Calibration Recording](screenshots/12-12-2025/Calibration%20Wizard%20Recording%20-%2012-12-2025.png) | ![Calibration Complete](screenshots/12-12-2025/Calibration%20Wizard%20Completed%20-%2012-12-2025.png) |
+| ![Calibration Recording](images/screenshots/Screenshot%20Calibration%20Wizard%201.png) | ![Calibration Complete](images/screenshots/Screenshot%20Calibration%20Wizard%202.png) |
 
 ## Screenshots - Multi Mode
 
 | Master Race Screen | Master Pilot Edit |
 |:-----------:|:-------------:|
-| ![Master Race Screen](screenshots/FPVRaceOne/Screenshot%202026-06-09%20213619.png) | ![Master Pilot Edit](screenshots/FPVRaceOne/Screenshot%202026-06-09%20213730.png) |
+| ![Master Race Screen](images/screenshots/Screenshot%201.png) | ![Master Pilot Edit](images/screenshots/Screenshot%20Edit%20Pilot.png) |
 
-| Calibration Wizard — Recording | Calibration Wizard — Complete |
-|:------------------------------:|:-----------------------------:|
-| ![Calibration Recording](screenshots/12-12-2025/Calibration%20Wizard%20Recording%20-%2012-12-2025.png) | ![Calibration Complete](screenshots/12-12-2025/Calibration%20Wizard%20Completed%20-%2012-12-2025.png) |
+## 14 Themes to choose from (4 samples below)
+
+<p>
+  <img src="images/screenshots/Screenshot%20Theme%201.png" alt="Theme example 1" width="24%" />
+  <img src="images/screenshots/Screenshot%20Theme%202.png" alt="Theme example 2" width="24%" />
+  <img src="images/screenshots/Screenshot%20Theme%203.png" alt="Theme example 3" width="24%" />
+  <img src="images/screenshots/Screenshot%20Theme%204.png" alt="Theme example 4" width="24%" />
+</p>
 
 
 ---
@@ -71,19 +77,29 @@ The time between consecutive peaks is your lap time. The signal processing pipel
 
 ### Connectivity
 - **WiFi Access Point** — works with any browser on any device (laptop, pc, phone or tablet) with wifi, no app required
-- **Built-in Multi-Node Networking** — up to 8 lap timers can connect together to to run a multi pilot race.
+- **Built-in Multi-Node Networking** — up to 8 lap timers can connect together to run a multi pilot race.
 
 ### Signal Processing
-An RSSI processing pipeline optimized for the ESP32:
-**Kalman → Median-of-3 → 7-sample moving average → EMA → step limiter**
+
+**Hardware-timed acquisition.** The ESP32-C6's ADC samples the RX5808's RSSI line
+continuously into a DMA ring at **20 kHz**, completely independent of CPU
+scheduling. 
+
+**Single-stage filtering.** A running median with a small odd window
+(**N = 3–15**, default **7**, set by the Pipeline Smoothing slider). A median
+rejects isolated spike samples outright while preserving the true peak amplitude
+of a fast pass — the property a mean-based filter doesn't have. Backed by a
+two-sample enter debounce, so a brief noise burst cannot open a crossing, and a
+watchdog that releases the crossing state if RSSI drifts up to the enter threshold
+and stays there.
 
 ### RSSI Automatic Calibration Wizard
 Guided calibration wizard with real-time RSSI charts: Fly 3 passes over the start gate (timer) and let the wizard auto calibrate
 - Automatic 3-peak detection with manual override
-- Enter / Exit threshold calculation with conservative safety margins (Enter ≈ 95 % of weakest peak, Exit ≈ 7 RSSI units below Enter, raised above the noise floor)
+- Enter / Exit threshold calculation with conservative safety margins (Enter ≈ 95 % of weakest peak, Exit = Enter − 4, raised above the noise floor)
 - Peak-spread warning if the three peaks aren't reasonably equal — flagged for re-fly before applying
 - Live RSSI chart shows exactly what the lap detector sees (final pipeline output)
-**Note that the timer can only record for 100 seconds. It is recommended to fly through the timing gate, to the next closest gate, back through the gate to the next gate and back through a third time. Land and stop recording.
+**Note:** recording is capped at **100 seconds**, and the wizard stops on its own when it gets there. If the timer is short on memory it will grant a shorter window and tell you so on screen before you start. Nothing is recorded until you press **Start Recording**, so take your position at the gate first. Fly through the timing gate, on to the next closest gate, back through the gate (out to the next gate on the other side), and back through a third time — then land and press **Stop Recording**.
 
 ### Multi-Node Racing — Built-In Race Directing
 Network **up to 8 devices** together using on-board Wifi (no router or extra hardware required). One device runs in **Master** mode (race director); up to seven **Client** devices join the master's WiFi and forward laps automatically. Each pilot should remain connected to their own device over wifi.  All devices in multi-mode will see the entire race board.
@@ -157,7 +173,10 @@ Network **up to 8 devices** together using on-board Wifi (no router or extra har
 
 Pre-made and flashed hardware — [- Click here to purchase your FPVRaceOne at our store -](https://fpvwidgets.square.site)
 
-Prefer to build your own? The wiring diagram, bill of materials, SPI conversion and a step-by-step flashing guide are in **[Build From Scratch →](docs/BUILD_FROM_SCRATCH.md)**. KiCad files are in [`PCB/`](PCB/) and printable cases in [`case/`](case/).
+Prefer to build your own? The wiring diagram, bill of materials, SPI conversion and a step-by-step flashing guide are in **[Build From Scratch →](docs/BUILD_FROM_SCRATCH.md)**.
+
+- **[`case/`](case/)** — 3D-printable enclosure, ready-to-slice `.3mf` projects (single, four-up, and an ironed-lid variant). PETG, no supports — see [The 3D-Printed Case](docs/BUILD_FROM_SCRATCH.md#the-3d-printed-case)
+- **[`PCB/`](PCB/)** — KiCad project for the FPVRaceOne board, so there's no hand wiring at all
 
 **[Detailed hardware setup →](docs/GETTING_STARTED.md)**
 

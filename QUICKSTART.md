@@ -20,9 +20,12 @@ Auto-saves on selection.
 ## 3. Calibrate
 
 1. Power on your drone with **VTx on a fixed power level** (not auto); let it warm up ~30 s
-2. **Calibration** tab → **Start Calibration Wizard → Record**
-3. Fly **3 passes** through the start gate (through, around, back — repeat)
-4. **Stop Recording** → review the three peaks → **Apply Thresholds**
+2. **Calibration** tab → **Start Calibration Wizard**. Read the instructions, get into position — nothing records yet
+3. Press **Start Recording**, then fly **3 passes** through the start gate (through, around, back — repeat)
+4. Press **Stop Recording** → review the three detected peaks → **Calculate Thresholds**
+
+The new Enter/Exit values are saved to the timer automatically. Close the wizard,
+or fine-tune the sliders on the Calibration tab and press **Save RSSI Thresholds**.
 
 ## 4. Race
 

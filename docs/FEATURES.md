@@ -47,8 +47,6 @@ The USB-C connector on the device is used for **power and flashing only** — th
 
 ## Signal Processing
 
-A single RSSI processing pipeline based verbatim on the upstream FPVGate algorithm.
-
 ### ADC Input
 
 - **Hardware:** Seeed XIAO ESP32-C6 12-bit ADC
@@ -56,24 +54,77 @@ A single RSSI processing pipeline based verbatim on the upstream FPVGate algorit
 - **Scale:** 1 V ≈ 2340 counts; full-scale divisor = 2400
 - **Output:** 0–255 (8-bit, clamped)
 
-### Multi-Stage Pipeline
+### Acquisition — DMA Continuous with Peak Hold
 
-A sequential chain of five filter stages:
+The shipping default (`adcMode = 1`). Selected at boot; changing it requires a
+reboot.
 
-| Stage | Filter | Parameters |
-|-------|--------|------------|
-| 1 | Kalman | Process noise = 0.002, Measurement noise = 9.0 (upstream FPVGate gains) |
-| 2 | Median-of-3 | Rolling 3-sample window |
-| 3 | Moving average | 7-sample window |
-| 4 | EMA | α = 0.03–0.50, user-tunable via Pipeline Smoothing slider (default 0.15) |
-| 5 | Step limiter | Max ±12 counts per sample |
+| Property | Value |
+|---|---|
+| Mode | `adc_continuous` (hardware-timed, DMA into a ring buffer) |
+| Sample rate | 20 kHz (`ADC_DMA_SAMPLE_HZ`) |
+| Frame size | 128 bytes = 32 conversions (`ADC_DMA_FRAME_BYTES`) |
+| ISR rate | ~625 Hz |
+| ISR work | Reduce the completed frame to its **maximum** |
+| Read | `__atomic_exchange_n` — returns the running peak and zeroes it in one instruction |
+
+Every `readRssi()` therefore returns the highest value the hardware saw since the
+previous read, so a narrow peak cannot be lost to a late main loop. When no frame
+has completed since the last read (loop running faster than 625 Hz) the previous
+DMA sample is held rather than falling back to `analogRead()` — the two drivers
+report different scales, so mixing one in would inject a false trough.
+
+**Scale correction.** The oneshot and continuous drivers do not return the same
+counts for the same voltage on the C6. Measured on hardware with a DC sweep:
+
+```
+polled : rssi = 0.888 * input + 4.6
+DMA    : rssi = 1.706 * input + 10.4      → 1.921x higher
+```
+
+The DMA path is divided by that ratio (`RSSI_DMA_GAIN_NUM = 1921`) so both modes
+report the same RSSI for the same voltage and a calibration transfers between
+them. Re-derive with the timing harness's "Check Analog Path" in each mode if a
+future chip or IDF revision shifts it.
+
+The legacy **polled** path (`adcMode = 0`, one `analogRead()` per loop, ~200–500 Hz)
+still exists in firmware but is no longer selectable in the UI. Measured lap
+jitter: DMA 0.00 ms vs polled 1.21 ms.
+
+### Filtering — Single-Stage Running Median
+
+One stage. Odd window, sized by the Pipeline Smoothing slider (`v1Smoothing`):
+
+| Slider | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| **N** | 3 | 3 | 5 | 5 | 7 | **7** | 9 | 11 | 13 | 13 | 15 |
+
+Default level 5 → N = 7 → ~14–35 ms window at 500–200 Hz loop rate. The window is
+re-read every sample, so the slider takes effect mid-race without a restart.
+
+A median rejects isolated spikes while preserving true peak amplitude. Design
+intent matches RotorHazard's `FastRunningMedian`; the window is smaller because
+their 1 kHz sample rate on a dedicated ATmega allowed N = 255.
+
+> **Replaced a five-stage cascade** (Kalman → median-of-3 → 7-sample moving
+> average → EMA → step limiter). Its combined lag smeared fast peaks enough that
+> high-speed gate crossings sometimes failed to reach Enter. `lib/KALMAN/` is
+> retained in the tree but is no longer referenced by the detection path.
+
+Samples taken while the RX5808 is mid-tune are skipped entirely rather than
+filtered — `readRssi()` returns 0 during a tune, and feeding those zeros through
+would drag the filter down and suppress a real peak after a channel change.
 
 ### Gate Detection
 
-- **4-sample enter debounce** — consecutive samples at or above Enter RSSI before peak tracking starts
-- **2-sample raw exit confirm** — direct comparison against the unsmoothed sample buffer to avoid slow-falling smoothed signals masking the exit
-- **Peak must exceed exit by ≥5 counts** to be considered a valid lap
+- **2-sample enter debounce** (`kEnterHoldMin`) — consecutive samples at or above Enter RSSI before a crossing starts, backing up the median's spike rejection. Adds ~3–7 ms of latency
+- **Exit on the first sample below Exit RSSI** — no confirm count
+- **No peak margin** — reaching Enter on the filtered signal is by definition a valid pass, so no extra counts above Exit are required
 - **Ceiling-drift watchdog** — if "in gate" for >3 s without an exit, state is force-reset (the antenna RSSI must have drifted up to enter)
+
+Both the enter debounce and the watchdog are compile-time constants
+(`kEnableEnterDebounce`, `kEnableCeilingWatchdog`) intended to stay on in
+production; they exist as switches only for bench characterisation.
 
 ### Optional Gate-1 Bootstrap
 
@@ -124,7 +175,7 @@ Laps triggered within the minimum lap time are silently ignored. This prevents d
 ### Recording Phase
 
 - Firmware stores up to 5000 RSSI samples with millisecond timestamps in a dedicated calibration buffer
-- The wizard records the **final pipeline output** (post Kalman → Median → MA → EMA → step limiter) — what the lap detector actually sees
+- The wizard records the **final pipeline output** (post running-median) — what the lap detector actually sees
 - One sample every 20 ms (~50 Hz)
 - Multiple fly-over passes can be recorded in a single session, but **3 passes is the sweet spot** for the threshold calculator
 
@@ -437,11 +488,19 @@ Updates are blocked while a race is running. Attempting to start an update durin
 
 ## Self-Test System
 
-Access via **Settings → Diagnostics → Run All Tests**.
+Access via **Settings → Diagnostics → Run System Self-Test**.
 
 The self-test exercises hardware, storage, and software paths and reports pass/fail with detail text. Results can be downloaded as a diagnostic log to attach to a GitHub issue.
 
-Categories covered include the RX5808 SPI driver, EEPROM, LittleFS, WiFi AP / station, lap timer, race history, web server file presence, and OTA partition health.
+Categories covered include EEPROM, LittleFS, WiFi AP / station, lap timer, race history, web server file presence, OTA partition health, RSSI sampling punctuality, per-task CPU load, and the **RSSI Noise Floor** check.
+
+**RSSI Noise Floor** is the one that tells you the receiver is alive and correctly
+wired. It samples for one second on the frequency you have configured and reports
+the floor, mean and peak against your Exit threshold. There is no SPI readback on
+an RX5808, so a genuine noise signature is the available evidence that the module
+is powered, tuned and reaching the ADC — which is why this replaced the two band
+sweeps that used to sit here. Those blocked the web server for 2.16 s and, on a
+test rig, were actually measuring the emulator's DAC rather than the receiver.
 
 ---
 
@@ -483,7 +542,7 @@ src/
 lib/
 ├── CONFIG/               — Configuration struct, EEPROM, serialisation
 ├── DEBUG/                — Debug logger (web-streamed, no hot-path delays)
-├── KALMAN/               — Kalman filter
+├── KALMAN/               — Kalman filter (unused; not in the detection path)
 ├── LAPTIMER/             — Single 5-stage filter pipeline + gate state machine + lap events
 ├── RX5808/               — RX5808 SPI driver and ADC read
 ├── MULTINODE/            — Master/client coordination (heartbeats, broadcasts, quit notifications)

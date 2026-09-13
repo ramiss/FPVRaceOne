@@ -8,6 +8,8 @@ flashing.
 > Don't want to build one? A fully assembled, flashed and cased unit is
 > available at the [FPVWidgets store](https://fpvwidgets.square.site).
 
+**Note: you will need a Windows pc or laptop to use our free firmware flasher** ... or use a 3rd party ESP32 flasher or build the firmware yourself (see bottom of this page)
+
 ---
 
 ## Table of Contents
@@ -20,9 +22,10 @@ flashing.
 6. [Step 5 — Flash the Firmware](#step-5--flash-the-firmware)
 7. [Step 6 — First Power-On](#step-6--first-power-on)
 8. [Step 7 — Verify the Build](#step-7--verify-the-build)
-9. [Enclosure and PCB](#enclosure-and-pcb)
-10. [Building the Firmware From Source](#building-the-firmware-from-source)
-11. [Troubleshooting](#troubleshooting)
+9. [The 3D-Printed Case](#the-3d-printed-case)
+10. [The PCB](#the-pcb)
+11. [Building the Firmware From Source](#building-the-firmware-from-source)
+12. [Troubleshooting](#troubleshooting)
 
 ---
 
@@ -38,8 +41,10 @@ flashing.
 | 1 | **C1 — 100 µF electrolytic capacitor** | 10 V or higher, across the RX5808 supply |
 | 1 | **C2 — 10 µF capacitor** | Electrolytic or ceramic, across the RX5808 supply |
 | 1 | **5.8 GHz antenna** | Fits the u.FL / IPEX connector on the edge of the RX5808 module |
+| 1 | **2.4 GHz WiFi antenna, u.FL / IPEX** | For the **XIAO's** connector — see [Step 3](#step-3--the-support-components). Not optional: the firmware switches the radio to this connector at boot. A XIAO ESP32-C6 usually ships with one in the box |
 | — | **Silicone wire, 28–30 AWG** | Seven short runs; fine stranded wire is much kinder to the RX5808 pads |
 | 1 | **USB-C cable and a power source** | Any phone charger or USB power bank. See [Getting Started](GETTING_STARTED.md#what-you-need) for runtime estimates |
+| 1 | **Printed case** *(recommended)* | Ready-to-slice `.3mf` files in [`case/`](../case/) — see [The 3D-Printed Case](#the-3d-printed-case). PETG; prints without supports |
 
 ### Tools
 
@@ -70,13 +75,11 @@ way to tell from the listing and no guarantee from the seller. **The conversion
 is the removal of a single resistor**, arrowed in the photo at the bottom of the
 wiring diagram below.
 
-1. Remove the metal shield can if one is fitted — it lifts off, or unclips at
-   the tabs
-2. Find the resistor arrowed in the diagram, along the bottom edge of the board
-   near the crystal
+1. Remove the metal shield can by heating the solder on the edges of the can and carefully lifting the can.
+2. Find the resistor arrowed in the diagram (bottom of wiring diagram below), along the bottom edge of the board
+   near the crystal.
 3. Remove it with hot air, or by walking a fine iron tip back and forth across
-   both ends with plenty of flux until it lets go
-4. Check with a meter that the pad either side is now open
+   both ends with plenty of flux until it lets go. 
 
 Take your time. There are parts either side of it, and a slip here ends the
 module.
@@ -97,28 +100,27 @@ Seven connections. The wire colours below match the diagram.
 | 🟣 Purple | **D2** | **RSSI** | Analog signal strength — this is the one that times your laps |
 | 🔴 Red | **5V** | **+5V** | Module power |
 | ⚫ Black | **GND** | **GND** | Ground — the RX5808 has two GND pads; the diagram uses the one beside +5V |
-| 🩷 Pink | **D0** | **Video** | Shown for completeness. **Optional** — the current firmware never reads D0, so a timer-only build can leave both ends off |
+| 🩷 Pink | **D0** | **Video** | (Shown for completeness). **Optional** — the firmware currently does not use the video feed |
 
-Three details that matter:
-
-- **Power the module from 5V, not 3V3.** The RX5808 needs the full 5 V rail.
+Note:
+- **Power the module from USB (5V), not the 3V3 pads.** The RX5808 needs the full 5 V rail.
   The XIAO passes USB 5 V straight through to its `5V` pad, so a USB-C supply
-  feeds the module directly.
-- **RSSI must land on D2.** It's the analog input the sampler is wired to
-  (`PIN_RX5808_RSSI A2`, and A2 is the D2 pad). Any other pin reads nothing.
+  feeds the ESP32 and RX5808 module directly.
 - **Leave the RX5808's `ANT` pad unconnected** — it's marked with a red ✗ on the
-  diagram. Your 5.8 GHz antenna goes on the u.FL connector at the module's
-  edge, not on that pad.
+  diagram. Your 2.4 GHz antenna goes on the u.FL connector at the ESP32.
 
-You do **not** need an external WiFi antenna on the XIAO. The firmware runs the
-C6's built-in ceramic antenna at full 21 dBm.
+**IMPORTANT! The ESP32 needs its own 2.4 GHz antenna**
+The firmware uses the ESP32's external u.FL connector at boot to enable a smooth web experience in noisy track environments, so
+without an antenna fitted, the ESP32 radio is driving an open connector at full power and could be damaged. Details
+in [Step 3](#step-3--the-support-components).
 
 ---
 
 ## Step 3 — The Support Components
 
-These three parts are not optional. Without them the RSSI trace wanders and the
-calibration wizard produces thresholds that don't hold.
+None of these is optional. Without R1 and the capacitors the RSSI trace wanders
+and the calibration wizard produces thresholds that don't hold; without the WiFi
+antenna the web UI is barely usable at the far end of a track.
 
 **R1 — 100 kΩ, from the RSSI wire to ground.** Connect it anywhere along the
 purple line: one leg on the D2 / RSSI net, the other on the ground rail. It
@@ -130,6 +132,34 @@ the red 5 V rail, negative leg on the black ground rail. Put them as close to
 the module's `+5V` and `GND` pads as the build allows. The receiver's current
 draw is lumpy; these keep that off the rail the ADC is measuring against.
 Observe polarity on the electrolytics.
+
+### The two antennas
+
+This build has **two** antennas and they are treated differently:
+
+| Connector | Antenna | Carries |
+|---|---|---|
+| On the **RX5808** module edge | 5.8 GHz | The video signal being timed |
+| On the **XIAO ESP32-C6** | 2.4 GHz | The WiFi the web UI runs over |
+
+**Fit a 2.4 GHz antenna to the XIAO.** The firmware drives the C6's RF switch
+over to the external connector during boot, before WiFi starts. That is a
+deliberate choice: the onboard ceramic antenna is fine on a bench, but at a track
+you are walking a phone or laptop away from a timer that may be strapped high on
+a gate, and the external antenna is what keeps the UI responsive at that range.
+
+This is **not a setting you can turn off.** FPVRaceOne treats the external
+antenna as part of the hardware definition — the value is pinned on and the
+Settings toggle for it is hidden, precisely so a unit can't be left transmitting
+into a connector that has nothing attached. Build accordingly: no antenna on the
+XIAO means the radio is driving an open connector, and your usable range
+collapses to a few metres.
+
+u.FL connectors are fragile and rated for only a handful of mating cycles. Press
+the plug straight down until it clicks; don't rock it on, and don't pull on the
+cable to remove it.
+
+**Leave the RX5808 antenna pad unconnected** You want the 5.8Ghz video detection to be close range only, so do not connect an antenna to the module.
 
 ---
 
@@ -154,10 +184,10 @@ minutes and it's the difference between a working timer and a dead RX5808.
 
 Brand-new hardware has no bootloader, no partition table and no filesystem, so
 it needs a **Recovery**-mode flash — the full image written from offset 0x0. The
-FPVRaceOne Flasher does this in one click; everything after this first flash can
+FPVRaceOne Flasher does this in one click; updates after this first flash can
 be done over the air from the web UI.
 
-### Get the flasher
+### Get the flasher (Windows only)
 
 Download **[FPVRaceOne-Flasher.exe](https://github.com/ramiss/FPVRaceOne-Flasher/releases/latest/download/FPVRaceOne-Flasher.exe)**
 (Windows, portable — no installer). The link always resolves to the current
@@ -199,14 +229,22 @@ build, which then lets you pick any published firmware release.
 
 ## Step 6 — First Power-On
 
-1. Power the device from USB-C and wait 10–15 seconds
-2. On your phone or laptop, look for the WiFi network **`FPVRaceOne_XXXX`**
+1. Check the **2.4 GHz antenna is on the XIAO's u.FL connector** before you power
+   up — the radio switches to it during boot
+2. Power the device from USB-C and wait 10–15 seconds
+3. On your phone or laptop, look for the WiFi network **`FPVRaceOne_XXXX`**
    (XXXX = the last 4 digits of the device's MAC address)
-3. Password: **`fpvraceone`**
-4. Open **`http://192.168.4.1`** in a browser
+4. Password: **`fpvraceone`**
+5. Open **`http://192.168.4.1`** in a browser
 
 If the access point appears and the page loads, the XIAO half of the build is
 good.
+
+Then walk away from it. A unit with its WiFi antenna fitted should hold a
+connection across a typical track; if you lose the page after ten or fifteen
+metres, the antenna is the first thing to check — a missing or half-seated u.FL
+plug still gives you a strong signal standing next to the timer, so this only
+shows up at range.
 
 ---
 
@@ -239,19 +277,51 @@ through it.
 
 ---
 
-## Enclosure and PCB
+## The 3D-Printed Case
 
-Two things in this repository save you from a rat's nest of wire:
+Printable files live in **[`case/`](../case/)**. The enclosure is two parts — a
+**Top** and a **Bottom** — and everything in the folder is some arrangement of
+those two.
 
-- **[`case/`](../case/)** — printable enclosures as `.3mf`. `FPVRaceOne_Case_20260730.3mf`
-  is the current single-unit case; the `_x4` file is a four-up plate, and
-  `_ironed` is tuned for ironed top surfaces.
-- **[`PCB/`](../PCB/)** — the KiCad project for the FPVRaceOne board, which
-  carries the XIAO, the RX5808, and R1/C1/C2 with no hand wiring at all. Render
-  images are in [`Schematic/`](../Schematic/).
+| File | Contains | Use it when |
+|---|---|---|
+| **[`FPVRaceOne_Case_20260730.3mf`](../case/FPVRaceOne_Case_20260730.3mf)** | Top + Bottom, one complete case, with print settings | **Start here.** One timer, ready to slice |
+| **[`FPVRaceOne_Case_20260730_ironed.3mf`](../case/FPVRaceOne_Case_20260730_ironed.3mf)** | Same case, ironing enabled on top surfaces | You want a smoother lid — costs extra print time |
+| **[`FPVRaceOne_Case_20260730_x4.3mf`](../case/FPVRaceOne_Case_20260730_x4.3mf)** | Four complete cases (8 parts) on one plate | Building several timers for a multi-node setup |
+| **[`Top.3mf`](../case/Top.3mf)** / **[`Bottom.3mf`](../case/Bottom.3mf)** | Bare geometry, one part each, no print settings | Reprinting a single half, or bringing the model into another slicer / CAD tool |
+
+### Print settings
+
+The three `FPVRaceOne_Case_*` files are **Bambu Studio projects** — open one and
+the settings below come with it, already configured:
+
+| Setting | Value |
+|---|---|
+| Printer profile | Bambu Lab A1 mini, 0.4 mm nozzle |
+| Layer height | 0.08 mm |
+| Walls | 3 |
+| Infill | 30 % |
+| Supports | **Off** — the parts are designed to print without them |
+| Brim | None |
+| Filament | PETG (slot 1) |
+
+Nothing here is exotic apart from the fine 0.08 mm layer height, so any 0.4 mm
+FDM printer will manage it. On a different machine, load `Top.3mf` and
+`Bottom.3mf` into your own slicer and carry those values across — supports off
+and no brim are the two worth keeping.
+
+PETG is the recommended material: a timer sits out in the sun on a gate all day,
+and PLA softens at temperatures a black case reaches easily.
+
+## The PCB
+
+**[`PCB/`](../PCB/)** holds the KiCad project for the FPVRaceOne board, which
+carries the XIAO, the RX5808, and R1/C1/C2 with no hand wiring at all. Render
+images are in [`Schematic/`](../Schematic/).
 
 A hand-wired build on the diagram above is electrically identical to the PCB.
-The PCB is tidier, more repeatable, and fits the printed case.
+The PCB is tidier, more repeatable, and is what the printed case is designed
+around — a hand-wired bundle may need persuading to fit.
 
 ---
 
@@ -296,6 +366,8 @@ pio run -e seeed_xiao_esp32c6_release -t uploadfs
 |---|---|
 | No `FPVRaceOne_XXXX` WiFi network after 20 s | Firmware didn't flash, or the filesystem image is missing. Reflash in Recovery mode |
 | WiFi appears but `192.168.4.1` doesn't load | Filesystem not written. Recovery mode writes both — Update mode after a failed firmware-only flash will not |
+| WiFi is strong next to the timer but drops a few metres away | No antenna on the **XIAO's** u.FL, or the plug isn't fully clicked down. The firmware always uses the external connector, so an open one gives you a usable signal only at arm's length |
+| Band/channel changes work but WiFi range is poor | The two antennas are swapped — 5.8 GHz belongs on the RX5808, 2.4 GHz on the XIAO |
 | Flasher shows "no ESP32 devices found" | Charge-only USB cable, or the board needs manual bootloader mode (hold **B**, tap **R**, release **B**) |
 | Flasher reports "please update the tool" | The release uses a newer manifest than your flasher build. Download the current `FPVRaceOne-Flasher.exe` |
 | Self-test RSSI reads a flat 0 | RSSI wire not on **D2**, R1 missing, or the RX5808 has no 5 V |

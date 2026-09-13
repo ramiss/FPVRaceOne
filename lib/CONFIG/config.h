@@ -267,7 +267,7 @@ typedef struct {
     uint8_t wifiExtAntenna;     // 0=internal, 1=external antenna (takes effect on next boot)
     uint8_t wifiTxPower;        // WiFi TX power in dBm (2–21, takes effect on next boot)
     uint8_t gate1Bootstrap;     // 0=off (default), 1=on — special handling for first lap when drone is already in gate at race start
-    uint8_t v1Smoothing;        // EMA smoothing strength: 0=lightest, 5=upstream default (alpha 0.15), 10=heaviest. Tunes the EMA stage of the lap-detection pipeline.
+    uint8_t v1Smoothing;        // Running-median window: 0=lightest (N=3), 5=default (N=7), 10=heaviest (N=15). See kMedianWindowTable in laptimer.cpp. Name and 0-10 range are kept for config compatibility; it no longer tunes an EMA — that stage was removed with the rest of the old cascade.
     uint8_t nodeMode;           // 0=single (default), 1=master, 2=client
     char masterSSID[33];        // SSID of master to connect to (client mode only)
     char masterPassword[33];    // Password for master AP (default "fpvraceone")

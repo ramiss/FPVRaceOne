@@ -108,10 +108,16 @@ Proper calibration is the most important step for accurate timing.
 
 1. Power on your drone and let the VTx warm up for 30 seconds
 2. Important: set your VTX to a fixed power level (not auto / dynamic)
-3. Click **Record** in the wizard
-4. Fly your drone through the gate at race speed — **exactly 3 passes** is ideal.
+3. Read the instructions on screen and get into position. **Nothing is recorded
+   until you press Start Recording**, so there's no rush here
+4. Click **Start Recording** — the button turns red and becomes **Stop Recording**,
+   and a live sample count appears
+5. Fly your drone through the gate at race speed — **exactly 3 passes** is ideal.
    Fly through the start gate to the next gate and back through the start gate (x3).
-5. Click **Stop Recording**
+6. Click **Stop Recording**
+
+Recording stops on its own at **100 seconds** if you don't. If the timer is short
+on memory it grants a shorter window and says so on screen before you start.
 
 The wizard auto-detects the three highest peaks and overlays them on the chart. If detection misses one, drag a marker manually.
 
@@ -126,7 +132,14 @@ The wizard calculates thresholds with conservative safety margins:
 - **Enter RSSI** ≈ 95 % of the *weakest* of the three peaks (~5 % headroom for lap-to-lap variation)
 - **Exit RSSI** = Enter − 4 (tight hysteresis tuned for close-pattern tracks; raised above the recording's noise floor if needed)
 
-Review the values, tweak manually if you have a specific reason, then tap **Apply Thresholds**. The values are saved immediately.
+Tap **Calculate Thresholds** and the wizard works the values out and **saves them
+to the timer straight away** — you don't have to confirm anything to keep them.
+The results screen tells you it saved; close it with **Done**.
+
+To fine-tune afterwards, adjust the Enter/Exit sliders on the Calibration tab and
+press **Save RSSI Thresholds**. (If the automatic save fails — a client that
+dropped off the network, say — the screen says so in red and leaves an **Apply
+Thresholds** button to retry.)
 
 ### Step 5: Verify
 
