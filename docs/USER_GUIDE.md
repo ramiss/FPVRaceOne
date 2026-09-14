@@ -260,7 +260,7 @@ The device updates itself from GitHub Releases.
 **Safety:**
 - Updates are blocked while a race is running
 - Failed downloads keep the previous firmware — there is no risk of bricking
-- Manual flashing via PlatformIO / esptool is still available for first-time setup or recovery (see [FLASHING_OPTIONAL.md](FLASHING_OPTIONAL.md))
+- Manual flashing is still available for first-time setup or recovery — the Windows flasher tool in [Flash the Firmware](BUILD_FROM_SCRATCH.md#step-5--flash-the-firmware), or PlatformIO in [Building the Firmware From Source](BUILD_FROM_SCRATCH.md#building-the-firmware-from-source)
 
 ### WiFi & Connection
 
@@ -430,7 +430,7 @@ Most pilots never need to touch this. Adjust it only if calibration consistently
 
 ### Multi-Node Race Directing
 
-Pair two or more devices for head-to-head racing. See [Multi-Node](#multi-node) above. Common patterns:
+Pair two or more devices for head-to-head racing. See [Multi-Node Timing](#multi-node-timing) above. Common patterns:
 
 - **Solo practice while a master is broadcasting** — turn on *Skip Master Start* on the client so a director's Start All doesn't reset your local race
 - **Pilot drops out mid-heat** — the pilot presses Stop on their client; the master sees a **DNF** badge on that pilot's card and the rest of the race continues uninterrupted

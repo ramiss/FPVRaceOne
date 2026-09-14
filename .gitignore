@@ -94,8 +94,6 @@ tools/apply_frontend_defaults.html
 /docs/FLASHING_OPTIONAL-Prev.md
 /docs/FLASHING_OPTIONAL.md
 /scripts/publish_release.py
-/case/Bottom.3mf
-/case/Top.3mf
 /case_local
 /tools/test-extension
 /.claude

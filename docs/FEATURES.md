@@ -478,7 +478,7 @@ The CI workflow produces two binaries per release:
 
 ### Manual Flashing (Recovery)
 
-For first-time setup of new hardware or recovery if the device won't boot, `pio run -e seeed_xiao_esp32c6 -t upload` and `-t uploadfs` are still supported. See [FLASHING_OPTIONAL.md](FLASHING_OPTIONAL.md).
+For first-time setup of new hardware or recovery if the device won't boot, `pio run -e seeed_xiao_esp32c6 -t upload` and `-t uploadfs` are still supported. See [Flash the Firmware](BUILD_FROM_SCRATCH.md#step-5--flash-the-firmware) for the GUI flasher, and [Building the Firmware From Source](BUILD_FROM_SCRATCH.md#building-the-firmware-from-source) for the PlatformIO path.
 
 ### Race-Time Safety
 

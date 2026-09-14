@@ -3,7 +3,7 @@
 How to build your own FPVRaceOne lap timer from parts — wiring, assembly, and
 flashing.
 
-**Navigation:** [Home](../README.md) | [Getting Started](GETTING_STARTED.md) | [User Guide](USER_GUIDE.md) | [Flashing](FLASHING_OPTIONAL.md)
+**Navigation:** [Home](../README.md) | [Getting Started](GETTING_STARTED.md) | [User Guide](USER_GUIDE.md) | [Flashing](#step-5--flash-the-firmware)
 
 > Don't want to build one? A fully assembled, flashed and cased unit is
 > available at the [FPVWidgets store](https://fpvwidgets.square.site).
@@ -219,11 +219,41 @@ build, which then lets you pick any published firmware release.
 > buttons flank the USB connector — they're labelled on the diagram above.
 > Click **Refresh**, then **Flash** again.
 
-> **Recovery mode erases saved settings** — band, channel, calibration, pilot
-> name, WiFi credentials. That's exactly what you want on a fresh board. For
-> later reflashes of a configured unit, use **Update** mode, which preserves
-> them. See [FLASHING_OPTIONAL.md](FLASHING_OPTIONAL.md) for the full
-> comparison.
+### Update vs Recovery mode
+
+You only need Recovery once. After that the device updates itself over the air
+from **Settings → Firmware Update** — no cable, no tools. Manual flashing is for
+new hardware, a device that won't boot, or local development.
+
+| Mode | Writes | Use it for |
+|---|---|---|
+| **Update** | `FPVRaceOne-firmware.bin` (app at `0x10000`) + `FPVRaceOne-littlefs.bin` (filesystem at `0x380000`) | Normal manual reflash. Leaves the bootloader and partition table alone, and **keeps your settings** |
+| **Recovery** | `FPVRaceOne-merged.bin` (full image at `0x0` — bootloader, partition table, boot_app0, firmware) + the filesystem | New hardware, or a device whose bootloader or partition table is corrupt |
+
+**Recovery erases every saved setting** — band, channel, calibration, pilot name,
+WiFi credentials — because it overwrites the whole flash. On a board you're
+building that's exactly what you want. On a configured unit, use Update.
+
+**Update mode migrates the partition layout for you.** The layout changed in
+2026-08 (the app partitions grew by reclaiming unused filesystem space). A unit
+flashed before that keeps its old table, because neither an over-the-air update
+nor a normal Update-mode flash rewrites the partition table. You don't have to do
+anything about this: Update mode reads the table off the device first, and if it's
+out of date it writes the new table plus a boot-selector reset before the
+firmware, saying so in the log. Your settings survive — that path doesn't touch
+NVS.
+
+Two safeguards worth knowing about:
+
+- If the table can't be read, the flasher flashes normally rather than guessing.
+  It only rewrites on a *confirmed* mismatch.
+- Releases published after the change use manifest schema 2, so an **older
+  flasher build refuses them outright** with "please update the tool" instead of
+  writing images to offsets your device doesn't recognise. If you see that
+  message, download the current flasher.
+
+The device tells you too: if an over-the-air update can't fit your unit's
+partitions, the Firmware Update page says so and points you here.
 
 ---
 

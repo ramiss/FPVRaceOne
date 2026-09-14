@@ -134,7 +134,7 @@ Network **up to 8 devices** together using on-board Wifi (no router or extra har
 ### Firmware Updates
 - **One-tap OTA from GitHub Releases** — built into the device. Enter your home WiFi once; the device joins, checks the latest release, downloads the firmware + filesystem images, flashes both, and reboots.
 - Updates are blocked while a race is running. Failed downloads keep the previous firmware, so the device can't be bricked from a flaky network.
-- Manual flashing via our custom tool FPVRaceOne-Flasher (windows) — see [docs/FLASHING_OPTIONAL.md](docs/FLASHING_OPTIONAL.md).
+- Manual flashing via our custom tool FPVRaceOne-Flasher (Windows) — see [Flash the Firmware](docs/BUILD_FROM_SCRATCH.md#step-5--flash-the-firmware).
 
 ---
 

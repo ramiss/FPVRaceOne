@@ -243,7 +243,7 @@ Updates are blocked while a race is running. A failed download keeps the
 previous firmware on the device — a flaky network can't brick it.
 
 For manual flashing (new hardware, recovery, or development), see
-[Flashing Guide](FLASHING_OPTIONAL.md).
+[Flash the Firmware](BUILD_FROM_SCRATCH.md#step-5--flash-the-firmware).
 
 ---
 
@@ -327,4 +327,4 @@ For manual flashing (new hardware, recovery, or development), see
 
 - **[User Guide](USER_GUIDE.md)** — Master all features
 - **[Features Guide](FEATURES.md)** — In-depth technical reference
-- **[Flashing Guide](FLASHING_OPTIONAL.md)** — Manual re-flash (advanced / recovery)
+- **[Build From Scratch](BUILD_FROM_SCRATCH.md)** — Wiring and assembly, plus [manual flashing](BUILD_FROM_SCRATCH.md#step-5--flash-the-firmware) for new hardware or recovery
