@@ -234,6 +234,10 @@
                 <th>Lap Time</th>
                 <th>Gap</th>
                 <th>Total Time</th>
+                <!-- Per-lap exclude toggle.  Header deliberately blank: the
+                     buttons read for themselves and a label here would compete
+                     with the four that name real data. -->
+                <th class="lap-exclude-col"></th>
               </tr>
             </table>
 
@@ -377,6 +381,11 @@
           <div class="history-controls">
             <button id="importRacesBtn" onclick="document.getElementById('importFile').click()">Import Races</button>
             <input type="file" id="importFile" accept=".json" style="display: none;" onclick="this.value='';" onchange="importRaces(this)" />
+            <!-- Enabled by updateHistoryDownloadButton() only once a lap has been
+                 excluded or re-included, i.e. once this tab holds something the
+                 device's own copy does not. -->
+            <button id="downloadRacesBtn" onclick="downloadRaces()" disabled
+                    title="Exclude or include a lap to enable the download">Download Race</button>
             <button id="clearAllRacesBtn" onclick="clearAllRaces()" class="danger-button">Clear All</button>
           </div>
         </div>
@@ -400,6 +409,15 @@
               <label style="display: flex; align-items: center; gap: 6px; font-size: 14px; margin-left: 8px;">
                 <input type="checkbox" id="playbackWebhooks" checked style="margin: 0;">
                 Trigger Webhooks
+              </label>
+              <!-- Playback speaks the same callouts the live race made.  On by
+                   default so Play Race reproduces the race; uncheck to watch the
+                   timeline silently.  Takes effect immediately, mid-playback
+                   included — see onPlaybackVoiceToggled(). -->
+              <label style="display: flex; align-items: center; gap: 6px; font-size: 14px;">
+                <input type="checkbox" id="playbackVoice" checked style="margin: 0;"
+                       onchange="onPlaybackVoiceToggled()">
+                Voice Callouts
               </label>
             </div>
           </div>

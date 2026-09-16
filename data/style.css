@@ -1402,6 +1402,86 @@ table tr.fastest-lap td {
   font-size: 0.95em;
 }
 
+/* Exclude toggle on a Race History bar row.  Shares .lap-exclude-btn styling
+ * with the Race tab's table control so the same action looks the same on both
+ * pages; only the placement differs. */
+.bar-item .bar-exclude-btn {
+  /* .bar-item is already flex with gap:8px — no margin needed, it would double
+   * the spacing. flex:0 0 auto keeps the button from being squeezed by the
+   * growing bar container beside it. */
+  flex: 0 0 auto;
+}
+
+/* An excluded lap keeps its bar — it was still flown, and still counts toward
+ * total race time.  Dimming shows it is out of the summary without hiding the
+ * evidence. */
+.bar-item-excluded .bar-label,
+.bar-item-excluded .bar-container {
+  opacity: 0.45;
+}
+
+.bar-item-excluded .bar-exclude-btn {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+
+/* Disabled Download: reads as "nothing new to save" rather than as broken. */
+#downloadRacesBtn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Per-lap exclude toggle.  The column takes no width of its own so it doesn't
+ * steal space from Total Time; the button sizes it. */
+#lapTable th.lap-exclude-col,
+#lapTable td.lap-exclude-col {
+  width: 1%;
+  white-space: nowrap;
+  text-align: right;
+  padding-right: 10px;
+}
+
+.lap-exclude-btn {
+  padding: 2px 10px;
+  font-size: 0.78em;
+  font-family: inherit;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--secondary-color);
+  background: transparent;
+  border: 1px solid var(--border-color);
+  border-radius: 3px;
+  cursor: pointer;
+  /* Reserve the width of the longer label so the column doesn't jump when the
+   * button flips between "Exclude" and "Include". */
+  min-width: 68px;
+}
+
+.lap-exclude-btn:hover {
+  color: var(--text-color);
+  border-color: var(--secondary-color);
+}
+
+/* An excluded lap stays fully readable — it is still a lap that was flown and
+ * still counts toward lap count and total time.  It is only out of the summary,
+ * so it is dimmed and struck, not hidden. */
+#lapTable tr.lap-excluded td:nth-child(2),
+#lapTable tr.lap-excluded td:nth-child(3),
+#lapTable tr.lap-excluded td:nth-child(4) {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+#lapTable tr.lap-excluded .lap-badge {
+  opacity: 0.45;
+}
+
+#lapTable tr.lap-excluded .lap-exclude-btn {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+  opacity: 1;
+}
+
 /* Calibration wizard — armed state, before Start Recording is pressed.  Quiet
  * on purpose: it sits where the live red recording indicator will appear, and
  * the two must never be mistakable for one another at a glance. */

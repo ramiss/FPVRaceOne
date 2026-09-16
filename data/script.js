@@ -161,6 +161,70 @@ var announcerRate = 1.0;
 
 var lapNo = -1;
 var lapTimes = [];
+
+// Lap numbers the user has excluded from the summary statistics (Fastest,
+// Fastest 3 Consecutive, Median, Best 3).  Single-mode feature.
+//
+// Keyed by LAP NUMBER, not by array index.  The two coincide today, but lap
+// numbers are what the user sees on the badge, what the export carries, and
+// what survives a firmware lap-ring wraparound where the array no longer starts
+// at lap 0 — indices would silently re-point at different laps after a reload.
+//
+// Lap 0 is never a member: it is the first crossing, not a timed lap, and is
+// already excluded from every statistic by construction.
+//
+// An excluded lap is still recorded, still displayed, and still counts toward
+// the lap count and total time.  It is omitted from the summary only — this is
+// for discarding a lap spoiled by a crash or a cut course, not for deleting it.
+var excludedLaps = new Set();
+
+function isLapExcluded(n) {
+  return excludedLaps.has(n);
+}
+
+// Flip one lap's excluded state and refresh everything that depends on it.
+function toggleLapExcluded(n) {
+  if (!Number.isFinite(n) || n <= 0) return;
+  if (excludedLaps.has(n)) excludedLaps.delete(n);
+  else excludedLaps.add(n);
+  applyExcludedLapUI();
+  highlightFastestLap();
+  updateAnalysisView();
+}
+
+// Repaint the per-row exclude buttons and the struck-through styling from
+// `excludedLaps`.  Called after any change to the set or the table.
+function applyExcludedLapUI() {
+  const table = document.getElementById('lapTable');
+  if (!table) return;
+  for (let i = 1; i < table.rows.length; i++) {
+    const row = table.rows[i];
+    const n = parseInt(row.getAttribute('data-lap-number'), 10);
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const off = isLapExcluded(n);
+    row.classList.toggle('lap-excluded', off);
+    const btn = row.querySelector('.lap-exclude-btn');
+    if (btn) {
+      btn.textContent = off ? 'Include' : 'Exclude';
+      btn.title = off
+        ? `Lap ${n} is excluded from the summary — click to put it back`
+        : `Exclude lap ${n} from Fastest / Median / Best 3`;
+      btn.setAttribute('aria-pressed', off ? 'true' : 'false');
+    }
+  }
+}
+
+// The laps eligible for summary statistics: everything after the first
+// crossing, minus anything the user excluded.  Returns {time, lapNo} so a
+// statistic can still report the real lap number after filtering.
+function eligibleLapsForStats() {
+  const out = [];
+  for (let i = 1; i < lapTimes.length; i++) {
+    if (isLapExcluded(i)) continue;
+    out.push({ time: lapTimes[i], lapNo: i });
+  }
+  return out;
+}
 var maxLaps = 0;
 
 // ── Splash screen ────────────────────────────────────────────────────────────
@@ -701,7 +765,7 @@ function setupWiFiEvents() {
         if (timer) timer.innerHTML = '00:00:00s';
         const hdr = lapTable ? lapTable.rows.length : 0;
         for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
-        lapNo = -1; lapTimes = [];
+        lapNo = -1; lapTimes = []; excludedLaps.clear();
       lastCrossingRaceMs = 0;   // clean slate: current lap begins at race zero
         updateLapCounter();
       }
@@ -746,7 +810,7 @@ function setupWiFiEvents() {
       // Another tab cleared laps — mirror the table wipe locally.
       const hdr = lapTable ? lapTable.rows.length : 0;
       for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
-      lapNo = -1; lapTimes = [];
+      lapNo = -1; lapTimes = []; excludedLaps.clear();
       lastCrossingRaceMs = 0;   // clean slate: current lap begins at race zero
       updateLapCounter();
       if (typeof updateAnalysisView === 'function') updateAnalysisView();
@@ -793,7 +857,7 @@ function setupWiFiEvents() {
       // Announce the lap using the existing announcer
       if (typeof queueSpeak === 'function') {
         if (data.lap === 0) {
-          queueSpeak(`<p>${callsign} entered gate 1</p>`);
+          queueSpeak(`<p>${callsign} first crossing</p>`);
         } else {
           const timeStr = formatMsSpeak(data.ms);
           let text;
@@ -828,7 +892,7 @@ function setupWiFiEvents() {
       if (timer) timer.innerHTML = '00:00:00s';
       const hdr = lapTable ? lapTable.rows.length : 0;
       for (let i = 1; i < hdr; i++) lapTable.deleteRow(1);
-      lapNo = -1; lapTimes = [];
+      lapNo = -1; lapTimes = []; excludedLaps.clear();
       lastCrossingRaceMs = 0;   // clean slate: current lap begins at race zero
       updateLapCounter();
     } else if (e.data === "started") {
@@ -3370,15 +3434,36 @@ function playBeepTone(duration, frequency, type) {
 // row.cells, so the short row is safe.
 function _renderFirstCrossingCell(row) {
   const cell = row.insertCell(1);
-  cell.colSpan = 3;
+  // Spans Lap Time / Gap / Total Time AND the exclude column: lap 0 is never a
+  // candidate for exclusion, so an empty button cell there would just invite
+  // the click that does nothing.
+  cell.colSpan = 4;
   cell.className = 'lap-first-crossing';
-  cell.textContent = 'First Crossing';
+  cell.textContent = '1st Cross';
+}
+
+// Append the exclude-toggle cell to a real (non-zero) lap row.
+function _renderExcludeCell(row, n) {
+  const cell = row.insertCell(-1);
+  cell.className = 'lap-exclude-col';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'lap-exclude-btn';
+  btn.onclick = () => toggleLapExcluded(n);
+  cell.appendChild(btn);
+  // Label, tooltip and row styling all come from one place so they cannot
+  // disagree with the set.
+  applyExcludedLapUI();
 }
 
 // Silently restore in-progress laps after page reload — no TTS, no state side-effects
 function _restoreInProgressLaps(laps) {
   lapNo = -1;
   lapTimes = [];
+  // Exclusions live in this tab only — the firmware has no concept of them, so
+  // a page reload mid-race cannot recover which laps were set aside.  Clear
+  // rather than carry a stale set onto a freshly rebuilt table.
+  excludedLaps.clear();
   const table = document.getElementById('lapTable');
   if (table) while (table.rows.length > 1) table.deleteRow(1);
   let cumMs = 0;
@@ -3397,6 +3482,7 @@ function _restoreInProgressLaps(laps) {
       // data-lap-index stays the ARRAY index — it addresses lapTimes[], which
       // only holds what was restored.
       row.setAttribute('data-lap-index', idx);
+      row.setAttribute('data-lap-number', lapNo);
       // Wrapped so CSS can draw the skewed lap badge — a <td> itself cannot be
       // transformed reliably.  See .lap-badge.
       const c1 = row.insertCell(0); c1.innerHTML = `<span class="lap-badge"><b>${lapNo}</b></span>`;
@@ -3415,11 +3501,67 @@ function _restoreInProgressLaps(laps) {
         // truncated it starts mid-race, so the running total would be wrong —
         // show a dash rather than a confidently incorrect number.
         c4.innerHTML = (lapNo !== idx) ? '-' : formatMsDisplay(cumMs);
+        _renderExcludeCell(row, lapNo);
       }
     }
   });
   if (table) { highlightFastestLap(); updateLapCounter(); }
   updateAnalysisView();
+}
+
+// The lap callout, exactly as a live race makes it.
+//
+// Extracted from addLap() so Race History playback can produce IDENTICAL audio
+// rather than an approximation of it: same announcer mode, same lap format,
+// same phrasing, same formatter.  Two copies of this would drift the moment
+// either was edited, and the whole point of playback is that it sounds like
+// the race did.
+//
+// `lapSpeak` is the RAW numeric time string (e.g. "115.634") — the announcer
+// converts it; see _preprocessTimeForTts.  `last2Str`/`last3Str` are the
+// running 2- and 3-lap sums in seconds, or "" when this lap isn't on that
+// cadence.
+function announceLapCallout(pilotName, lapNo, lapSpeak, last2Str, last3Str) {
+  const mode = announcerSelect?.options?.[announcerSelect.selectedIndex]?.value;
+  switch (mode) {
+    case "beep":
+      beep(100, 330, "square");
+      break;
+    case "1lap":
+      if (lapNo == 0) {
+        queueSpeak(`<p>${pilotName} first crossing</p>`);
+      } else {
+        let text;
+        switch (lapFormat) {
+          case 'pilottime':
+            text = `<p>${pilotName} ${lapSpeak}</p>`;
+            break;
+          case 'timeonly':
+            text = `<p>${lapSpeak}</p>`;
+            break;
+          default:  // 'full', 'laptime'
+            text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
+        }
+        queueSpeak(text);
+      }
+      break;
+    case "2lap":
+      if (lapNo == 0) {
+        queueSpeak(`<p>${pilotName} first crossing</p>`);
+      } else if (last2Str) {
+        queueSpeak(`<p>${pilotName} 2 laps ${formatMsSpeak(Math.round(parseFloat(last2Str) * 1000))}</p>`);
+      }
+      break;
+    case "3lap":
+      if (lapNo == 0) {
+        queueSpeak(`<p>${pilotName} first crossing</p>`);
+      } else if (last3Str) {
+        queueSpeak(`<p>${pilotName} 3 laps ${formatMsSpeak(Math.round(parseFloat(last3Str) * 1000))}</p>`);
+      }
+      break;
+    default:
+      break;
+  }
 }
 
 function addLap(lapStr) {
@@ -3447,6 +3589,8 @@ function addLap(lapStr) {
   const row = table.insertRow();
   row.setAttribute('data-lap-index', lapTimes.length - 1);
   
+  row.setAttribute('data-lap-number', lapNo);
+
   const cell1 = row.insertCell(0);  // Lap No
   // See _restoreInProgressLaps(): the badge needs its own element.
   cell1.innerHTML = `<span class="lap-badge"><b>${lapNo}</b></span>`;
@@ -3465,6 +3609,7 @@ function addLap(lapStr) {
     cell2.innerHTML = formatMsDisplay(Math.round(newLap * 1000));
     cell3.innerHTML = gapMs !== null ? formatMsGap(gapMs) : "-";
     cell4.innerHTML = formatMsDisplay(totalMs);
+    _renderExcludeCell(row, lapNo);
   }
   
   // Highlight fastest lap
@@ -3501,47 +3646,7 @@ function addLap(lapStr) {
   // during coordinated races.
   const _syncGateActive = (mnNodeMode === 0);
   if (!_syncGateActive || _iAmRaceInitiator) {
-    switch (announcerSelect.options[announcerSelect.selectedIndex].value) {
-      case "beep":
-        beep(100, 330, "square");
-        break;
-      case "1lap":
-        if (lapNo == 0) {
-          queueSpeak(`<p>${pilotName} entered gate 1</p>`);
-        } else {
-          let text;
-          switch (lapFormat) {
-            case 'pilottime':
-              text = `<p>${pilotName} ${lapSpeak}</p>`;
-              break;
-            case 'timeonly':
-              text = `<p>${lapSpeak}</p>`;
-              break;
-            default:  // 'full', 'laptime'
-              text = `<p>${pilotName} Lap ${lapNo}, ${lapSpeak}</p>`;
-          }
-          queueSpeak(text);
-        }
-        break;
-      case "2lap":
-        if (lapNo == 0) {
-          queueSpeak(`<p>${pilotName} entered gate 1</p>`);
-        } else if (last2lapStr != "") {
-          const text2 = "<p>" + pilotName + " 2 laps " + formatMsSpeak(Math.round(parseFloat(last2lapStr) * 1000)) + "</p>";
-          queueSpeak(text2);
-        }
-        break;
-      case "3lap":
-        if (lapNo == 0) {
-          queueSpeak(`<p>${pilotName} entered gate 1</p>`);
-        } else if (last3lapStr != "") {
-          const text3 = "<p>" + pilotName + " 3 laps " + formatMsSpeak(Math.round(parseFloat(last3lapStr) * 1000)) + "</p>";
-          queueSpeak(text3);
-        }
-        break;
-      default:
-        break;
-    }
+    announceLapCallout(pilotName, lapNo, lapSpeak, last2lapStr, last3lapStr);
   }
 
   // Update lap counter
@@ -3575,14 +3680,11 @@ function startTimer() {
   clearInterval(timerInterval);
   const _timerStart = Date.now();
   timerInterval = setInterval(function () {
-    const elapsed = Date.now() - _timerStart;
-    const minutes = Math.floor(elapsed / 60000);
-    const seconds = Math.floor((elapsed % 60000) / 1000);
-    const millis  = Math.floor((elapsed % 1000) / 10);
-    let m = minutes < 10 ? "0" + minutes : minutes;
-    let s = seconds < 10 ? "0" + seconds : seconds;
-    let ms = millis  < 10 ? "0" + millis  : millis;
-    timer.innerHTML = `${m}:${s}:${ms}s`;
+    // One formatter for every clock in the app — see formatMsDisplay().  The
+    // hand-rolled version that used to live here was fixed at hundredths and
+    // had no hour rollover, so it silently ignored the Lap Time Precision
+    // setting and ran past 99 minutes without ever showing an hours field.
+    timer.innerHTML = formatMsDisplay(Date.now() - _timerStart);
   }, 10);
 
   if (usbConnected && transportManager) {
@@ -3640,14 +3742,8 @@ function startRaceDisplayOnly(offsetMs = 0) {
   rvUpdateBanner();
   _startRaceReanchor();
   timerInterval = setInterval(function () {
-    const elapsed = Date.now() - _timerStart;
-    const minutes = Math.floor(elapsed / 60000);
-    const seconds = Math.floor((elapsed % 60000) / 1000);
-    const millis  = Math.floor((elapsed % 1000) / 10);
-    const m  = minutes < 10 ? '0' + minutes : minutes;
-    const s  = seconds < 10 ? '0' + seconds : seconds;
-    const ms = millis   < 10 ? '0' + millis  : millis;
-    timer.innerHTML = `${m}:${s}:${ms}s`;
+    // Same single formatter as the other race clock — see formatMsDisplay().
+    timer.innerHTML = formatMsDisplay(Date.now() - _timerStart);
   }, 10);
 
   // DERIVED, not stamped — so it is identical no matter how many times this
@@ -4231,7 +4327,8 @@ function updateLapTablePlaceholder() {
   row.id = 'lapPlaceholderRow';
   row.className = 'lap-placeholder';
   row.innerHTML = '<td><span class="lap-badge"><b>&mdash;</b></span></td>'
-                + '<td>&ndash;</td><td>&ndash;</td><td>&ndash;</td>';
+                + '<td>&ndash;</td><td>&ndash;</td><td>&ndash;</td>'
+                + '<td class="lap-exclude-col"></td>';
 }
 
 function highlightFastestLap() {
@@ -4242,6 +4339,9 @@ function highlightFastestLap() {
   let fastestIndex = -1;
   
   for (let i = 1; i < lapTimes.length; i++) {  // Start from 1 to skip gate 1
+    // An excluded lap can't hold the fastest-lap highlight either — the
+    // highlight and the Fastest statistic must always name the same lap.
+    if (isLapExcluded(i)) continue;
     if (lapTimes[i] < fastestTime) {
       fastestTime = lapTimes[i];
       fastestIndex = i;
@@ -4504,8 +4604,9 @@ function clearLaps() {
   }
   lapNo = -1;
   lapTimes = [];
+  excludedLaps.clear();
   updateLapCounter();
-  
+
   // Clear lap analysis
   document.getElementById('analysisContent').innerHTML = 
     '<p class="no-data">Complete at least 1 lap to see analysis</p>';
@@ -4547,8 +4648,12 @@ function downloadCurrentRaceData() {
     return;
   }
 
-  // Create race data object from current race
-  const validLaps = lapTimes.slice(1);
+  // Stats are computed over the ELIGIBLE laps so the figures in the file match
+  // what the Race tab showed when it was downloaded.  The full lapTimes array
+  // is still exported — excluding a lap hides it from the summary, it does not
+  // delete it — and excludedLaps travels alongside so a re-import can restore
+  // both the laps and the decision about them.
+  const validLaps = eligibleLapsForStats().map(l => l.time);
   const fastest = validLaps.length > 0 ? Math.min(...validLaps) : 0;
   const sorted = [...validLaps].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -4566,6 +4671,10 @@ function downloadCurrentRaceData() {
   const raceData = {
     timestamp: Math.floor(Date.now() / 1000),
     lapTimes: lapTimes.map(t => Math.round(t * 1000)),
+    // Lap numbers omitted from the summary.  Optional and additive: a file
+    // written before this existed simply has no key, and imports with nothing
+    // excluded — which is exactly the old behaviour.
+    excludedLaps: Array.from(excludedLaps).sort((a, b) => a - b),
     fastestLap: Math.round(fastest * 1000),
     medianLap: Math.round(median * 1000),
     best3LapsTotal: Math.round(best3Total * 1000),
@@ -4867,64 +4976,72 @@ function updateStatsBoxes() {
     return;
   }
   
-  // Fastest Lap (excluding Gate 1 which is just passing through to start)
-  const validLaps = lapTimes.slice(1); // Skip Gate 1
-  if (validLaps.length === 0) {
+  // Every statistic below is computed over the ELIGIBLE laps: after the first
+  // crossing, minus any the user excluded.  Each entry carries its real lap
+  // number so the "Lap 4" / "L2, L5, L6" captions stay correct after filtering
+  // — reporting positions in a filtered array would name the wrong laps.
+  const eligible = eligibleLapsForStats();
+  const excludedCount = Math.max(0, (lapTimes.length - 1) - eligible.length);
+  const needNote = (n) => excludedCount > 0 ? `Need ${n} (excl. ${excludedCount})` : `Need ${n}`;
+
+  // Fastest Lap
+  if (eligible.length === 0) {
     document.getElementById('statFastest').textContent = '--';
-    document.getElementById('statFastestLapNo').textContent = 'Need 1 lap';
+    document.getElementById('statFastestLapNo').textContent = needNote('1 lap');
   } else {
-    const fastest = Math.min(...validLaps);
-    const fastestIndex = validLaps.indexOf(fastest) + 1; // +1 to account for skipped Gate 1
-    document.getElementById('statFastest').textContent = formatMsDisplay(Math.round(fastest * 1000));
-    document.getElementById('statFastestLapNo').textContent = `Lap ${fastestIndex}`;
+    let best = eligible[0];
+    for (const l of eligible) if (l.time < best.time) best = l;
+    document.getElementById('statFastest').textContent = formatMsDisplay(Math.round(best.time * 1000));
+    document.getElementById('statFastestLapNo').textContent = `Lap ${best.lapNo}`;
   }
-  
-  // Fastest 3 Consecutive Laps (for RaceGOW format) - skip Gate 1
-  if (validLaps.length >= 3) {
-    let fastestConsecTime = Infinity;
-    let fastestConsecStart = -1;
-    
-    // Check all consecutive 3-lap windows (starting from Lap 1, not Gate 1)
-    for (let i = 0; i <= validLaps.length - 3; i++) {
-      const consecTime = validLaps[i] + validLaps[i + 1] + validLaps[i + 2];
-      if (consecTime < fastestConsecTime) {
-        fastestConsecTime = consecTime;
-        fastestConsecStart = i + 1; // +1 to account for skipped Gate 1
-      }
+
+  // Fastest 3 Consecutive Laps (RaceGOW format).
+  //
+  // "Consecutive" means consecutive LAPS FLOWN, so an excluded lap breaks the
+  // run rather than closing over it — laps 2 and 4 are not consecutive just
+  // because 3 was discarded.  Hence the lapNo contiguity test.
+  let fastestConsecTime = Infinity;
+  let fastestConsecStart = -1;
+  for (let i = 0; i + 2 < eligible.length; i++) {
+    const a = eligible[i], b = eligible[i + 1], c = eligible[i + 2];
+    if (b.lapNo !== a.lapNo + 1 || c.lapNo !== b.lapNo + 1) continue;
+    const consecTime = a.time + b.time + c.time;
+    if (consecTime < fastestConsecTime) {
+      fastestConsecTime = consecTime;
+      fastestConsecStart = a.lapNo;
     }
-    
+  }
+  if (fastestConsecStart >= 0) {
     document.getElementById('statFastest3Consec').textContent = formatMsDisplay(Math.round(fastestConsecTime * 1000));
-    const lapNums = `L${fastestConsecStart}-L${fastestConsecStart + 1}-L${fastestConsecStart + 2}`;
-    document.getElementById('statFastest3ConsecLaps').textContent = lapNums;
+    document.getElementById('statFastest3ConsecLaps').textContent =
+      `L${fastestConsecStart}-L${fastestConsecStart + 1}-L${fastestConsecStart + 2}`;
   } else {
     document.getElementById('statFastest3Consec').textContent = '--';
-    document.getElementById('statFastest3ConsecLaps').textContent = 'Need 3 laps';
+    document.getElementById('statFastest3ConsecLaps').textContent = needNote('3 in a row');
   }
-  
-  // Median Lap (excluding Gate 1)
-  if (validLaps.length === 0) {
+
+  // Median Lap
+  if (eligible.length === 0) {
     document.getElementById('statMedian').textContent = '--';
   } else {
-    const sorted = [...validLaps].sort((a, b) => a - b);
+    const sorted = eligible.map(l => l.time).sort((a, b) => a - b);
     const mid = Math.floor(sorted.length / 2);
-    const median = sorted.length % 2 === 0 ? 
-      (sorted[mid - 1] + sorted[mid]) / 2 : 
-      sorted[mid];
+    const median = sorted.length % 2 === 0
+      ? (sorted[mid - 1] + sorted[mid]) / 2
+      : sorted[mid];
     document.getElementById('statMedian').textContent = formatMsDisplay(Math.round(median * 1000));
   }
-  
-  // Best 3 Laps (sum of 3 fastest individual laps) - skip Gate 1
-  if (validLaps.length >= 3) {
-    const lapsWithIndex = validLaps.map((time, index) => ({ time, index: index + 1 })); // +1 for actual lap number
-    lapsWithIndex.sort((a, b) => a.time - b.time);
-    const best3 = lapsWithIndex.slice(0, 3);
+
+  // Best 3 Laps (sum of the 3 fastest individual laps — need not be consecutive)
+  if (eligible.length >= 3) {
+    const best3 = [...eligible].sort((a, b) => a.time - b.time).slice(0, 3);
     const totalTime = best3.reduce((sum, l) => sum + l.time, 0);
-    const lapNumbers = best3.map(l => `L${l.index}`).sort().join(', ');
+    const lapNumbers = best3.map(l => l.lapNo).sort((a, b) => a - b).map(n => `L${n}`).join(', ');
     document.getElementById('statBest3').textContent = formatMsDisplay(Math.round(totalTime * 1000));
     document.getElementById('statBest3Laps').textContent = lapNumbers;
   } else {
     document.getElementById('statBest3').textContent = '--';
-    document.getElementById('statBest3Laps').textContent = 'Need 3 laps';
+    document.getElementById('statBest3Laps').textContent = needNote('3 laps');
   }
 }
 
@@ -4939,7 +5056,7 @@ function renderLapHistory() {
     const lapNumber = startIndex + index;
     const colorIndex = (startIndex + index) % barColors.length;
     if (lapNumber === 0) {
-      html += createBarItemWithColor(`Gate 1`, time, maxTime, formatMsDisplay(Math.round(time * 1000)), colorIndex);
+      html += createBarItemWithColor(`1st Cross`, time, maxTime, formatMsDisplay(Math.round(time * 1000)), colorIndex);
     } else {
       html += createBarItemWithColor(`Lap ${lapNumber}`, time, maxTime, formatMsDisplay(Math.round(time * 1000)), colorIndex);
     }
@@ -4954,41 +5071,71 @@ function renderLapHistory() {
   document.getElementById('analysisContent').innerHTML = html;
 }
 
-function renderFastestRound() {
-  if (lapTimes.length < 3) {
-    document.getElementById('analysisContent').innerHTML = 
-      '<p class="no-data">Complete at least 3 laps to see fastest round</p>';
-    return;
+// Fastest 3 consecutive laps.  Shared by the Race tab and the Race History
+// detail view, which previously held two identical copies of this — both with
+// the same four bugs.
+//
+// `laps` is lap times in SECONDS indexed by lap number, exactly as lapTimes is:
+// index 0 is the FIRST CROSSING, index N is Lap N.
+//
+// Rules, matching updateAnalysisView() and recomputeRaceStats():
+//   - index 0 never participates.  It is the hole shot — the time from race
+//     start to the first gate pass — not a lap, and it is almost always the
+//     shortest value in the array, so including it made it win nearly every
+//     round it appeared in.
+//   - excluded laps are skipped.
+//   - "consecutive" means consecutive LAPS FLOWN, so an excluded lap breaks the
+//     run rather than closing over it.
+//
+// Returns { laps: [{lapNo, time} x3], total }, or null if there is no valid
+// window.  Note that needing 3 LAPS means needing 4 array entries.
+function findFastestRound(laps, excluded) {
+  if (!Array.isArray(laps)) return null;
+  const eligible = [];
+  for (let i = 1; i < laps.length; i++) {
+    if (excluded && excluded.has(i)) continue;
+    eligible.push({ lapNo: i, time: laps[i] });
   }
-  
-  // Find best consecutive 3 laps
-  let bestTime = Infinity;
-  let bestStartIndex = 0;
-  
-  for (let i = 0; i <= lapTimes.length - 3; i++) {
-    const sum = lapTimes[i] + lapTimes[i+1] + lapTimes[i+2];
-    if (sum < bestTime) {
-      bestTime = sum;
-      bestStartIndex = i;
-    }
+
+  let best = null;
+  for (let i = 0; i + 2 < eligible.length; i++) {
+    const a = eligible[i], b = eligible[i + 1], c = eligible[i + 2];
+    if (b.lapNo !== a.lapNo + 1 || c.lapNo !== b.lapNo + 1) continue;
+    const total = a.time + b.time + c.time;
+    if (!best || total < best.total) best = { laps: [a, b, c], total };
   }
-  
-  const lap1 = lapTimes[bestStartIndex];
-  const lap2 = lapTimes[bestStartIndex + 1];
-  const lap3 = lapTimes[bestStartIndex + 2];
-  const maxTime = Math.max(lap1, lap2, lap3);
-  
-  let html = '<div class="analysis-bars">';
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 1}`, lap1, maxTime, formatMsDisplay(Math.round(lap1 * 1000)), 0);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 2}`, lap2, maxTime, formatMsDisplay(Math.round(lap2 * 1000)), 1);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 3}`, lap3, maxTime, formatMsDisplay(Math.round(lap3 * 1000)), 2);
-  html += '</div>';
-  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total: ${formatMsDisplay(Math.round(bestTime * 1000))}</p>`;
-  
-  document.getElementById('analysisContent').innerHTML = html;
+  return best;
 }
 
-function createBarItemWithColor(label, time, maxTime, displayTime, colorIndex) {
+// Bars + total for a findFastestRound() result.  Labels carry the REAL lap
+// numbers — the old code printed `bestStartIndex + 1`, which was off by one
+// even when the window itself was right.
+function _fastestRoundHtml(best) {
+  const maxTime = Math.max(...best.laps.map(l => l.time));
+  let html = '<div class="analysis-bars">';
+  best.laps.forEach((l, i) => {
+    html += createBarItemWithColor(
+      `Lap ${l.lapNo}`, l.time, maxTime, formatMsDisplay(Math.round(l.time * 1000)), i);
+  });
+  html += '</div>';
+  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total: ${formatMsDisplay(Math.round(best.total * 1000))}</p>`;
+  return html;
+}
+
+function renderFastestRound() {
+  const best = findFastestRound(lapTimes, excludedLaps);
+  if (!best) {
+    document.getElementById('analysisContent').innerHTML =
+      '<p class="no-data">Complete at least 3 consecutive laps to see fastest round</p>';
+    return;
+  }
+  document.getElementById('analysisContent').innerHTML = _fastestRoundHtml(best);
+}
+
+// `opts.excludeLapNo` adds the per-lap Exclude/Include control used by the Race
+// History detail view; `opts.excluded` dims the bar to match.  Omitted by the
+// live Race tab, which has its own table-based control.
+function createBarItemWithColor(label, time, maxTime, displayTime, colorIndex, opts = {}) {
   // Guard the width math: an all-zero or imported race can make maxTime 0 (or the
   // caller can pass -Infinity from Math.max() of an empty slice), giving NaN/Infinity
   // percentages and a broken `width: NaN%`. Clamp to a valid [0,100] range.
@@ -4997,20 +5144,163 @@ function createBarItemWithColor(label, time, maxTime, displayTime, colorIndex) {
   let percentage = (safeTime / safeMax) * 100;
   percentage = Math.max(0, Math.min(100, Number.isFinite(percentage) ? percentage : 0));
   const colors = barColors[colorIndex % barColors.length];
+  const n = opts.excludeLapNo;
+  const btn = (Number.isFinite(n) && n > 0)
+    ? `<button type="button" class="lap-exclude-btn bar-exclude-btn"
+               aria-pressed="${opts.excluded ? 'true' : 'false'}"
+               title="${opts.excluded
+                 ? `Lap ${n} is excluded from the summary — click to put it back`
+                 : `Exclude lap ${n} from Fastest / Median / Best 3`}"
+               onclick="toggleDetailLapExcluded(${n})">${opts.excluded ? 'Include' : 'Exclude'}</button>`
+    : '';
   return `
-    <div class="bar-item">
+    <div class="bar-item${opts.excluded ? ' bar-item-excluded' : ''}">
       <div class="bar-label">${label}</div>
       <div class="bar-container">
         <div class="bar-fill" style="width: ${percentage}%; background: linear-gradient(90deg, ${colors[0]}, ${colors[1]});">
           <span class="bar-time">${displayTime}</span>
         </div>
       </div>
+      ${btn}
     </div>
   `;
 }
 
 // Race History Functions
 let raceHistoryData = [];
+
+// Set true the moment a saved race's exclusions are edited on this page.
+//
+// The device knows nothing about exclusions — race history is RAM-only here and
+// /api/races/download serves the firmware's copy — so an edit exists ONLY in
+// this tab until it is downloaded.  The Download button is gated on this flag
+// so it reads as "there is something here the device doesn't have", rather than
+// offering a download identical to what the device would hand you anyway.
+let raceHistoryDirty = false;
+
+// File name of the most recently imported races file, so Download Race can
+// write back to the same name.  Empty when the history came from the device
+// rather than from a file, in which case a fresh timestamped name is used.
+let importedRacesFileName = '';
+
+// race timestamp -> excludedLaps[].  THIS TAB IS THE AUTHORITY for exclusions.
+//
+// The firmware has no excludedLaps field, so anything read back from /races
+// arrives without them.  Both an import and a local toggle therefore lose the
+// exclusions the moment loadRaceHistory() runs — which import does immediately,
+// and which also happens after a delete or a metadata edit.  The stored
+// fastestLap / medianLap / best3LapsTotal DO survive, because those are fields
+// the device round-trips, which is why the totals looked right while every
+// button read "Exclude".
+//
+// Recording them here and re-applying after every load closes that gap.
+const raceExclusions = new Map();
+
+function rememberRaceExclusions(timestamp, laps) {
+  if (!Number.isFinite(timestamp)) return;
+  const clean = (Array.isArray(laps) ? laps : [])
+    .map(n => parseInt(n, 10))
+    .filter(n => Number.isFinite(n) && n > 0)
+    .sort((a, b) => a - b);
+  if (clean.length) raceExclusions.set(timestamp, clean);
+  else raceExclusions.delete(timestamp);
+}
+
+// Re-apply remembered exclusions onto raceHistoryData and bring each race's
+// summary figures back in line with them.
+function applyRememberedExclusions() {
+  raceHistoryData.forEach(r => {
+    const remembered = raceExclusions.get(r.timestamp);
+    if (remembered) {
+      r.excludedLaps = [...remembered];
+      // The device returned totals computed at save time.  Recompute anyway so
+      // the figures provably match the exclusions we just restored, rather than
+      // trusting that they were saved in step.
+      recomputeRaceStats(r);
+    } else if (!Array.isArray(r.excludedLaps)) {
+      r.excludedLaps = [];
+    }
+  });
+}
+
+// Recompute a saved race's summary figures from its lapTimes (ms) and its
+// excludedLaps, in place.
+//
+// Mirrors the live-race maths in updateAnalysisView(): lap 0 is the first
+// crossing and never counts; excluded laps drop out; "3 consecutive" means
+// consecutive LAPS FLOWN, so an excluded lap breaks the run rather than
+// closing over it.
+function recomputeRaceStats(race) {
+  if (!race || !Array.isArray(race.lapTimes)) return;
+  const excluded = new Set(Array.isArray(race.excludedLaps) ? race.excludedLaps : []);
+
+  const eligible = [];
+  for (let i = 1; i < race.lapTimes.length; i++) {
+    if (excluded.has(i)) continue;
+    eligible.push({ ms: race.lapTimes[i], lapNo: i });
+  }
+
+  race.fastestLap = eligible.length
+    ? eligible.reduce((b, l) => (l.ms < b.ms ? l : b), eligible[0]).ms
+    : 0;
+
+  if (eligible.length) {
+    const sorted = eligible.map(l => l.ms).sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    race.medianLap = sorted.length % 2 === 0
+      ? Math.round((sorted[mid - 1] + sorted[mid]) / 2)
+      : sorted[mid];
+  } else {
+    race.medianLap = 0;
+  }
+
+  race.best3LapsTotal = eligible.length >= 3
+    ? eligible.map(l => l.ms).sort((a, b) => a - b).slice(0, 3).reduce((s, m) => s + m, 0)
+    : 0;
+}
+
+// Toggle one lap's exclusion on the race currently open in the detail view.
+function toggleDetailLapExcluded(lapNo) {
+  const race = currentDetailRace;
+  if (!race || !Number.isFinite(lapNo) || lapNo <= 0) return;
+
+  if (!Array.isArray(race.excludedLaps)) race.excludedLaps = [];
+  const at = race.excludedLaps.indexOf(lapNo);
+  if (at >= 0) race.excludedLaps.splice(at, 1);
+  else race.excludedLaps.push(lapNo);
+  race.excludedLaps.sort((a, b) => a - b);
+
+  // Record against the timestamp so this choice survives the next
+  // loadRaceHistory() — which a delete, a metadata edit or another import all
+  // trigger, and any of which would otherwise silently revert it.
+  rememberRaceExclusions(race.timestamp, race.excludedLaps);
+
+  recomputeRaceStats(race);
+
+  // Repaint the summary boxes so Fastest / Median / Best 3 move with the
+  // decision instead of waiting for the detail view to be reopened.
+  document.getElementById('detailFastest').textContent = formatMsDisplay(race.fastestLap);
+  document.getElementById('detailMedian').textContent  = formatMsDisplay(race.medianLap);
+  document.getElementById('detailBest3').textContent   = formatMsDisplay(race.best3LapsTotal);
+
+  raceHistoryDirty = true;
+  updateHistoryDownloadButton();
+
+  // Re-render whichever detail tab is open.
+  const tabs = document.querySelectorAll('#raceDetails .analysis-tab');
+  if (tabs[1]?.classList.contains('active')) renderDetailFastestRound();
+  else renderDetailHistory();
+}
+
+// Enable the Download button only once there is an edit the device doesn't have.
+function updateHistoryDownloadButton() {
+  const btn = document.getElementById('downloadRacesBtn');
+  if (!btn) return;
+  btn.disabled = !raceHistoryDirty;
+  btn.title = raceHistoryDirty
+    ? 'Download all races, including the laps you excluded'
+    : 'Exclude or include a lap to enable the download';
+}
 // Defaulting to `false` (RAM-only) means the "race history is not saved"
 // banner is visible on first paint for new users.  /races returns
 // `persistent: true` only when the firmware has an SD card or a dedicated
@@ -5024,19 +5314,20 @@ let currentDetailRace = null;
 function saveCurrentRace() {
   if (lapTimes.length === 0) return;
   
-  // Calculate stats (excluding Gate 1)
-  const validLaps = lapTimes.slice(1);
+  // Calculate stats over the ELIGIBLE laps (after the first crossing, minus any
+  // the user excluded) so the saved race agrees with what the Race tab showed.
+  const validLaps = eligibleLapsForStats().map(l => l.time);
   const fastest = validLaps.length > 0 ? Math.min(...validLaps) : 0;
   const sorted = [...validLaps].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
   const median = sorted.length > 0 ? (sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid]) : 0;
-  
+
   let best3Total = 0;
   if (validLaps.length >= 3) {
     const best3 = sorted.slice(0, 3);
     best3Total = best3.reduce((sum, t) => sum + t, 0);
   }
-  
+
   // Get current pilot and frequency info
   const bandValue = bandSelect.options[bandSelect.selectedIndex].value;
   const channelValue = parseInt(channelSelect.options[channelSelect.selectedIndex].value);
@@ -5044,6 +5335,9 @@ function saveCurrentRace() {
   const raceData = {
     timestamp: Math.floor(Date.now() / 1000),
     lapTimes: lapTimes.map(t => Math.round(t * 1000)), // Convert to milliseconds
+    // Carried through history and downloads so the exclusions survive a reload,
+    // a save-and-reopen, and an export/import round trip.
+    excludedLaps: Array.from(excludedLaps).sort((a, b) => a - b),
     fastestLap: Math.round(fastest * 1000),
     medianLap: Math.round(median * 1000),
     best3LapsTotal: Math.round(best3Total * 1000),
@@ -5139,7 +5433,16 @@ async function loadRaceHistory() {
     raceHistoryData = data.races || [];
     raceHistoryPersistent = (data.persistent !== false);
 
-    
+    // Restore exclusions the device cannot store, and normalise an empty array
+    // onto everything else so the first toggle isn't operating on undefined.
+    applyRememberedExclusions();
+
+    // Anything we just restored is, by definition, not in the device's copy —
+    // so there IS something worth downloading.  A load with nothing remembered
+    // leaves the button disabled as before.
+    raceHistoryDirty = raceHistoryData.some(r => (r.excludedLaps || []).length > 0);
+    updateHistoryDownloadButton();
+
     applyRaceHistoryModeUI();
     renderRaceHistory();
   } catch (error) {
@@ -5184,7 +5487,6 @@ function renderRaceHistory() {
       <div class="race-item" data-race-index="${index}" onclick="viewRaceDetails(${index})">
         <div class="race-item-buttons">
           ${raceHistoryPersistent ? `<button class="race-item-button" onclick="event.stopPropagation(); openEditModal(${index})">Edit</button>` : ''}
-          <button class="race-item-button" onclick="event.stopPropagation(); downloadSingleRace(${race.timestamp})">Download</button>
           ${raceHistoryPersistent ? `<button class="race-item-button" style="border-color: #e74c3c; color: #e74c3c;" onclick="event.stopPropagation(); deleteRace(${race.timestamp})">Delete</button>` : ''}
         </div>
         <div class="race-item-header">
@@ -5284,15 +5586,18 @@ function renderRaceTimeline(race) {
       // Gate 1
       events.push({
         type: 'gate',
-        label: 'Gate 1',
+        label: '1st Cross',
         time: cumulativeTime,
         percentage: percentage
       });
     } else {
-      // Regular laps
+      // Regular laps.  Mark the ones the pilot excluded from the summary —
+      // without this the detail view shows "Fastest: Lap 4" next to a visibly
+      // quicker Lap 1 with no explanation for the discrepancy.
+      const excluded = Array.isArray(race.excludedLaps) && race.excludedLaps.includes(index);
       events.push({
         type: 'lap',
-        label: `Lap ${index}`,
+        label: excluded ? `Lap ${index} (excluded)` : `Lap ${index}`,
         time: cumulativeTime,
         percentage: percentage
       });
@@ -5363,6 +5668,22 @@ let playbackTimeouts = [];
 let playbackStartTime = 0;
 let playbackTotalTime = 0;
 
+// Is playback allowed to speak right now?  Read at each callout rather than
+// captured when Play is pressed, so the checkbox works mid-playback.
+function isPlaybackVoiceEnabled() {
+  return document.getElementById('playbackVoice')?.checked !== false;
+}
+
+// Bound to the Voice Callouts checkbox.  Unchecking has to flush the announcer
+// as well as stop future laps — speech already handed over would otherwise keep
+// talking for several seconds after the user asked for silence.
+function onPlaybackVoiceToggled() {
+  if (isPlaybackVoiceEnabled()) return;
+  if (audioAnnouncer && typeof audioAnnouncer.clearQueue === 'function') {
+    try { audioAnnouncer.clearQueue(); } catch (e) { console.warn('clearQueue failed:', e); }
+  }
+}
+
 function playbackRace() {
   if (!currentDetailRace) return;
   
@@ -5397,7 +5718,13 @@ function playbackRace() {
   }, 50); // Update every 50ms for smooth animation
   
   let cumulativeTime = 0;
-  
+
+  // Announce the start, so a playback opens the way a race does instead of
+  // sitting silent until the first crossing.
+  if (isPlaybackVoiceEnabled()) {
+    queueSpeak('<p>Race Start</p>');
+  }
+
   // Broadcast race start
   if (enableWebhooks) {
     fetch('/timer/playbackStart', {
@@ -5436,8 +5763,32 @@ function playbackRace() {
       
       // Highlight the corresponding timeline flag
       highlightTimelineEvent(index);
-      
-      console.log(`Playback: ${index === 0 ? 'Gate 1' : 'Lap ' + index} - ${lapTime.toFixed(2)}s`);
+
+      // Voice — the same callout the live race made, via the same function.
+      // The 2-/3-lap cadence is reproduced exactly as addLap() computes it:
+      // announce on every 2nd / 3rd lap, summing the trailing window.
+      //
+      // Checked HERE, per lap, rather than captured at Play time: the toggle is
+      // meant to take effect the moment it is clicked, part-way through a
+      // playback included.  (Turning it off also flushes whatever is already
+      // queued — see the onchange handler on #playbackVoice.)
+      if (isPlaybackVoiceEnabled()) {
+        let last2 = "", last3 = "";
+        if (index >= 2 && index % 2 === 0) {
+          last2 = String(lapTimes[index] + lapTimes[index - 1]);
+        }
+        if (index >= 3 && index % 3 === 0) {
+          last3 = String(lapTimes[index] + lapTimes[index - 1] + lapTimes[index - 2]);
+        }
+        announceLapCallout(
+          currentDetailRace.pilotName || pilotNameInput.value || '',
+          index,
+          formatLapForSpeech(lapTimeMs),
+          last2, last3
+        );
+      }
+
+      console.log(`Playback: ${index === 0 ? '1st Cross' : 'Lap ' + index} - ${lapTime.toFixed(3)}s`);
     }, delay);
     
     playbackTimeouts.push(timeout);
@@ -5482,6 +5833,14 @@ function stopPlayback() {
     playbackInterval = null;
   }
   
+  // Silence any callouts already queued or mid-sentence.  Clearing the
+  // timeouts below only stops FUTURE laps from being announced — speech
+  // already handed to the announcer would otherwise keep talking over a
+  // playback the user has explicitly stopped.
+  if (audioAnnouncer && typeof audioAnnouncer.clearQueue === 'function') {
+    try { audioAnnouncer.clearQueue(); } catch (e) { console.warn('clearQueue failed:', e); }
+  }
+
   // Clear all scheduled timeouts
   playbackTimeouts.forEach(timeout => clearTimeout(timeout));
   playbackTimeouts = [];
@@ -5529,25 +5888,29 @@ function renderDetailHistory() {
   if (!currentDetailRace) return;
   
   const lapTimes = currentDetailRace.lapTimes.map(t => t / 1000);
-  const displayLaps = lapTimes.slice(-10);
-  const maxTime = Math.max(...displayLaps);
+  // Show every lap of the saved race, not just a recent window.
+  const displayLaps = lapTimes;
+  const maxTime = lapTimes.length ? Math.max(...displayLaps) : 0;
   
   // Get track distance if available
   const trackDistance = currentDetailRace.totalDistance || 0;
   const hasTrackData = trackDistance > 0 && currentDetailRace.lapTimes.length > 0;
   const perLapDistance = hasTrackData ? trackDistance / currentDetailRace.lapTimes.length : 0;
   
-  // Calculate total race time
+  // Calculate total race time.  Excluded laps still count here — excluding a
+  // lap removes it from the summary, it does not un-fly it.
   const totalTime = lapTimes.reduce((sum, t) => sum + t, 0);
-  
+  const excludedSet = new Set(
+    Array.isArray(currentDetailRace.excludedLaps) ? currentDetailRace.excludedLaps : []);
+
   let html = '<div class="analysis-bars">';
   displayLaps.forEach((time, index) => {
-    const actualIndex = lapTimes.length - displayLaps.length + index;
+    const actualIndex = index;
     let label;
         
     // First entry is Gate 1 (start), not a lap
     if (actualIndex === 0) {
-      label = 'Gate 1';
+      label = '1st Cross';
     } else {
       label = `Lap ${actualIndex}`;
     }
@@ -5558,13 +5921,18 @@ function renderDetailHistory() {
     if (hasTrackData && actualIndex > 0) {
       label = `${timeStr}\n${label} - ${perLapDistance.toFixed(0)}m`;
     } else if (hasTrackData && actualIndex === 0) {
-      label = `${timeStr}\nGate 1 (Start)`;
+      label = `${timeStr}\n1st Cross (Start)`;
     } else if (actualIndex === 0) {
-      label = 'Gate 1';
+      label = '1st Cross';
     }
 
     const displayTime = hasTrackData ? '' : timeStr; // Don't show time in bar if it's in label
-    html += createBarItemWithColor(label, time, maxTime, displayTime, index);
+    // Lap 0 gets no control — the first crossing is not a timed lap and is
+    // already outside every statistic.
+    html += createBarItemWithColor(label, time, maxTime, displayTime, index, {
+      excludeLapNo: actualIndex > 0 ? actualIndex : null,
+      excluded: excludedSet.has(actualIndex)
+    });
   });
   html += '</div>';
   html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total Race Time: ${formatMsDisplay(Math.round(totalTime * 1000))}</p>`;
@@ -5574,58 +5942,77 @@ function renderDetailHistory() {
 
 function renderDetailFastestRound() {
   if (!currentDetailRace) return;
-  
-  const lapTimes = currentDetailRace.lapTimes.map(t => t / 1000);
-  
-  if (lapTimes.length < 3) {
-    document.getElementById('detailContent').innerHTML = 
-      '<p class="no-data">Not enough laps for fastest round</p>';
+
+  const laps = currentDetailRace.lapTimes.map(t => t / 1000);
+  const excluded = new Set(
+    Array.isArray(currentDetailRace.excludedLaps) ? currentDetailRace.excludedLaps : []);
+
+  const best = findFastestRound(laps, excluded);
+  if (!best) {
+    document.getElementById('detailContent').innerHTML =
+      '<p class="no-data">Not enough consecutive laps for a fastest round</p>';
     return;
   }
-  
-  let bestTime = Infinity;
-  let bestStartIndex = 0;
-  
-  for (let i = 0; i <= lapTimes.length - 3; i++) {
-    const sum = lapTimes[i] + lapTimes[i+1] + lapTimes[i+2];
-    if (sum < bestTime) {
-      bestTime = sum;
-      bestStartIndex = i;
-    }
-  }
-  
-  const lap1 = lapTimes[bestStartIndex];
-  const lap2 = lapTimes[bestStartIndex + 1];
-  const lap3 = lapTimes[bestStartIndex + 2];
-  const maxTime = Math.max(lap1, lap2, lap3);
-  
-  let html = '<div class="analysis-bars">';
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 1}`, lap1, maxTime, formatMsDisplay(Math.round(lap1 * 1000)), 0);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 2}`, lap2, maxTime, formatMsDisplay(Math.round(lap2 * 1000)), 1);
-  html += createBarItemWithColor(`Lap ${bestStartIndex + 3}`, lap3, maxTime, formatMsDisplay(Math.round(lap3 * 1000)), 2);
-  html += '</div>';
-  html += `<p style="text-align: center; margin-top: 16px; font-weight: bold; color: var(--primary-color);">Total: ${formatMsDisplay(Math.round(bestTime * 1000))}</p>`;
-  
-  document.getElementById('detailContent').innerHTML = html;
+  document.getElementById('detailContent').innerHTML = _fastestRoundHtml(best);
 }
 
+// Download the race history AS THIS TAB HOLDS IT, not as the device holds it.
+//
+// This used to link straight to /api/races/download, which serves the
+// firmware's copy.  That copy has no concept of excluded laps — the firmware
+// was never told about them — so every exclusion made on this page was silently
+// dropped from the downloaded file.  Building the JSON client-side is what
+// makes "those choices persist when the download button is clicked" true.
+//
+// The shape matches what importRaces() expects, so a file downloaded here
+// re-imports cleanly, exclusions and all.
 function downloadRaces() {
+  if (!Array.isArray(raceHistoryData) || raceHistoryData.length === 0) {
+    alert('No races to download');
+    return;
+  }
+
+  const races = raceHistoryData.map(r => ({
+    timestamp:      r.timestamp || 0,
+    lapTimes:       Array.isArray(r.lapTimes) ? r.lapTimes : [],
+    excludedLaps:   Array.isArray(r.excludedLaps) ? [...r.excludedLaps].sort((a, b) => a - b) : [],
+    fastestLap:     r.fastestLap || 0,
+    medianLap:      r.medianLap || 0,
+    best3LapsTotal: r.best3LapsTotal || 0,
+    pilotName:      r.pilotName || '',
+    frequency:      r.frequency || 0,
+    band:           r.band || '',
+    channel:        r.channel || 0,
+    name:           r.name || '',
+    tag:            r.tag || '',
+    trackId:        r.trackId || 0,
+    trackName:      r.trackName || '',
+    totalDistance:  (typeof r.totalDistance === 'number') ? r.totalDistance : 0.0
+  }));
+
+  const blob = new Blob([JSON.stringify({ races }, null, 2)], { type: 'application/json' });
+  const url  = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  a.href = '/api/races/download';
-  a.download = 'races.json';   // browser-enforced
+  a.href = url;
+  // Same name as the file this history was imported from, so an edit-and-save
+  // round trip replaces the original instead of accumulating copies.  Falls
+  // back to a timestamped name when the history came from the device.
+  a.download = importedRacesFileName || `races-${Math.floor(Date.now() / 1000)}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+
+  // The file now matches this tab, so there is nothing outstanding to save.
+  raceHistoryDirty = false;
+  updateHistoryDownloadButton();
 }
 
-function downloadSingleRace(timestamp) {
-    const a = document.createElement('a');
-    a.href = '/races/downloadOne?timestamp=' + timestamp, '_blank';
-    a.download = 'races.json';   // browser-enforced
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-}
+// Per-race Download button removed 2026-09-15: it linked to the firmware's copy
+// of the race (/races/downloadOne), which has no excludedLaps, so it would have
+// handed back a file missing the exclusions shown on screen.  The Download Race
+// button in the history controls builds from this tab's data instead.
+// downloadSingleRace() deleted with it — no remaining callers.
 
 let editingRaceIndex = null;
 
@@ -5652,7 +6039,7 @@ function renderEditLapsList(lapTimes) {
   
   lapTimes.forEach((lapTime, index) => {
     const lapSeconds = (lapTime / 1000).toFixed(3);
-    const lapLabel = index === 0 ? 'Gate 1' : `Lap ${index}`;
+    const lapLabel = index === 0 ? '1st Cross' : `Lap ${index}`;
     html += `
       <div style="display: flex; align-items: center; gap: 8px; padding: 8px; background-color: var(--bg-secondary); border-radius: 4px;">
         <span style="min-width: 60px; font-weight: ${index === 0 ? 'bold' : 'normal'}; color: ${index === 0 ? 'var(--accent-color)' : 'var(--primary-color)'}">${lapLabel}</span>
@@ -5801,6 +6188,12 @@ async function importRaces(input) {
   const file = input?.files?.[0];
   if (!file) return;
 
+  // Remember the name so Download Race writes back over the same file rather
+  // than scattering races-<timestamp>.json copies beside it.  Editing
+  // exclusions and re-downloading is a round trip on ONE file, and the browser
+  // will offer to replace it by name.
+  importedRacesFileName = file.name || '';
+
   // Allow re-selecting the same file
   input.value = '';
 
@@ -5826,6 +6219,15 @@ async function importRaces(input) {
     alert('Race file format not recognized. Expected {"races":[...]} or an array.');
     return;
   }
+
+  // Capture the exclusions BEFORE uploading.  The upload round-trips through
+  // the device, which drops the field, so the file is the only place they
+  // exist — read them now or lose them.
+  racesArray.forEach(r => {
+    if (Array.isArray(r?.excludedLaps) && r.excludedLaps.length) {
+      rememberRaceExclusions(Number(r.timestamp), r.excludedLaps);
+    }
+  });
 
   // 1) Try bulk upload first (fast path)
   try {
@@ -5883,7 +6285,13 @@ async function importRaces(input) {
         trackId: r.trackId || 0,
         trackName: r.trackName || "",
         totalDistance: (typeof r.totalDistance === 'number') ? r.totalDistance : 0.0,
-        lapTimes: Array.isArray(r.lapTimes) ? r.lapTimes : []
+        lapTimes: Array.isArray(r.lapTimes) ? r.lapTimes : [],
+        // Preserve the summary exclusions through an import.  Absent in files
+        // written before the feature existed, which normalise to "none
+        // excluded" — the behaviour those files were saved with.
+        excludedLaps: Array.isArray(r.excludedLaps)
+          ? r.excludedLaps.map(n => parseInt(n, 10)).filter(n => Number.isFinite(n) && n > 0)
+          : []
       };
 
       const resp = await fetch('/races/save', {
@@ -7750,15 +8158,11 @@ function updateLapTimerDisplay() {
     : `Lap ${Math.max(0, lapNo)} / ${maxLaps}`;
 
   if (lapTimerStartMs > 0) {
-    const currentLapMs = Date.now() - lapTimerStartMs;
-    const minutes = Math.floor(currentLapMs / 60000);
-    const seconds = Math.floor((currentLapMs % 60000) / 1000);
-    const centiseconds = Math.floor((currentLapMs % 1000) / 10);
-
-    const m = minutes < 10 ? "0" + minutes : minutes;
-    const s = seconds < 10 ? "0" + seconds : seconds;
-    const ms = centiseconds < 10 ? "0" + centiseconds : centiseconds;
-    lapText += ` - ${m}:${s}:${ms}s`;
+    // Current-lap elapsed, in the same format and at the same precision as every
+    // other time on screen.  This was a fourth hand-rolled clock: fixed at
+    // hundredths regardless of the Lap Time Precision setting, and with no hours
+    // field.  See formatMsDisplay().
+    lapText += ` - ${formatMsDisplay(Date.now() - lapTimerStartMs)}`;
   }
 
   lapCounter.textContent = lapText;
@@ -8682,7 +9086,8 @@ async function mnRefreshNodes() {
 function formatMsSpeak(ms) {
   if (!ms || ms <= 0) return '0';
   const d   = lapDecimals();
-  const m   = Math.floor(ms / 60000);
+  const h   = Math.floor(ms / 3600000);
+  const m   = Math.floor((ms % 3600000) / 60000);
   const s   = Math.floor((ms % 60000) / 1000);
   // Sub-second remainder at the configured precision: tenths, hundredths or
   // thousandths.  Digits are spoken individually (space-separated) so that
@@ -8690,8 +9095,14 @@ function formatMsSpeak(ms) {
   // a different time.
   const sub = Math.floor((ms % 1000) / Math.pow(10, 3 - d));
   const dec = sub.toString().padStart(d, '0').split('').join(' ');
-  if (m > 0) return `${m} minute${m !== 1 ? 's' : ''} ${s} point ${dec}`;
-  return `${s} point ${dec}`;
+  const tail = `${s} point ${dec}`;
+  // Mirror formatMsDisplay's field structure: MM:SS:frac below an hour,
+  // HH:MM:SS:frac above.  Past an hour the minutes term is spoken even when
+  // it is zero ("1 hour 0 minutes 5 point 5 0"), because the display shows a
+  // minutes field there too and the two must describe the same thing.
+  if (h > 0) return `${h} hour${h !== 1 ? 's' : ''} ${m} minute${m !== 1 ? 's' : ''} ${tail}`;
+  if (m > 0) return `${m} minute${m !== 1 ? 's' : ''} ${tail}`;
+  return tail;
 }
 
 // Format milliseconds as M:SS.frac (e.g. 1:23.45) for the race view.
@@ -10303,12 +10714,11 @@ async function mnInitTab() {
   }
 }
 
+// Multi-node race timer.  Delegates so the master's clock, the client's clock,
+// the Race View clock and the lap table all read identically — MM:SS:frac, and
+// HH:MM:SS:frac past an hour, at the user's chosen precision.
 function _mnFormatRaceTimer(ms) {
-  const totalS = Math.floor(ms / 1000);
-  const m      = Math.floor(totalS / 60);
-  const s      = totalS % 60;
-  const cs     = Math.floor((ms % 1000) / 10);
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}:${String(cs).padStart(2, '0')}s`;
+  return formatMsDisplay(ms);
 }
 
 function _mnStartTimer(offsetMs = 0) {
@@ -10370,13 +10780,13 @@ function rvShowTabIfClient() {
   if (raceviewLink) raceviewLink.textContent = show ? 'Multi Race'  : 'Race View';
 }
 
+// Race View clock.  Delegates to the shared formatter — it previously used a
+// DOT before the fraction while every other clock used a colon, and had no
+// hours field, so the same instant could read two different ways on two
+// screens of the same app.
 function rvFormatTimer(ms) {
   if (!isFinite(ms) || ms < 0) ms = 0;
-  const m  = Math.floor(ms / 60000);
-  const s  = Math.floor((ms % 60000) / 1000);
-  const cs = Math.floor((ms % 1000) / 10);
-  // Always 2-digit minutes / seconds / centiseconds for a non-jittery clock.
-  return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(cs).padStart(2, '0')}`;
+  return formatMsDisplay(ms);
 }
 
 function rvUpdateTimerDisplay() {

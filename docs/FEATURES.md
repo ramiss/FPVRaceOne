@@ -1,4 +1,4 @@
-# FPVRaceOne Features Reference
+# FPVRaceOne Technical Features Reference
 
 In-depth technical documentation of all FPVRaceOne capabilities.
 
@@ -36,10 +36,10 @@ FPVRaceOne creates its own WiFi network — no router required.
 | Default password | `fpvraceone` |
 | IP address | `192.168.4.1` (Single / Client), `192.168.5.1` (Master) |
 | Band | 2.4 GHz |
-| Max clients | 9 simultaneous |
+| Max clients | 1 pilot per device (master also allows up to 7 units to connect) |
 | AP inactivity timeout | 60 s — a silent station drops within a minute so its slot frees up |
 
-No captive DNS — connected devices retain their cellular internet connection on most platforms (Samsung devices block this and force a choice).
+No captive DNS — connected devices should retain their cellular internet connection on most platforms (Samsung devices block this and forces one or the other).
 
 The USB-C connector on the device is used for **power and flashing only** — there is no user-facing USB control protocol in the current firmware.
 

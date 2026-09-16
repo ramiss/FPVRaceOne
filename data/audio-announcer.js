@@ -275,9 +275,20 @@ class AudioAnnouncer {
                 }
             }
             
-            // No SD card — skip Piper and pre-recorded files, use Web Speech API directly
+            // No SD card — skip Piper and pre-recorded files, use Web Speech API
+            // directly.  THIS IS THE SHIPPING PATH: sdAvailable is false on the
+            // C6 build and nothing ever sets it true, so every spoken lap on real
+            // hardware arrives here.
+            //
+            // _preprocessTimeForTts is not optional.  script.js deliberately hands
+            // us the RAW seconds string ("115.63") so the digit-clip path below can
+            // use it, which means a lap over a minute reaches Web Speech as a bare
+            // number and gets read as "one hundred fifteen point six three".  The
+            // >= 60 s split was implemented on the Piper branch above and inside
+            // the digit-clip helpers below — both unreachable here — so the one
+            // path that actually runs was the one missing it.
             if (!this.sdAvailable) {
-                await this.playWebSpeech(cleanText);
+                await this.playWebSpeech(this._preprocessTimeForTts(cleanText));
                 return;
             }
             // Check for different lap announcement formats
@@ -358,7 +369,9 @@ class AudioAnnouncer {
         if (lower === 'starting on the tone in less than five') return `${voiceDir}/starting_tone.mp3`;
         if (lower === 'race complete') return `${voiceDir}/race_complete.mp3`;
         if (lower === 'race stopped') return `${voiceDir}/race_stopped.mp3`;
-        if (lower.includes('gate 1')) return `${voiceDir}/gate_1.mp3`;
+        // "gate 1" is the pre-2026-09 wording, kept so an existing SD card with
+        // gate_1.mp3 still matches the renamed "first crossing" announcement.
+        if (lower.includes('first crossing') || lower.includes('gate 1')) return `${voiceDir}/gate_1.mp3`;
         
         // Test voice
         if (lower.startsWith('testing sound for pilot')) {
@@ -571,14 +584,48 @@ class AudioAnnouncer {
      * Below 60 s returns the raw number ("12.34"); at or above 60 s returns
      * a phrase the TTS engine reads naturally ("1 minute 15.42").
      */
+    _spokenDuration(wholeStr, fracStr) {
+        // NOTHING IS ROUNDED HERE, and nothing may be added that rounds.
+        //
+        // This is a lap timer: the callout must be exactly what the display
+        // shows.  The fractional part is carried through as TEXT — the caller's
+        // own digits — so it cannot be altered by binary-float representation,
+        // by toFixed()'s rounding, or by a scale-and-round trip through
+        // integers.  Only the whole-seconds part is arithmetic, and that is
+        // integer division into minutes, which is exact.
+        //
+        // The precision itself is already decided upstream by
+        // formatLapForSpeech(), which TRUNCATES to the user's Lap Time
+        // Precision setting.  A lap is never rounded up.
+        const totalSec = parseInt(wholeStr, 10) || 0;
+        const hours    = Math.floor(totalSec / 3600);
+        const minutes  = Math.floor((totalSec % 3600) / 60);
+        const secs     = totalSec % 60;
+        // Digits spoken individually: "045" must read "zero four five", not
+        // "forty-five", which is a different time.  Matches formatMsSpeak() in
+        // script.js, which produces the 2-lap and 3-lap combined callouts.
+        const tail = fracStr ? ` point ${fracStr.split('').join(' ')}` : '';
+        // Field structure mirrors formatMsDisplay(): MM:SS:frac below an hour,
+        // HH:MM:SS:frac above.  Past an hour the minutes term is spoken even at
+        // zero, because the display shows a minutes field there too.
+        if (hours > 0) {
+            return `${hours} ${hours === 1 ? 'hour' : 'hours'} ` +
+                   `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ${secs}${tail}`;
+        }
+        if (minutes === 0) return `${secs}${tail}`;
+        return `${minutes} ${minutes === 1 ? 'minute' : 'minutes'} ${secs}${tail}`;
+    }
+
+    /**
+     * Legacy float entry point, kept for the Piper whole-phrase paths.  Uses the
+     * number's OWN string form rather than toFixed(), so it does not round
+     * either — though a caller that has already parseFloat()ed the time has lost
+     * any trailing zeros before we see it.  Prefer _spokenDuration() with the
+     * original digits.
+     */
     _timeToTtsText(seconds) {
-        const totalCs = Math.round(seconds * 100);
-        if (totalCs < 6000) return String(seconds);
-        const minutes = Math.floor(totalCs / 6000);
-        const remCs   = totalCs - (minutes * 6000);
-        const word    = (minutes === 1) ? 'minute' : 'minutes';
-        if (remCs === 0) return `${minutes} ${word}`;
-        return `${minutes} ${word} ${(remCs / 100).toFixed(2)}`;
+        const [whole, frac = ''] = String(seconds).split('.');
+        return this._spokenDuration(whole, frac);
     }
 
     /**
@@ -592,11 +639,11 @@ class AudioAnnouncer {
      * because the regex requires a decimal point.
      */
     _preprocessTimeForTts(text) {
-        return text.replace(/(\d+\.\d+)/g, (match) => {
-            const f = parseFloat(match);
-            if (f >= 60) return this._timeToTtsText(f);
-            return match;
-        });
+        // Hand the matched digits straight to _spokenDuration — never parseFloat
+        // them first.  The string IS the precise value; converting to a float
+        // and back is where a rounding step would creep in.
+        return text.replace(/(\d+)\.(\d+)/g,
+            (_match, whole, frac) => this._spokenDuration(whole, frac));
     }
 
     async speakNumber(num) {
