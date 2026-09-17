@@ -1402,6 +1402,33 @@ table tr.fastest-lap td {
   font-size: 0.95em;
 }
 
+/* Exclude toggle on a multi-node pilot card lap row.  Cards are narrow, so the
+ * control is smaller here than the table/bar versions — same affordance, less
+ * width. */
+.mn-card-exclude-btn {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  min-width: 0;
+  padding: 1px 6px;
+  font-size: 0.7em;
+  letter-spacing: 0.02em;
+}
+
+/* An excluded lap keeps its row and its cumulative time — it was still flown —
+ * but drops out of the pilot's laps / total / average / fastest. */
+.mn-card-lap-excluded .mn-card-lap-num,
+.mn-card-lap-excluded .mn-card-lap-times {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.mn-card-lap-excluded .mn-card-exclude-btn {
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+  opacity: 1;
+  text-decoration: none;
+}
+
 /* Exclude toggle on a Race History bar row.  Shares .lap-exclude-btn styling
  * with the Race tab's table control so the same action looks the same on both
  * pages; only the placement differs. */

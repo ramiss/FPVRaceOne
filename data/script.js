@@ -854,20 +854,35 @@ function setupWiFiEvents() {
       const callsign = node ? (node.pilotName || ('Node ' + data.node)) : ('Node ' + data.node);
       // Refresh immediately so the new lap appears without waiting for the next poll
       mnRefreshNodes();
-      // Announce the lap using the existing announcer
-      if (typeof queueSpeak === 'function') {
-        if (data.lap === 0) {
-          queueSpeak(`<p>${callsign} first crossing</p>`);
-        } else {
-          const timeStr = formatMsSpeak(data.ms);
-          let text;
-          switch (lapFormat) {
-            case 'pilottime': text = `<p>${callsign} ${timeStr}</p>`; break;
-            case 'timeonly':  text = `<p>${timeStr}</p>`;             break;
-            default:          text = `<p>${callsign} Lap ${data.lap}, ${timeStr}</p>`;
+      // Announce through the SAME function a single-mode race uses.
+      //
+      // This used to be a private copy of the lap-format switch, which meant a
+      // client's lap ignored the announcer mode entirely: with "beep", "2 lap"
+      // or "3 lap" selected, the master still spoke a full single-lap callout
+      // for every client crossing while its own laps obeyed the setting.
+      //
+      // The 2-/3-lap sums come from this pilot's own lap history, so each pilot
+      // is on their own cadence — exactly as they would be racing solo.
+      if (typeof announceLapCallout === 'function') {
+        const byNum = new Map((node?.laps || []).map(l => [l.lapNumber, l.lapTimeMs || 0]));
+        byNum.set(data.lap, data.ms);   // the lap that just arrived may not be in node.laps yet
+        const sumBack = (count) => {
+          let total = 0;
+          for (let k = 0; k < count; k++) {
+            const v = byNum.get(data.lap - k);
+            if (v === undefined) return null;   // gap in history — don't announce a wrong sum
+            total += v;
           }
-          queueSpeak(text);
+          return total;
+        };
+        let last2 = '', last3 = '';
+        if (data.lap >= 2 && data.lap % 2 === 0) {
+          const s = sumBack(2); if (s !== null) last2 = String(s / 1000);
         }
+        if (data.lap >= 3 && data.lap % 3 === 0) {
+          const s = sumBack(3); if (s !== null) last3 = String(s / 1000);
+        }
+        announceLapCallout(callsign, data.lap, formatLapForSpeech(data.ms), last2, last3);
       }
     } catch (_) {}
   }, false);
@@ -5183,6 +5198,12 @@ let raceHistoryDirty = false;
 // rather than from a file, in which case a fresh timestamped name is used.
 let importedRacesFileName = '';
 
+// Name of the MultiRace file currently loaded for review, so Download Race
+// writes back over it instead of spawning a second copy.  Cleared whenever the
+// race tab leaves the imported view for live data (start / clear), because
+// what is on screen then is no longer that file.
+let importedMnRaceFileName = '';
+
 // race timestamp -> excludedLaps[].  THIS TAB IS THE AUTHORITY for exclusions.
 //
 // The firmware has no excludedLaps field, so anything read back from /races
@@ -9314,16 +9335,53 @@ function _mnMasterEntry() {
   const polledLaps = (polled && Array.isArray(polled.laps)) ? polled.laps : [];
   const laps = localLaps.length >= polledLaps.length ? localLaps : polledLaps;
 
-  // Gate 1 (lapNumber 0) is not a real lap — exclude from count and stats.
-  const realLaps  = laps.filter(l => l.lapNumber > 0);
-  const lapCount  = realLaps.length;
-  const allLapsMs = laps.reduce((s, l) => s + l.lapTimeMs, 0);       // for cumul display
-  const totalMs   = realLaps.reduce((s, l) => s + l.lapTimeMs, 0);   // for stats
-  const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
-  const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs)) : Infinity;
   return { nodeId: 0, pilotName: name, pilotColor: colorInt,
            online: true, running: false, quitEarly: false, isMaster: true,
-           laps, lapCount, allLapsMs, totalMs, avgMs, fastestMs };
+           laps, ..._mnLapStats(laps, 0) };
+}
+
+// nodeId -> Set of lap numbers the director has excluded for that pilot.
+//
+// Per pilot, because a discarded lap belongs to the pilot who flew it — pilot C
+// cutting the course says nothing about pilot A's lap 4.
+const mnExclusions = new Map();
+
+function mnExclusionsFor(nodeId) {
+  let s = mnExclusions.get(nodeId);
+  if (!s) { s = new Set(); mnExclusions.set(nodeId, s); }
+  return s;
+}
+
+// Per-pilot lap statistics, honouring that pilot's excluded laps.
+//
+// Replaces four near-identical copies of this arithmetic (master entry,
+// read-only pushed master, client slot, and importMnRace).  They already agreed
+// that lap 0 is the first crossing and never counts; they would NOT have agreed
+// about exclusions, because each would have had to be taught separately.
+//
+// allLapsMs deliberately keeps EVERY lap: the cumulative column is wall-clock
+// elapsed, and excluding a lap from the standings does not un-fly it.
+function _mnLapStats(laps, nodeId) {
+  const safe      = Array.isArray(laps) ? laps : [];
+  const ex        = mnExclusionsFor(nodeId);
+  const realLaps  = safe.filter(l => l.lapNumber > 0 && !ex.has(l.lapNumber));
+  const lapCount  = realLaps.length;
+  const allLapsMs = safe.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+  const totalMs   = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+  const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
+  const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
+  return { lapCount, allLapsMs, totalMs, avgMs, fastestMs };
+}
+
+// Toggle one lap for one pilot, then re-render so the standings move with it.
+function mnToggleLapExcluded(nodeId, lapNumber) {
+  if (!Number.isFinite(nodeId) || !Number.isFinite(lapNumber) || lapNumber <= 0) return;
+  const ex = mnExclusionsFor(nodeId);
+  if (ex.has(lapNumber)) ex.delete(lapNumber);
+  else ex.add(lapNumber);
+  // Re-render from whichever source the tab is currently showing: the frozen
+  // imported nodes when reviewing a file, live nodes otherwise.
+  mnRenderRaceTab(mnImportedNodes || mnCurrentNodes || []);
 }
 
 // Render the master race tab: RotorHazard-style summary table + per-pilot lap columns.
@@ -9386,29 +9444,17 @@ function mnRenderRaceTab(nodes, opts) {
           return { nodeId: 0, pilotName: 'Race Director', online: false, isMaster: true,
                    lapCount: 0, laps: [], allLapsMs: 0, totalMs: 0, avgMs: 0, fastestMs: Infinity };
         }
-        const laps      = Array.isArray(pushed.laps) ? pushed.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
-        const realLaps  = laps.filter(l => l.lapNumber > 0);
-        const lapCount  = realLaps.length;
-        const allLapsMs = laps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
-        const totalMs   = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
-        const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
-        const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
+        const laps = Array.isArray(pushed.laps) ? pushed.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
         return { ...pushed, pilotName: pushed.pilotName || 'Race Director',
-                 laps, lapCount, allLapsMs, totalMs, avgMs, fastestMs };
+                 laps, ..._mnLapStats(laps, 0) };
       })()
     : _mnMasterEntry();
   const clients = Array.from({ length: 7 }, (_, i) => {
     const nodeId = i + 1;
     const found  = nodes.find(n => n.nodeId === nodeId);
     if (found) {
-      const laps      = Array.isArray(found.laps) ? found.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
-      const realLaps  = laps.filter(l => l.lapNumber > 0);
-      const lapCount  = realLaps.length;
-      const allLapsMs = laps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
-      const totalMs   = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
-      const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
-      const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
-      return { ...found, laps, lapCount, allLapsMs, totalMs, avgMs, fastestMs };
+      const laps = Array.isArray(found.laps) ? found.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
+      return { ...found, laps, ..._mnLapStats(laps, nodeId) };
     }
     return { nodeId, pilotName: null, online: false, empty: true, lapCount: 0, laps: [], allLapsMs: 0, totalMs: 0, avgMs: 0, fastestMs: Infinity };
   });
@@ -9663,13 +9709,24 @@ function mnRenderRaceTab(nodes, opts) {
       for (let i = n.laps.length - 1; i >= 0; i--) {
         const l      = n.laps[i];
         const isGate = l.lapNumber === 0;
-        const isBest = !isGate && l.lapTimeMs === n.fastestMs;
-        html += `<div class="mn-card-lap${isBest ? ' mn-card-lap-best' : ''}">
-          <span class="mn-card-lap-num">${l.lapNumber}</span>
+        const isOff  = !isGate && mnExclusionsFor(n.nodeId).has(l.lapNumber);
+        // An excluded lap can't hold the ★ either — the marker and the Fastest
+        // column must always name the same lap.
+        const isBest = !isGate && !isOff && l.lapTimeMs === n.fastestMs;
+        const exBtn  = isGate ? '' :
+          `<button type="button" class="lap-exclude-btn mn-card-exclude-btn"
+                   aria-pressed="${isOff ? 'true' : 'false'}"
+                   title="${isOff
+                     ? `Lap ${l.lapNumber} is excluded from this pilot's standings — click to put it back`
+                     : `Exclude lap ${l.lapNumber} from this pilot's laps, total, average and fastest`}"
+                   onclick="event.stopPropagation(); mnToggleLapExcluded(${n.nodeId}, ${l.lapNumber})">${isOff ? 'Include' : 'Exclude'}</button>`;
+        html += `<div class="mn-card-lap${isBest ? ' mn-card-lap-best' : ''}${isOff ? ' mn-card-lap-excluded' : ''}">
+          <span class="mn-card-lap-num">${isGate ? '1st' : l.lapNumber}</span>
           <div class="mn-card-lap-times">
             <span class="mn-card-lap-time">${isGate ? '—' : formatMsRace(l.lapTimeMs)}${isBest ? ' ★' : ''}</span>
             <span class="mn-card-lap-cumul">${formatMsRace(cumMs)}</span>
           </div>
+          ${exBtn}
         </div>`;
         cumMs -= l.lapTimeMs;
       }
@@ -11196,6 +11253,10 @@ function _showThreeOptionModal(message, btn1Text, btn2Text, btn3Text) {
 
 async function mnStartRace() {
   mnImportedNodes = null;  // leave import view so live polling resumes
+  // Live data is no longer the imported file's, so Download Race must not
+  // write back over it, and the file's exclusions do not apply to a new race.
+  importedMnRaceFileName = '';
+  mnExclusions.clear();
   // Offer to clear existing lap data before starting
   const hasMasterLaps = lapTimes.length > 0;
   const hasClientLaps = (mnCurrentNodes || []).some(n => !n.isMaster && (n.laps || []).length > 0);
@@ -11340,6 +11401,10 @@ async function mnStopRace() {
 async function mnClearRace() {
   if (!confirm('Clear all race data for all pilots?')) return;
   mnImportedNodes = null;  // leave import view so live polling resumes
+  // Live data is no longer the imported file's, so Download Race must not
+  // write back over it, and the file's exclusions do not apply to a new race.
+  importedMnRaceFileName = '';
+  mnExclusions.clear();
   try {
     await fetch('/api/multinode/clearLaps', { method: 'POST' });
     mnRaceRunning = false;
@@ -11380,6 +11445,9 @@ function downloadMnRaceData() {
       pilotName:  master.pilotName || 'Master',
       pilotColor: master.pilotColor || 0x0080FF,
       laps:       master.laps.map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
+      // Optional and additive — a file written before this existed simply has
+      // no key and imports with nothing excluded, the old behaviour.
+      excludedLaps: [...mnExclusionsFor(0)].sort((a, b) => a - b),
     });
   }
 
@@ -11392,6 +11460,7 @@ function downloadMnRaceData() {
       pilotColor: n.pilotColor || 0x0080FF,
       quitEarly:  n.quitEarly || false,
       laps:       (n.laps || []).map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
+      excludedLaps: [...mnExclusionsFor(n.nodeId)].sort((a, b) => a - b),
     });
   });
 
@@ -11406,7 +11475,10 @@ function downloadMnRaceData() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = `MultiRace-${ts}.json`;
+  // Reuse the imported file's name, same as the single-mode Download Race, so
+  // reviewing a file and saving it back replaces it instead of spawning a
+  // second copy alongside.
+  a.download = importedMnRaceFileName || `MultiRace-${ts}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -11416,6 +11488,7 @@ function downloadMnRaceData() {
 async function importMnRace(input) {
   const file = input?.files?.[0];
   if (!file) return;
+  importedMnRaceFileName = file.name || '';
   input.value = '';
 
   let json;
@@ -11442,14 +11515,21 @@ async function importMnRace(input) {
   const masterNode = nodes.find(n => n.isMaster || n.nodeId === 0);
   window.lapTimes = masterNode ? (masterNode.laps || []).map(l => (l.lapTimeMs || 0) / 1000) : [];
 
+  // Restore each pilot's excluded laps BEFORE computing stats, so the
+  // leaderboard renders the same standings the file was saved with.  A file
+  // without the key clears any exclusions left over from a previous import.
+  mnExclusions.clear();
+  nodes.forEach(n => {
+    const set = mnExclusionsFor(n.nodeId);
+    (Array.isArray(n.excludedLaps) ? n.excludedLaps : []).forEach(v => {
+      const num = parseInt(v, 10);
+      if (Number.isFinite(num) && num > 0) set.add(num);
+    });
+  });
+
   // Build mnCurrentNodes with computed stats so the leaderboard renders correctly
   mnCurrentNodes = nodes.map(n => {
-    const laps     = n.laps || [];
-    const realLaps = laps.filter(l => l.lapNumber > 0);
-    const lapCount = realLaps.length;
-    const totalMs  = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
-    const avgMs    = lapCount > 0 ? Math.round(totalMs / lapCount) : 0;
-    const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
+    const laps = n.laps || [];
     return {
       ...n,
       online:                  true,
@@ -11457,7 +11537,7 @@ async function importMnRace(input) {
       independent:             false,
       skipEnabled:             n.skipEnabled || false,
       excludedFromCurrentRace: false,
-      lapCount, totalMs, avgMs, fastestMs,
+      ..._mnLapStats(laps, n.nodeId),
     };
   });
 
