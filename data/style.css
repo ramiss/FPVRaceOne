@@ -1402,32 +1402,83 @@ table tr.fastest-lap td {
   font-size: 0.95em;
 }
 
-/* Exclude toggle on a multi-node pilot card lap row.  Cards are narrow, so the
- * control is smaller here than the table/bar versions — same affordance, less
- * width. */
-.mn-card-exclude-btn {
-  flex: 0 0 auto;
-  margin-left: 6px;
-  min-width: 0;
-  padding: 1px 6px;
-  font-size: 0.7em;
-  letter-spacing: 0.02em;
+/* ── Multi-pilot Race History playback ─────────────────────────────────────
+ * Timeline carries one thin marker per lap, coloured by pilot, with overall
+ * time ticks underneath.  Markers are deliberately unlabelled: six pilots
+ * crossing every few seconds would overlap any per-marker timestamp into an
+ * unreadable smear, so the ticks carry the time frame instead. */
+.mn-history-timeline {
+  height: 64px;
 }
 
-/* An excluded lap keeps its row and its cumulative time — it was still flown —
- * but drops out of the pilot's laps / total / average / fastest. */
-.mn-card-lap-excluded .mn-card-lap-num,
-.mn-card-lap-excluded .mn-card-lap-times {
+.mn-tl-marker {
+  position: absolute;
+  top: 50%;
+  width: 2px;
+  height: 26px;
+  margin-left: -1px;            /* centre the 2px marker on its position */
+  transform: translateY(-50%);
+  border-radius: 1px;
+  opacity: 0.85;
+  pointer-events: auto;         /* keep the title tooltip reachable */
+}
+
+/* The first crossing is not a lap — shorter and fainter so the eye reads the
+ * laps as the rhythm and the hole shot as the start of it. */
+.mn-tl-marker-gate {
+  height: 12px;
   opacity: 0.45;
-  text-decoration: line-through;
 }
 
-.mn-card-lap-excluded .mn-card-exclude-btn {
-  color: var(--accent-color);
-  border-color: var(--accent-color);
-  opacity: 1;
-  text-decoration: none;
+.mn-tl-tick {
+  position: absolute;
+  top: 50%;
+  width: 1px;
+  height: 40px;
+  margin-left: -0.5px;
+  transform: translateY(-50%);
+  background-color: var(--border-color);
 }
+
+.mn-tl-tick > span {
+  position: absolute;
+  top: 42px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-size: 10px;
+  font-family: 'Courier New', monospace;
+  color: var(--secondary-color);
+  white-space: nowrap;
+}
+
+.mn-history-clock {
+  font-family: 'Courier New', monospace;
+  font-size: 15px;
+  font-variant-numeric: tabular-nums;
+  color: var(--secondary-color);
+  min-width: 96px;              /* reserve width so the row doesn't jitter */
+  text-align: center;
+}
+
+/* The lap the playhead has just reached for this pilot.  Stays marked until
+ * that pilot completes another, so each card shows where its pilot currently
+ * is — a momentary flash would leave nothing behind between laps. */
+#mn-history-race-container .mn-card-lap-now {
+  background-color: color-mix(in srgb, var(--primary-color) 22%, transparent);
+  box-shadow: inset 2px 0 0 var(--primary-color);
+}
+
+/* Fallback for engines without color-mix: still clearly marked, just flat. */
+@supports not (background-color: color-mix(in srgb, red 20%, transparent)) {
+  #mn-history-race-container .mn-card-lap-now {
+    background-color: var(--table-even-bg);
+  }
+}
+
+/* (No .mn-card-exclude-btn rules: per-lap exclude is a SINGLE-RACE feature.
+ * In multi-pilot the standings are shared, so discarding a lap is a
+ * result-changing decision that must not sit behind a per-card button on
+ * whichever screen happens to be open — including a pilot's own Race View.) */
 
 /* Exclude toggle on a Race History bar row.  Shares .lap-exclude-btn styling
  * with the Race tab's table control so the same action looks the same on both

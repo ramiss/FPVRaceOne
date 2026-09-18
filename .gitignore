@@ -101,3 +101,4 @@ tools/apply_frontend_defaults.html
 /.tmp.driveupload
 /tools/timing-harness/logs
 /CLAUDE.md
+/tools/test-data

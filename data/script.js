@@ -1223,6 +1223,11 @@ onload = async function (e) {
     });
   }
 
+  // Race-stop download prompt.  Unlike the banner toggle above, this one is
+  // NOT wiped on load: it is a deliberate "stop asking me" that should survive
+  // a reflash, and it can be re-enabled here at any time.
+  syncRaceDownloadPromptUI();
+
   // Fetch config using appropriate transport
   let configData;
   try {
@@ -3861,6 +3866,11 @@ function stopRaceDisplayOnly() {
   addLapButton.disabled    = true;
   stopLapTimerDisplay();
   updateRaceDataButtonsVisibility();
+
+  // The director stopped the heat, so the pilot never pressed Stop themselves —
+  // without this they'd get no offer to save their own laps at all, which is
+  // the case where losing them is most likely.
+  setTimeout(maybePromptRaceDownload, 900);
 }
 
 function saveLapFormat() {
@@ -4296,10 +4306,7 @@ function generateAudio() {
   }
 
   const pilotName = pilotNameInput.value;
-  queueSpeak(`<div>Testing sound for pilot ${pilotName}</div>`);
-  for (let i = 1; i <= 3; i++) {
-    queueSpeak('<div>' + i + '</div>')
-  }
+  queueSpeak(`<div>Testing announcer voice for pilot ${pilotName} 1 2 3 4</div>`);
 }
 
 function doSpeak(obj) {
@@ -4445,19 +4452,23 @@ async function startRace() {
     }
   }
 
-  // Offer to clear existing lap data before starting.
+  // Existing lap data is ALWAYS cleared before a new race — acknowledge or back
+  // out.  Same dialog and same rule as Start All in master mode, so the two
+  // start paths behave identically.
   //
-  // Yes / No / Cancel: the old confirm() offered only "clear and start" or
-  // "keep and start", with no way out once the dialog was up.  Cancel returns
-  // before anything is disabled and before /timer/prearm is fired below, so it
-  // genuinely backs out rather than starting a race you did not want.
+  // This was Yes / No / Cancel, where "No" started a new race on top of the
+  // previous one's laps.  That is not a race anyone wants: the lap numbering,
+  // the race clock and every summary statistic then describe two races at once,
+  // and the first crossing of the new race is recorded as an ordinary lap.
+  // Cancel still returns before anything is disabled and before /timer/prearm
+  // fires below, so backing out genuinely backs out.
   if (lapTimes.length > 0) {
-    const choice = await _showThreeOptionModal(
-      'You have existing lap data. Clear it before starting?',
-      'Yes', 'No', 'Cancel'
+    const choice = await _showTwoOptionModal(
+      'All race data will be cleared for the new race.',
+      'Acknowledge', 'Cancel'
     );
-    if (choice === 2) return;   // Cancel — no pre-arm, no state change
-    if (choice === 0) clearLaps();
+    if (choice !== 0) return;   // Cancel — no pre-arm, no state change
+    clearLaps();
   }
 
   updateLapCounter();
@@ -4596,6 +4607,11 @@ function stopRace() {
 
   // Show Download/Transfer buttons now that race is stopped
   updateRaceDataButtonsVisibility();
+
+  // Offer to save the race while the user is still looking at it.  Delayed a
+  // beat so "Race stopped" is spoken and the table settles before a modal
+  // covers it.  No-ops when the prompt is disabled or there are no laps.
+  setTimeout(maybePromptRaceDownload, 900);
 
   // Note: Race data remains visible after stopping.
   // Use "Transfer to Race History" button to save it, or "Clear Laps" to remove it.
@@ -5198,11 +5214,11 @@ let raceHistoryDirty = false;
 // rather than from a file, in which case a fresh timestamped name is used.
 let importedRacesFileName = '';
 
-// Name of the MultiRace file currently loaded for review, so Download Race
-// writes back over it instead of spawning a second copy.  Cleared whenever the
-// race tab leaves the imported view for live data (start / clear), because
-// what is on screen then is no longer that file.
-let importedMnRaceFileName = '';
+// (No importedMnRaceFileName equivalent for multi-pilot.  The single-mode
+// Download Race writes back over the file it imported, but in master mode the
+// import lands on the Race History tab while Download Race exports the LIVE
+// race from the Race tab — two different races.  Reusing the imported name
+// there would label live data with a past race's filename.)
 
 // race timestamp -> excludedLaps[].  THIS TAB IS THE AUTHORITY for exclusions.
 //
@@ -5403,10 +5419,16 @@ function applyRaceHistoryModeUI() {
 
   setLEDSettingsVisible(ledConnected);
 
+  // "Single Race" would now be wrong: a multi-pilot file is accepted here too,
+  // and importing it asks which pilot to pull out.
   setButtonLabel(
     importBtn,
-    raceHistoryPersistent ? 'Import Races' : 'Import Single Race (overrides current data)'
+    raceHistoryPersistent ? 'Import Races' : 'Import Race (overrides current data)'
   );
+  if (importBtn) {
+    importBtn.title = 'Import a single-pilot race file, or a multi-pilot race file — '
+                    + 'you will be asked which pilot to import.';
+  }
 
   if (clearBtn) {
     clearBtn.style.display = raceHistoryPersistent ? '' : 'none';
@@ -5829,10 +5851,184 @@ function playbackRace() {
     }
     
     console.log('Playback: Race complete');
-    stopPlayback();
+
+    // Let the race FINISH before declaring it over.
+    //
+    // The last lap's callout is queued at the instant the playhead reaches it
+    // and takes a couple of seconds to speak, so calling stopPlayback() here
+    // cut it off mid-sentence — the race simply stopped talking.  Wait for the
+    // announcer to actually drain, then call the race, then wait for THAT
+    // before resetting the buttons.  Same sequence as multi-pilot playback.
+    if (!isPlaybackVoiceEnabled()) { stopPlayback(); return; }
+
+    _afterSpeech(() => {
+      playbackTimeouts.push(setTimeout(() => {
+        // Matches what a live race says when the user presses Stop.
+        queueSpeak('<p>Race stopped</p>');
+        _afterSpeech(() => stopPlayback(), 8000, playbackTimeouts);
+      }, 700));
+    }, 30000, playbackTimeouts);
   }, totalTime * 1000);
-  
+
   playbackTimeouts.push(stopTimeout);
+}
+
+// ── "Download this race?" prompt on race stop ───────────────────────────────
+//
+// Race history is RAM-only on this hardware: a race that isn't downloaded is
+// gone at the next power cycle.  Stopping the race is the one moment the user
+// is certainly looking at the screen, so that is where to ask.
+//
+// Stored in localStorage rather than device config: it is a per-browser
+// preference about a browser-side dialog, and a pilot's phone shouldn't inherit
+// the director's choice (or vice versa) just because they share a timer.
+// Three behaviours, one stored value:
+//   'ask'    — show the dialog (default)
+//   'always' — download immediately, no dialog
+//   'never'  — do nothing
+//
+// One key rather than two booleans, because two booleans have a fourth state
+// ("never" AND "always") that has no meaning and would have to be resolved
+// somewhere.  The two Settings toggles and the two dialog checkboxes are views
+// onto this, which is why ticking one clears the other.
+const RACE_DL_MODE_KEY   = 'raceDownloadMode';
+const RACE_DL_PROMPT_KEY = 'raceDownloadPromptDisabled';   // pre-tri-state, migrated below
+
+function getRaceDownloadMode() {
+  try {
+    const m = localStorage.getItem(RACE_DL_MODE_KEY);
+    if (m === 'ask' || m === 'always' || m === 'never') return m;
+    // Migrate the original boolean so an existing "stop asking me" is honoured
+    // rather than silently reverting to asking.
+    if (localStorage.getItem(RACE_DL_PROMPT_KEY) === '1') return 'never';
+  } catch (_) { /* private mode / blocked storage */ }
+  return 'ask';
+}
+
+function setRaceDownloadMode(mode) {
+  const m = (mode === 'always' || mode === 'never') ? mode : 'ask';
+  try {
+    localStorage.setItem(RACE_DL_MODE_KEY, m);
+    localStorage.removeItem(RACE_DL_PROMPT_KEY);   // superseded
+  } catch (_) {}
+  syncRaceDownloadPromptUI();
+}
+
+// Dialog checkboxes.  Unticking either returns to 'ask'; ticking one clears the
+// other so the two can never both be on.
+function onRaceDownloadPromptChoiceToggled(which) {
+  const never  = document.getElementById('raceDownloadPromptNever');
+  const always = document.getElementById('raceDownloadPromptAlways');
+  if (which === 'never'  && never?.checked  && always) always.checked = false;
+  if (which === 'always' && always?.checked && never)  never.checked  = false;
+}
+
+// Keep both Settings toggles showing the stored mode — it can also be changed
+// from inside the dialog, so they must not drift.
+function syncRaceDownloadPromptUI() {
+  const mode      = getRaceDownloadMode();
+  const askBox    = document.getElementById('raceDownloadPromptToggle');
+  const askLbl    = document.getElementById('raceDownloadPromptLabel');
+  const alwaysBox = document.getElementById('raceDownloadAlwaysToggle');
+  const alwaysLbl = document.getElementById('raceDownloadAlwaysLabel');
+
+  if (askBox) askBox.checked = (mode === 'ask');
+  if (askLbl) askLbl.textContent = (mode === 'ask') ? 'On' : 'Off';
+  if (alwaysBox) alwaysBox.checked = (mode === 'always');
+  if (alwaysLbl) alwaysLbl.textContent = (mode === 'always') ? 'On' : 'Off';
+}
+
+// Which "download the race I just finished" action applies to this device.
+// Returns null when there is nothing worth offering.
+function _raceDownloadAction() {
+  if (mnNodeMode === 1) {
+    // Master: the whole multi-pilot heat.
+    const anyLaps = (mnCurrentNodes || []).some(n => (n.laps || []).length > 0)
+                 || (Array.isArray(lapTimes) && lapTimes.length > 0);
+    return anyLaps ? downloadMnRaceData : null;
+  }
+  if (mnNodeMode === 2 && typeof downloadClientRaceData === 'function') {
+    // TWO conditions, and both are needed.
+    //
+    // 1. THIS pilot must have actually raced.  The prompt appears the moment
+    //    the director stops the heat and asks "download this race?" — on a
+    //    pilot's own unit "this race" means the one they just flew.  Offering
+    //    it to someone who logged nothing, and handing them a file full of
+    //    other people's laps, is the inconsistency this guards against.
+    //    lapTimes is the local record of our own crossings, so it is the
+    //    honest test of "did I race".
+    const iRaced = Array.isArray(lapTimes) && lapTimes.length > 0;
+    // 2. There must be something for downloadClientRaceData to write — it
+    //    exports rvLastNodes, so gating only on (1) could offer a download
+    //    that then reports "No race data" if the director-state push hadn't
+    //    landed.
+    const hasExport = (rvLastNodes || []).some(n => (n.laps || []).length > 0);
+    return (iRaced && hasExport) ? downloadClientRaceData : null;
+  }
+  // Single / standalone.
+  return (Array.isArray(lapTimes) && lapTimes.length > 0) ? downloadCurrentRaceData : null;
+}
+
+let _raceDownloadPending = null;
+
+// Called from every stop path.  No-ops when the prompt is disabled or the race
+// has nothing in it, so callers don't have to check.
+function maybePromptRaceDownload() {
+  const mode = getRaceDownloadMode();
+  if (mode === 'never') return;
+
+  const action = _raceDownloadAction();
+  if (!action) return;                    // nothing worth saving in any mode
+
+  if (mode === 'always') {
+    // Straight to the browser's save dialog, no questions.
+    try { action(); } catch (e) { console.error('Race download failed:', e); }
+    return;
+  }
+
+  _raceDownloadPending = action;
+
+  const modal  = document.getElementById('raceDownloadPromptModal');
+  const never  = document.getElementById('raceDownloadPromptNever');
+  const always = document.getElementById('raceDownloadPromptAlways');
+  if (!modal) { return; }
+  // Always open unticked: these set a lasting preference, and a pre-ticked box
+  // is one distracted click away from silently changing behaviour for good.
+  if (never)  never.checked  = false;
+  if (always) always.checked = false;
+
+  const detail = document.getElementById('raceDownloadPromptDetail');
+  if (detail) {
+    detail.textContent = (mnNodeMode === 1)
+      ? 'Saves every pilot\'s laps as a MultiRace file. Race history is kept in memory only — it is cleared when the timer loses power.'
+      : 'Race history is kept in memory only — it is cleared when the timer loses power.';
+  }
+  modal.style.display = 'flex';
+}
+
+function closeRaceDownloadPrompt(doDownload) {
+  const modal  = document.getElementById('raceDownloadPromptModal');
+  const never  = document.getElementById('raceDownloadPromptNever');
+  const always = document.getElementById('raceDownloadPromptAlways');
+
+  // Honour the checkboxes whichever button was used — someone who downloads and
+  // ticks "don't ask" means "I'll do this myself from now on", and someone who
+  // ticks "always" has stated their preference regardless of this one race.
+  if (always && always.checked)     setRaceDownloadMode('always');
+  else if (never && never.checked)  setRaceDownloadMode('never');
+
+  if (modal) modal.style.display = 'none';
+
+  // "Always download" also downloads THIS race — ticking it and pressing
+  // "Not now" would otherwise lose the race you were being asked about.
+  if (always && always.checked) doDownload = true;
+
+  const action = _raceDownloadPending;
+  _raceDownloadPending = null;
+  if (doDownload && typeof action === 'function') {
+    // Let the dialog paint away before the browser's save dialog appears.
+    setTimeout(() => { try { action(); } catch (e) { console.error('Race download failed:', e); } }, 60);
+  }
 }
 
 function stopPlayback() {
@@ -5862,8 +6058,10 @@ function stopPlayback() {
     try { audioAnnouncer.clearQueue(); } catch (e) { console.warn('clearQueue failed:', e); }
   }
 
-  // Clear all scheduled timeouts
-  playbackTimeouts.forEach(timeout => clearTimeout(timeout));
+  // Clear all scheduled timeouts.  The list also holds {__interval} wrappers
+  // from _afterSpeech's poller — clearing one with clearTimeout would leave it
+  // running and fire the finish sequence after the user pressed Stop.
+  _clearPlaybackHandles(playbackTimeouts);
   playbackTimeouts = [];
   
   // Remove timeline highlights
@@ -6205,6 +6403,109 @@ function saveRaceEdit() {
   });
 }
 
+// Convert one pilot out of a MultiRace file into the single-race shape this
+// tab stores and renders.
+//
+// The two formats disagree about laps: MultiRace carries {lapNumber, lapTimeMs}
+// objects, a single race carries a bare array of milliseconds indexed by lap
+// number.  Indexing by lapNumber rather than pushing in order matters — a file
+// with a gap (a dropped lap in a sync) would otherwise shift every later lap
+// down one and silently renumber the race.
+//
+// Band / channel / frequency are not in a MultiRace node, so they come back
+// zeroed.  That is honest: this unit has no way to know what the pilot was
+// flying on, and inventing its OWN current channel would attach a wrong fact
+// to someone else's race.
+function _mnNodeToSingleRace(node, timestamp) {
+  const byNum = [];
+  (node.laps || []).forEach(l => {
+    const n = parseInt(l.lapNumber, 10);
+    if (Number.isFinite(n) && n >= 0) byNum[n] = l.lapTimeMs || 0;
+  });
+  const lapTimes = [];
+  for (let i = 0; i < byNum.length; i++) lapTimes.push(byNum[i] || 0);
+
+  const race = {
+    timestamp:     Number.isFinite(timestamp) ? timestamp : Math.floor(Date.now() / 1000),
+    lapTimes,
+    excludedLaps:  [],
+    pilotName:     node.pilotName || '',
+    pilotColor:    Number.isFinite(node.pilotColor) ? node.pilotColor : 0x0080FF,
+    frequency:     0,
+    band:          '',
+    channel:       0,
+    name:          '',
+    tag:           node.quitEarly ? 'DNF' : '',
+    trackId:       0,
+    trackName:     '',
+    totalDistance: 0,
+  };
+  // Derive fastest / median / best-3 rather than trusting anything in the file:
+  // MultiRace stores no summary fields at all.
+  recomputeRaceStats(race);
+  return race;
+}
+
+// Ask which pilot to pull out of a MultiRace file.  Resolves with the chosen
+// node, or null if the user backed out.
+function pickPilotFromMultiRace(json) {
+  return new Promise(resolve => {
+    const nodes = (json.nodes || []).slice().sort((a, b) => (a.nodeId || 0) - (b.nodeId || 0));
+
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#1e1e1e);color:var(--text-color,#eee);padding:22px 24px;border-radius:12px;max-width:440px;width:90%;box-shadow:0 6px 28px rgba(0,0,0,0.6);max-height:85vh;display:flex;flex-direction:column;';
+
+    const when = Number.isFinite(json.timestamp)
+      ? new Date(json.timestamp * 1000).toLocaleString() : '';
+    box.innerHTML =
+      `<h3 style="margin:0 0 4px;">Import one pilot</h3>` +
+      `<p style="margin:0 0 14px;font-size:13px;color:var(--secondary-color);">` +
+      `This is a multi-pilot race file${when ? ' from ' + when : ''}. ` +
+      `Race History shows one pilot at a time — choose whose laps to import.</p>`;
+
+    const list = document.createElement('div');
+    list.style.cssText = 'overflow-y:auto;flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:6px;';
+
+    const done = (v) => { if (overlay.parentNode) document.body.removeChild(overlay); resolve(v); };
+
+    nodes.forEach(n => {
+      const laps  = (n.laps || []).filter(l => l.lapNumber > 0);
+      const total = laps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
+      const best  = laps.length ? Math.min(...laps.map(l => l.lapTimeMs || Infinity)) : 0;
+
+      const btn = document.createElement('button');
+      btn.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:10px;width:100%;text-align:left;padding:10px 12px;background:var(--bg-secondary,#262626)!important;color:var(--text-color,#eee)!important;border:1px solid var(--border-color,rgba(128,128,128,0.3));border-radius:7px;cursor:pointer;font-size:13px;';
+      btn.innerHTML =
+        `<span><strong>${n.pilotName || ('Node ' + _slotLetter(n.nodeId))}</strong>` +
+        `${n.isMaster ? ' <span style="opacity:.65;">(host)</span>' : ''}` +
+        `${n.quitEarly ? ' <span style="opacity:.65;">DNF</span>' : ''}</span>` +
+        `<span style="font-family:\'Courier New\',monospace;opacity:.8;white-space:nowrap;">` +
+        `${laps.length} lap${laps.length === 1 ? '' : 's'}` +
+        `${laps.length ? ' · best ' + formatMsRace(best) : ''}` +
+        `${laps.length ? ' · ' + formatMsDisplay(total) : ''}</span>`;
+      // A pilot with no laps is still listed — seeing them greyed out answers
+      // "is my name missing from this file?" without a second guess.
+      if (!laps.length) { btn.disabled = true; btn.style.opacity = '0.45'; btn.style.cursor = 'default'; }
+      else btn.onclick = () => done(n);
+      list.appendChild(btn);
+    });
+
+    box.appendChild(list);
+
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'margin-top:14px;padding:9px 16px;background:#555;color:#eee;border:none;border-radius:7px;cursor:pointer;font-size:0.9rem;flex-shrink:0;';
+    cancel.onclick = () => done(null);
+    box.appendChild(cancel);
+
+    overlay.onclick = (e) => { if (e.target === overlay) done(null); };
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  });
+}
+
 async function importRaces(input) {
   const file = input?.files?.[0];
   if (!file) return;
@@ -6228,14 +6529,27 @@ async function importRaces(input) {
     return;
   }
 
-  // Reject multi-pilot race files
+  // Normalize expected shape: { races:[...] } or [...] (array)
+  let racesArray = Array.isArray(json) ? json : (Array.isArray(json?.races) ? json.races : null);
+
+  // A multi-pilot file used to be rejected outright here.  It is now accepted
+  // by extracting ONE pilot from it, because the common case is a pilot who
+  // raced under a director, was handed the heat's MultiRace file, and wants
+  // their own laps on their own unit.  Only the master can view the heat as a
+  // whole; this tab shows a single pilot's race, so we have to ask which.
   if (json?.type === 'MultiRace') {
-    alert('This is a multi-pilot race file. Import a single pilot race here or use the Import Race button in master mode.');
-    return;
+    if (!Array.isArray(json.nodes) || json.nodes.length === 0) {
+      alert('This multi-pilot race file has no pilots in it.');
+      return;
+    }
+    const picked = await pickPilotFromMultiRace(json);
+    if (!picked) return;                       // cancelled — nothing imported
+    racesArray = [_mnNodeToSingleRace(picked, json.timestamp)];
+    // The name comes from the file, not from this unit's pilot setting: it is
+    // whoever flew those laps, which may not be whoever owns this timer.
+    importedRacesFileName = '';                // a converted race is not that file
   }
 
-  // Normalize expected shape: { races:[...] } or [...] (array)
-  const racesArray = Array.isArray(json) ? json : (Array.isArray(json?.races) ? json.races : null);
   if (!racesArray) {
     alert('Race file format not recognized. Expected {"races":[...]} or an array.');
     return;
@@ -8690,7 +9004,13 @@ let mnCurrentNodes       = [];     // latest node list from multiNodeState SSE /
 let mnPollEverSucceeded  = false;  // false until the first successful node poll
 let mnPollFailStreak     = 0;      // consecutive failed polls; reset on success
 const MN_POLL_STALE_AFTER = 3;     // ~6 s at the 2 s poll interval
-let mnImportedNodes      = null;   // non-null while viewing an imported race; blocks polling from overwriting
+// (mnImportedNodes removed 2026-09-18.  It was a freeze flag that stopped live
+// polling overwriting an imported race, back when importing took over the live
+// Race tab.  Imported races now render on the Race History tab via
+// mnRenderHistoryRace() with skipMnState, so the two never share state and
+// there is nothing left to freeze — one guarded call site was already missed,
+// which is how a client's laps vanished after an import.)
+let mnHistoryNodes       = null;   // the multi-pilot race currently open on the Race History tab, or null
 let mnRaceTimerIntervalId = null;
 let _pageInitDone        = false;  // true once DOMContentLoaded IIFE completes successfully
 let mnRaceStartMs         = 0;
@@ -9081,7 +9401,9 @@ async function mnRefreshNodes() {
                                  (data.race || {}).raceId);
       ok = true;
       mnRenderNodes(nodes);
-      if (mnImportedNodes === null) mnRenderRaceTab(nodes);
+      // No import guard needed any more: an imported race renders on the Race
+      // History tab with skipMnState, so it shares no state with this path.
+      mnRenderRaceTab(nodes);
     }
   } catch (_) {}
 
@@ -9092,7 +9414,7 @@ async function mnRefreshNodes() {
     mnPollEverSucceeded = true;
     mnPollFailStreak    = 0;
   } else if (++mnPollFailStreak === MN_POLL_STALE_AFTER
-             && mnImportedNodes === null && Array.isArray(mnCurrentNodes)) {
+             && Array.isArray(mnCurrentNodes)) {
     // Re-render once, on the transition, so the banner appears.  Only on the
     // transition: mnRenderRaceTab skips identical HTML, so repeating this every
     // 2 s would be harmless but pointless — and the banner is deliberately
@@ -9251,7 +9573,9 @@ function updateHistoryTabMode() {
   const raceDetails   = document.getElementById('raceDetails');
 
   if (mnNodeMode === 1) {
-    if (navLink)       navLink.textContent  = 'Import Race';
+    // Same tab name as single mode — it is the same idea: past races live here,
+    // the Race tab is the live one.
+    if (navLink)       navLink.textContent  = 'Race History';
     if (masterSection) masterSection.style.display = '';
     if (singleSection) singleSection.style.display = 'none';
     if (historyList)   historyList.style.display   = 'none';
@@ -9337,51 +9661,34 @@ function _mnMasterEntry() {
 
   return { nodeId: 0, pilotName: name, pilotColor: colorInt,
            online: true, running: false, quitEarly: false, isMaster: true,
-           laps, ..._mnLapStats(laps, 0) };
+           laps, ..._mnLapStats(laps) };
 }
 
-// nodeId -> Set of lap numbers the director has excluded for that pilot.
-//
-// Per pilot, because a discarded lap belongs to the pilot who flew it — pilot C
-// cutting the course says nothing about pilot A's lap 4.
-const mnExclusions = new Map();
-
-function mnExclusionsFor(nodeId) {
-  let s = mnExclusions.get(nodeId);
-  if (!s) { s = new Set(); mnExclusions.set(nodeId, s); }
-  return s;
-}
-
-// Per-pilot lap statistics, honouring that pilot's excluded laps.
+// Per-pilot lap statistics.
 //
 // Replaces four near-identical copies of this arithmetic (master entry,
-// read-only pushed master, client slot, and importMnRace).  They already agreed
-// that lap 0 is the first crossing and never counts; they would NOT have agreed
-// about exclusions, because each would have had to be taught separately.
+// read-only pushed master, client slot, and importMnRace).
 //
-// allLapsMs deliberately keeps EVERY lap: the cumulative column is wall-clock
-// elapsed, and excluding a lap from the standings does not un-fly it.
-function _mnLapStats(laps, nodeId) {
+// Lap 0 is the first crossing — the hole shot — and never counts toward laps,
+// total, average or fastest.  allLapsMs deliberately keeps EVERY lap, including
+// lap 0, because the cumulative column is wall-clock elapsed since the start.
+//
+// NOTE: there is no per-lap exclude here, by design.  Excluding a lap from the
+// summary is a SINGLE-RACE feature only.  In multi-pilot mode the standings are
+// shared — every pilot and the director see them — so a lap being discarded is
+// a result-changing decision that does not belong behind a per-card button on
+// whichever screen happens to be open.  The client Race View renders from this
+// same function, which is how a pilot's own phone would have been able to
+// rewrite the director's leaderboard.
+function _mnLapStats(laps) {
   const safe      = Array.isArray(laps) ? laps : [];
-  const ex        = mnExclusionsFor(nodeId);
-  const realLaps  = safe.filter(l => l.lapNumber > 0 && !ex.has(l.lapNumber));
+  const realLaps  = safe.filter(l => l.lapNumber > 0);
   const lapCount  = realLaps.length;
   const allLapsMs = safe.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
   const totalMs   = realLaps.reduce((s, l) => s + (l.lapTimeMs || 0), 0);
   const avgMs     = lapCount > 0 ? totalMs / lapCount : 0;
   const fastestMs = lapCount > 0 ? Math.min(...realLaps.map(l => l.lapTimeMs || Infinity)) : Infinity;
   return { lapCount, allLapsMs, totalMs, avgMs, fastestMs };
-}
-
-// Toggle one lap for one pilot, then re-render so the standings move with it.
-function mnToggleLapExcluded(nodeId, lapNumber) {
-  if (!Number.isFinite(nodeId) || !Number.isFinite(lapNumber) || lapNumber <= 0) return;
-  const ex = mnExclusionsFor(nodeId);
-  if (ex.has(lapNumber)) ex.delete(lapNumber);
-  else ex.add(lapNumber);
-  // Re-render from whichever source the tab is currently showing: the frozen
-  // imported nodes when reviewing a file, live nodes otherwise.
-  mnRenderRaceTab(mnImportedNodes || mnCurrentNodes || []);
 }
 
 // Render the master race tab: RotorHazard-style summary table + per-pilot lap columns.
@@ -9404,6 +9711,9 @@ function mnRenderRaceTab(nodes, opts) {
   opts = opts || {};
   const containerId = opts.containerId || 'mn-race-container';
   const readOnly    = !!opts.readOnly;
+  // { nodeId: lapNumber } — marks each pilot's current lap during Race History
+  // playback.  Absent everywhere else.
+  const highlightLaps = opts.highlightLaps || null;
   // raceRunning is the master's race state.  On the master UI this is the local
   // mnRaceRunning flag (set on Start All / Stop All).  On the client Race View
   // we don't have a local race timer, so the caller passes the master's state
@@ -9446,7 +9756,7 @@ function mnRenderRaceTab(nodes, opts) {
         }
         const laps = Array.isArray(pushed.laps) ? pushed.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
         return { ...pushed, pilotName: pushed.pilotName || 'Race Director',
-                 laps, ..._mnLapStats(laps, 0) };
+                 laps, ..._mnLapStats(laps) };
       })()
     : _mnMasterEntry();
   const clients = Array.from({ length: 7 }, (_, i) => {
@@ -9454,7 +9764,7 @@ function mnRenderRaceTab(nodes, opts) {
     const found  = nodes.find(n => n.nodeId === nodeId);
     if (found) {
       const laps = Array.isArray(found.laps) ? found.laps.slice().sort((a, b) => a.lapNumber - b.lapNumber) : [];
-      return { ...found, laps, ..._mnLapStats(laps, nodeId) };
+      return { ...found, laps, ..._mnLapStats(laps) };
     }
     return { nodeId, pilotName: null, online: false, empty: true, lapCount: 0, laps: [], allLapsMs: 0, totalMs: 0, avgMs: 0, fastestMs: Infinity };
   });
@@ -9709,24 +10019,18 @@ function mnRenderRaceTab(nodes, opts) {
       for (let i = n.laps.length - 1; i >= 0; i--) {
         const l      = n.laps[i];
         const isGate = l.lapNumber === 0;
-        const isOff  = !isGate && mnExclusionsFor(n.nodeId).has(l.lapNumber);
-        // An excluded lap can't hold the ★ either — the marker and the Fastest
-        // column must always name the same lap.
-        const isBest = !isGate && !isOff && l.lapTimeMs === n.fastestMs;
-        const exBtn  = isGate ? '' :
-          `<button type="button" class="lap-exclude-btn mn-card-exclude-btn"
-                   aria-pressed="${isOff ? 'true' : 'false'}"
-                   title="${isOff
-                     ? `Lap ${l.lapNumber} is excluded from this pilot's standings — click to put it back`
-                     : `Exclude lap ${l.lapNumber} from this pilot's laps, total, average and fastest`}"
-                   onclick="event.stopPropagation(); mnToggleLapExcluded(${n.nodeId}, ${l.lapNumber})">${isOff ? 'Include' : 'Exclude'}</button>`;
-        html += `<div class="mn-card-lap${isBest ? ' mn-card-lap-best' : ''}${isOff ? ' mn-card-lap-excluded' : ''}">
+        const isBest = !isGate && l.lapTimeMs === n.fastestMs;
+        // During Race History playback, the lap the playhead has just reached
+        // for this pilot.  Stays marked until that pilot completes another, so
+        // each card shows where that pilot currently is rather than flashing
+        // and leaving nothing behind.
+        const isNow  = highlightLaps && highlightLaps[n.nodeId] === l.lapNumber;
+        html += `<div class="mn-card-lap${isBest ? ' mn-card-lap-best' : ''}${isNow ? ' mn-card-lap-now' : ''}">
           <span class="mn-card-lap-num">${isGate ? '1st' : l.lapNumber}</span>
           <div class="mn-card-lap-times">
             <span class="mn-card-lap-time">${isGate ? '—' : formatMsRace(l.lapTimeMs)}${isBest ? ' ★' : ''}</span>
             <span class="mn-card-lap-cumul">${formatMsRace(cumMs)}</span>
           </div>
-          ${exBtn}
         </div>`;
         cumMs -= l.lapTimeMs;
       }
@@ -9739,8 +10043,24 @@ function mnRenderRaceTab(nodes, opts) {
   // return identical data; without this guard each one nukes hover state and
   // can drop an in-flight click on the edit-pilot button.
   if (window.__mnLastRaceTabHtml[containerId] !== html) {
+    // Preserve each card's lap-list scroll position across the swap.
+    //
+    // The dedupe above covers the common case (a 2 s poll returning identical
+    // data), but Race History playback changes the HTML on EVERY lap event, so
+    // without this each card snaps back to the top a few times a second and the
+    // list is unreadable while it plays.
+    const scrolls = [];
+    container.querySelectorAll('.mn-pilot-card-laps').forEach((el, i) => {
+      if (el.scrollTop) scrolls.push([i, el.scrollTop]);
+    });
+
     container.innerHTML = html;
     window.__mnLastRaceTabHtml[containerId] = html;
+
+    if (scrolls.length) {
+      const after = container.querySelectorAll('.mn-pilot-card-laps');
+      scrolls.forEach(([i, top]) => { if (after[i]) after[i].scrollTop = top; });
+    }
   }
   if (!readOnly) mnUpdateRaceDataButtons();
 }
@@ -11230,6 +11550,36 @@ async function importClientRace(input) {
   alert(`Race imported: ${json.nodes.length} pilot${json.nodes.length !== 1 ? 's' : ''}.`);
 }
 
+// Two-button variant of _showThreeOptionModal.  Returns 0 for the first button
+// (the confirming one) or 1 for the second.  Dismissing by clicking the
+// backdrop also returns 1, so a stray click can never start a race.
+function _showTwoOptionModal(message, confirmText, cancelText) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    const box = document.createElement('div');
+    box.style.cssText = 'background:var(--card-bg,#1e1e1e);color:var(--text-color,#eee);padding:24px 28px;border-radius:12px;max-width:400px;text-align:center;box-shadow:0 6px 28px rgba(0,0,0,0.6);';
+    box.innerHTML = `<p style="margin:0 0 20px;font-size:0.95rem;line-height:1.5;">${message}</p>`;
+
+    const done = (i) => { if (overlay.parentNode) document.body.removeChild(overlay); resolve(i); };
+
+    // Cancel first in the DOM so it sits on the left, matching the rest of the
+    // app's dialogs (dismiss left, commit right).
+    [[cancelText, 'background:#555;color:#eee;', 1],
+     [confirmText, 'background:#4caf50;color:#fff;', 0]].forEach(([text, style, code]) => {
+      const btn = document.createElement('button');
+      btn.textContent = text;
+      btn.style.cssText = `${style}margin:5px;padding:9px 16px;border:none;border-radius:7px;cursor:pointer;font-size:0.9rem;`;
+      btn.onclick = () => done(code);
+      box.appendChild(btn);
+    });
+
+    overlay.onclick = (e) => { if (e.target === overlay) done(1); };
+    overlay.appendChild(box);
+    document.body.appendChild(overlay);
+  });
+}
+
 // Shows a modal with three labelled buttons. Returns 0, 1, or 2.
 function _showThreeOptionModal(message, btn1Text, btn2Text, btn3Text) {
   return new Promise(resolve => {
@@ -11252,38 +11602,30 @@ function _showThreeOptionModal(message, btn1Text, btn2Text, btn3Text) {
 }
 
 async function mnStartRace() {
-  mnImportedNodes = null;  // leave import view so live polling resumes
-  // Live data is no longer the imported file's, so Download Race must not
-  // write back over it, and the file's exclusions do not apply to a new race.
-  importedMnRaceFileName = '';
-  mnExclusions.clear();
-  // Offer to clear existing lap data before starting
+  // Existing lap data is ALWAYS cleared before a new race — acknowledge or back
+  // out, there is no third option.
+  //
+  // This used to be Yes / No / Cancel, with a note explaining that "No" kept
+  // only the HOST's laps because every client is wiped at pre-arm regardless:
+  // /timer/masterArm calls clearLapData() unconditionally, so a client cannot
+  // carry solo-race data into the director's race — the race-epoch design
+  // depends on it.  That left one reachable outcome nobody wants: a board where
+  // the host shows laps from the previous heat and every client is empty, which
+  // reads as a bug.  There is no race where you want the host's old laps mixed
+  // into a new heat's standings, so the choice only existed to be got wrong.
   const hasMasterLaps = lapTimes.length > 0;
   const hasClientLaps = (mnCurrentNodes || []).some(n => !n.isMaster && (n.laps || []).length > 0);
   if (hasMasterLaps || hasClientLaps) {
-    // Yes / No / Cancel, not OK / Cancel.  The old two-button confirm had no
-    // way to back out: "Cancel" meant "don't clear, but start anyway", so a
-    // misclick committed you to a race.
-    //
-    // The note is there because this choice is narrower than it looks.  It
-    // gates ONLY /api/multinode/clearLaps.  Every client is wiped at pre-arm
-    // regardless — /timer/masterArm calls clearLapData() unconditionally so a
-    // client cannot carry solo-race data into the director's race, which is
-    // what the race-epoch design depends on.  Saying "No" and then finding the
-    // clients empty looked like a bug; it is the pre-arm doing its job.
-    const choice = await _showThreeOptionModal(
-      'You have existing lap data. Clear it before starting?' +
-      '<br><br><small style="opacity:0.8;">Client laps are cleared at pre-arm either way — ' +
-      'this choice controls the host\'s own laps.</small>',
-      'Yes', 'No', 'Cancel'
+    const choice = await _showTwoOptionModal(
+      'All race data will be cleared for the new race.',
+      'Acknowledge', 'Cancel'
     );
-    if (choice === 2) return;   // Cancel — nothing sent, no pre-arm, buttons untouched
-    if (choice === 0) {
-      await fetch('/api/multinode/clearLaps', { method: 'POST' }).catch(() => {});
-      clearLaps();
-      const timerEl = document.getElementById('mn-race-timer');
-      if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
-    }
+    if (choice !== 0) return;   // Cancel — nothing sent, no pre-arm, buttons untouched
+
+    await fetch('/api/multinode/clearLaps', { method: 'POST' }).catch(() => {});
+    clearLaps();
+    const timerEl = document.getElementById('mn-race-timer');
+    if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
   }
 
   // Check for non-independent pilots solo racing — they'd be overridden by Start All
@@ -11395,16 +11737,15 @@ async function mnStopRace() {
     ['mnStopRaceBtn',  'mnStopRaceBtnMain' ].forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true;  });
     mnRenderRaceTab(mnCurrentNodes);
     mnUpdateRaceDataButtons();
+
+    // Same offer the director gets in single mode — a multi-pilot heat is the
+    // one people most regret losing, since it holds every pilot's laps.
+    setTimeout(maybePromptRaceDownload, 900);
   } catch (e) { console.error('[MULTINODE] Stop race failed:', e); }
 }
 
 async function mnClearRace() {
   if (!confirm('Clear all race data for all pilots?')) return;
-  mnImportedNodes = null;  // leave import view so live polling resumes
-  // Live data is no longer the imported file's, so Download Race must not
-  // write back over it, and the file's exclusions do not apply to a new race.
-  importedMnRaceFileName = '';
-  mnExclusions.clear();
   try {
     await fetch('/api/multinode/clearLaps', { method: 'POST' });
     mnRaceRunning = false;
@@ -11445,9 +11786,6 @@ function downloadMnRaceData() {
       pilotName:  master.pilotName || 'Master',
       pilotColor: master.pilotColor || 0x0080FF,
       laps:       master.laps.map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
-      // Optional and additive — a file written before this existed simply has
-      // no key and imports with nothing excluded, the old behaviour.
-      excludedLaps: [...mnExclusionsFor(0)].sort((a, b) => a - b),
     });
   }
 
@@ -11460,7 +11798,6 @@ function downloadMnRaceData() {
       pilotColor: n.pilotColor || 0x0080FF,
       quitEarly:  n.quitEarly || false,
       laps:       (n.laps || []).map(l => ({ lapNumber: l.lapNumber, lapTimeMs: l.lapTimeMs || 0 })),
-      excludedLaps: [...mnExclusionsFor(n.nodeId)].sort((a, b) => a - b),
     });
   });
 
@@ -11475,10 +11812,7 @@ function downloadMnRaceData() {
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  // Reuse the imported file's name, same as the single-mode Download Race, so
-  // reviewing a file and saving it back replaces it instead of spawning a
-  // second copy alongside.
-  a.download = importedMnRaceFileName || `MultiRace-${ts}.json`;
+  a.download = `MultiRace-${ts}.json`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -11488,7 +11822,6 @@ function downloadMnRaceData() {
 async function importMnRace(input) {
   const file = input?.files?.[0];
   if (!file) return;
-  importedMnRaceFileName = file.name || '';
   input.value = '';
 
   let json;
@@ -11511,46 +11844,380 @@ async function importMnRace(input) {
 
   const nodes = json.nodes;
 
-  // Restore master's own laps into window.lapTimes (stored in seconds)
-  const masterNode = nodes.find(n => n.isMaster || n.nodeId === 0);
-  window.lapTimes = masterNode ? (masterNode.laps || []).map(l => (l.lapTimeMs || 0) / 1000) : [];
+  // An imported race is HISTORY.  It renders on the Race History tab and touches
+  // NO live state — not mnCurrentNodes, not window.lapTimes, not the race timer.
+  //
+  // It used to take over the live Race tab, which was the source of a confusing
+  // bug: mnRenderRaceTab() assigns mnCurrentNodes, so the next multiNodeState
+  // push from a connected client overwrote the whole imported race with live
+  // nodes.  The master's row survived (its laps came from window.lapTimes, set
+  // separately just above) while every client row reverted to 0 laps and live
+  // pilot names — reading exactly like "only the host imported".
+  //
+  // Rendering into its own container with skipMnState means live polling and an
+  // imported race can no longer collide at all, so the freeze flag that used to
+  // guard this is gone rather than merely fixed.
+  mnHistoryNodes = nodes.map(n => ({
+    ...n,
+    online:                  true,
+    running:                 false,
+    independent:             false,
+    skipEnabled:             n.skipEnabled || false,
+    excludedFromCurrentRace: false,
+    ..._mnLapStats(n.laps || []),
+  }));
 
-  // Restore each pilot's excluded laps BEFORE computing stats, so the
-  // leaderboard renders the same standings the file was saved with.  A file
-  // without the key clears any exclusions left over from a previous import.
-  mnExclusions.clear();
-  nodes.forEach(n => {
-    const set = mnExclusionsFor(n.nodeId);
-    (Array.isArray(n.excludedLaps) ? n.excludedLaps : []).forEach(v => {
-      const num = parseInt(v, 10);
-      if (Number.isFinite(num) && num > 0) set.add(num);
+  // Any playback of the PREVIOUS import must not keep firing over the new one.
+  mnPlaybackStop({ keepBoard: false });
+  mnRenderHistoryRace();
+
+  // Draw the timeline immediately, so the lap pattern is visible before Play is
+  // pressed rather than appearing only once playback starts.
+  mnPlaybackEvents  = mnPlaybackBuildEvents();
+  mnPlaybackTotalMs = mnPlaybackEvents.length ? mnPlaybackEvents[mnPlaybackEvents.length - 1].t : 0;
+  mnPlaybackRenderTimeline();
+  const clock = document.getElementById('mnHistoryClock');
+  if (clock) clock.textContent = formatMsDisplay(mnPlaybackTotalMs);
+
+  alert(`Race imported: ${nodes.length} pilot${nodes.length !== 1 ? 's' : ''}.`);
+}
+
+// ── Multi-pilot Race History playback ───────────────────────────────────────
+//
+// Replays an imported race in real time: the leaderboard reshuffles, cards fill
+// lap by lap, and each pilot's current lap is marked as the playhead reaches it.
+//
+// This works because mnRenderRaceTab() with readOnly+skipMnState is a PURE
+// FUNCTION of the node list handed to it — every statistic comes from
+// _mnLapStats(laps).  So "play" is just feeding it progressively longer lap
+// arrays on a timer; the ranking, lap counts and stars animate for free.
+//
+// No webhooks: /timer/playbackLap has no pilot field, and inventing one for a
+// review feature isn't worth the protocol change.
+
+let mnPlaybackTimeouts = [];
+let mnPlaybackTicker   = null;
+let mnPlaybackEvents   = [];
+let mnPlaybackTotalMs  = 0;
+
+// pilotColor is stored as an int; the timeline needs CSS.
+function _mnColorHex(v) {
+  const n = Number.isFinite(v) ? v : 0x0080FF;
+  return '#' + ('000000' + (n >>> 0).toString(16)).slice(-6);
+}
+
+// Flatten every pilot's laps into one time-ordered event list.
+//
+// All pilots start together on Start All, so a running sum of each pilot's own
+// lap times IS its offset from the race start, and the offsets are directly
+// comparable across pilots.
+function mnPlaybackBuildEvents() {
+  const events = [];
+  (mnHistoryNodes || []).forEach(n => {
+    let cum = 0;
+    (n.laps || []).slice().sort((a, b) => a.lapNumber - b.lapNumber).forEach(l => {
+      cum += (l.lapTimeMs || 0);
+      events.push({
+        t:         cum,
+        nodeId:    n.nodeId,
+        lapNumber: l.lapNumber,
+        lapTimeMs: l.lapTimeMs || 0,
+        pilotName: n.pilotName || ('Node ' + _slotLetter(n.nodeId)),
+      });
     });
   });
+  events.sort((a, b) => a.t - b.t);
+  return events;
+}
 
-  // Build mnCurrentNodes with computed stats so the leaderboard renders correctly
-  mnCurrentNodes = nodes.map(n => {
-    const laps = n.laps || [];
-    return {
-      ...n,
-      online:                  true,
-      running:                 false,
-      independent:             false,
-      skipEnabled:             n.skipEnabled || false,
-      excludedFromCurrentRace: false,
-      ..._mnLapStats(laps, n.nodeId),
-    };
+// Tick spacing chosen to land 5-10 labels across the bar, whatever the race
+// length — a fixed step would give one label on a short race and forty on a
+// long one.
+function _mnPlaybackTickStep(totalMs) {
+  const candidates = [5000, 10000, 15000, 30000, 60000, 120000, 300000, 600000];
+  for (const step of candidates) if (totalMs / step <= 10) return step;
+  return 900000;
+}
+
+// Thin pilot-coloured marker per lap, plus overall time ticks along the bar.
+// Deliberately NO per-marker timestamp: with six pilots crossing every few
+// seconds the labels would overlap into noise.  The ticks give the time frame;
+// the markers give the pattern.
+function mnPlaybackRenderTimeline() {
+  const box = document.getElementById('mnHistoryTimeline');
+  if (!box) return;
+
+  box.querySelectorAll('.mn-tl-marker, .mn-tl-tick').forEach(el => el.remove());
+  if (!mnPlaybackTotalMs) return;
+
+  const colorOf = {};
+  (mnHistoryNodes || []).forEach(n => { colorOf[n.nodeId] = _mnColorHex(n.pilotColor); });
+
+  const frag = document.createDocumentFragment();
+
+  const step = _mnPlaybackTickStep(mnPlaybackTotalMs);
+  for (let t = 0; t <= mnPlaybackTotalMs; t += step) {
+    const tick = document.createElement('div');
+    tick.className = 'mn-tl-tick';
+    tick.style.left = ((t / mnPlaybackTotalMs) * 100) + '%';
+    tick.innerHTML = `<span>${formatMsDisplay(t)}</span>`;
+    frag.appendChild(tick);
+  }
+
+  mnPlaybackEvents.forEach(ev => {
+    const m = document.createElement('div');
+    // Lap 0 is the first crossing rather than a lap; a shorter marker keeps it
+    // visually distinct from the laps that follow.
+    m.className = 'mn-tl-marker' + (ev.lapNumber === 0 ? ' mn-tl-marker-gate' : '');
+    m.style.left = ((ev.t / mnPlaybackTotalMs) * 100) + '%';
+    m.style.backgroundColor = colorOf[ev.nodeId] || 'var(--primary-color)';
+    m.title = `${ev.pilotName} — ${ev.lapNumber === 0 ? '1st Cross' : 'Lap ' + ev.lapNumber}`
+            + ` @ ${formatMsDisplay(ev.t)}`;
+    frag.appendChild(m);
   });
 
-  mnRaceRunning = false;
-  mnImportedNodes = mnCurrentNodes;  // freeze race tab against live polling
-  _mnStopTimer();
-  const timerEl = document.getElementById('mn-race-timer');
-  if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
+  box.appendChild(frag);
+}
 
-  mnRenderRaceTab(mnCurrentNodes);
-  mnUpdateRaceDataButtons();
-  alert(`Race imported: ${nodes.length} pilot${nodes.length !== 1 ? 's' : ''}.`);
-  document.getElementById('nav-link-race').click();
+function isMnPlaybackVoiceEnabled() {
+  return document.getElementById('mnHistoryVoice')?.checked !== false;
+}
+
+// Unchecking mid-playback must also flush what is already queued, or the user
+// hears several more callouts after asking for silence.
+function onMnPlaybackVoiceToggled() {
+  if (isMnPlaybackVoiceEnabled()) return;
+  if (audioAnnouncer && typeof audioAnnouncer.clearQueue === 'function') {
+    try { audioAnnouncer.clearQueue(); } catch (e) { console.warn('clearQueue failed:', e); }
+  }
+}
+
+// Re-render the board as it stood at time `t`, marking each pilot's newest lap.
+function mnPlaybackRenderAt(t) {
+  const highlight = {};
+  const nodes = (mnHistoryNodes || []).map(n => {
+    let cum = 0, shown = [], current = null;
+    (n.laps || []).slice().sort((a, b) => a.lapNumber - b.lapNumber).forEach(l => {
+      cum += (l.lapTimeMs || 0);
+      if (cum <= t) { shown.push(l); current = l.lapNumber; }
+    });
+    if (current !== null) highlight[n.nodeId] = current;
+    // Stats are recomputed from the truncated list by mnRenderRaceTab itself.
+    return { ...n, laps: shown };
+  });
+
+  mnRenderRaceTab(nodes, {
+    containerId:   'mn-history-race-container',
+    readOnly:      true,
+    skipMnState:   true,
+    raceRunning:   false,
+    highlightLaps: highlight,
+  });
+}
+
+function mnPlaybackStart() {
+  if (!Array.isArray(mnHistoryNodes) || mnHistoryNodes.length === 0) return;
+  mnPlaybackStop({ keepBoard: true });
+
+  mnPlaybackEvents  = mnPlaybackBuildEvents();
+  mnPlaybackTotalMs = mnPlaybackEvents.length ? mnPlaybackEvents[mnPlaybackEvents.length - 1].t : 0;
+  if (!mnPlaybackTotalMs) return;
+
+  mnPlaybackRenderTimeline();
+
+  const playBtn = document.getElementById('mnHistoryPlayBtn');
+  const stopBtn = document.getElementById('mnHistoryStopBtn');
+  if (playBtn) playBtn.style.display = 'none';
+  if (stopBtn) stopBtn.style.display = '';
+
+  const playhead = document.getElementById('mnHistoryPlayhead');
+  if (playhead) { playhead.classList.add('active'); playhead.style.left = '0%'; }
+
+  // Start from an empty board so the race builds up rather than appearing whole.
+  mnPlaybackRenderAt(-1);
+
+  if (isMnPlaybackVoiceEnabled()) queueSpeak('<p>Race Start</p>');
+
+  const startedAt = Date.now();
+  mnPlaybackTicker = setInterval(() => {
+    const elapsed = Date.now() - startedAt;
+    const pct = Math.min((elapsed / mnPlaybackTotalMs) * 100, 100);
+    if (playhead) playhead.style.left = pct + '%';
+    const clock = document.getElementById('mnHistoryClock');
+    if (clock) clock.textContent = formatMsDisplay(Math.min(elapsed, mnPlaybackTotalMs));
+    if (pct >= 100) { clearInterval(mnPlaybackTicker); mnPlaybackTicker = null; }
+  }, 50);
+
+  mnPlaybackEvents.forEach(ev => {
+    mnPlaybackTimeouts.push(setTimeout(() => {
+      mnPlaybackRenderAt(ev.t);
+
+      // Same callout the live race made, via the same function — so the
+      // announcer mode and lap format are honoured here too.  The 2-/3-lap
+      // cadence is per pilot, from that pilot's own lap history.
+      if (isMnPlaybackVoiceEnabled()) {
+        const mine  = mnPlaybackEvents.filter(e => e.nodeId === ev.nodeId);
+        const byNum = new Map(mine.map(e => [e.lapNumber, e.lapTimeMs]));
+        const sumBack = (count) => {
+          let total = 0;
+          for (let k = 0; k < count; k++) {
+            const v = byNum.get(ev.lapNumber - k);
+            if (v === undefined) return null;
+            total += v;
+          }
+          return total;
+        };
+        let last2 = '', last3 = '';
+        if (ev.lapNumber >= 2 && ev.lapNumber % 2 === 0) {
+          const s = sumBack(2); if (s !== null) last2 = String(s / 1000);
+        }
+        if (ev.lapNumber >= 3 && ev.lapNumber % 3 === 0) {
+          const s = sumBack(3); if (s !== null) last3 = String(s / 1000);
+        }
+        announceLapCallout(ev.pilotName, ev.lapNumber, formatLapForSpeech(ev.lapTimeMs), last2, last3);
+      }
+    }, ev.t));
+  });
+
+  // Let the race FINISH before declaring it over.
+  //
+  // The last lap's callout is queued at the moment the playhead reaches it, and
+  // takes a couple of seconds to speak — and by then the announcer may still be
+  // working through a backlog from earlier crossings.  Ending at
+  // totalMs + 400 cut that off mid-sentence and the race just stopped talking.
+  //
+  // So: wait for the last lap, wait for the announcer to actually drain, THEN
+  // call the race complete, then wait for that too before tidying up.
+  mnPlaybackTimeouts.push(setTimeout(() => mnPlaybackFinish(), mnPlaybackTotalMs + 250));
+}
+
+// Is the announcer idle — nothing speaking and nothing waiting?
+//
+// Shared by single-mode and multi-pilot playback; both need to know when the
+// callouts have actually finished rather than guessing a duration.
+function _announcerIdle() {
+  if (!audioAnnouncer) return true;
+  const queued = Array.isArray(audioAnnouncer.audioQueue) ? audioAnnouncer.audioQueue.length : 0;
+  const busy   = (typeof audioAnnouncer.isSpeaking === 'function') ? audioAnnouncer.isSpeaking() : false;
+  // Also honour raw Web Speech state: the announcer marks isPlaying false once
+  // it hands an utterance over, so on the Web Speech path the voice can still
+  // be mid-sentence after the queue reads empty.
+  const synth = (typeof speechSynthesis !== 'undefined')
+    && (speechSynthesis.speaking || speechSynthesis.pending);
+  return queued === 0 && !busy && !synth;
+}
+
+// Run `fn` once the announcer has fallen silent, or after `capMs` regardless.
+//
+// The cap matters: with voice disabled, or a browser that never reports
+// speaking, an unbounded wait would leave playback permanently "running".
+//
+// `sink` is the caller's cleanup array — the poller is an INTERVAL, and whoever
+// owns that array must clear it with clearInterval when playback is stopped
+// early, or the finish sequence fires after the user pressed Stop.
+function _afterSpeech(fn, capMs, sink) {
+  const deadline = Date.now() + (capMs || 15000);
+  const poll = setInterval(() => {
+    if (_announcerIdle() || Date.now() > deadline) {
+      clearInterval(poll);
+      fn();
+    }
+  }, 150);
+  if (Array.isArray(sink)) sink.push({ __interval: poll });
+}
+
+// Clear a mixed list of setTimeout ids and {__interval} wrappers.
+function _clearPlaybackHandles(list) {
+  list.forEach(h => {
+    if (h && typeof h === 'object' && h.__interval !== undefined) clearInterval(h.__interval);
+    else clearTimeout(h);
+  });
+}
+
+// End-of-race sequence: drain the callouts, announce the finish, then tidy up.
+function mnPlaybackFinish() {
+  const speak = isMnPlaybackVoiceEnabled();
+
+  if (!speak) { mnPlaybackStop({ keepBoard: true }); return; }
+
+  // 1. Let every outstanding lap callout finish — including the final lap's,
+  //    and any backlog still queued behind the opening bunch.
+  _afterSpeech(() => {
+    // 2. A beat, so the finish doesn't tread on the last lap.
+    mnPlaybackTimeouts.push(setTimeout(() => {
+      // "Race stopped", not "Race complete": a multi-pilot heat ends when the
+      // director presses Stop All, and that is the phrase the live race speaks
+      // (see mnStopRace).  Replaying a race should replay what was said at the
+      // time.  Swap to 'Race complete' if you'd rather it always sound like a
+      // max-laps finish — both have SD clips and both are exact-matched.
+      queueSpeak('<p>Race stopped</p>');
+      // 3. ...and let THAT finish before the buttons reset, so Stop doesn't
+      //    appear to be available while the race is still being called.
+      _afterSpeech(() => mnPlaybackStop({ keepBoard: true }), 8000, mnPlaybackTimeouts);
+    }, 700));
+  }, 30000, mnPlaybackTimeouts);
+}
+
+// keepBoard: leave the finished race on screen (end of playback).  Without it,
+// pressing Stop restores the full race, which is also what you want.
+function mnPlaybackStop(opts) {
+  opts = opts || {};
+
+  // The list holds plain setTimeout ids plus {__interval} wrappers from
+  // _afterSpeech's poller — clearing an interval with clearTimeout would leave
+  // it running and the finish sequence would fire after Stop.
+  _clearPlaybackHandles(mnPlaybackTimeouts);
+  mnPlaybackTimeouts = [];
+  if (mnPlaybackTicker) { clearInterval(mnPlaybackTicker); mnPlaybackTicker = null; }
+
+  // Cut off anything already queued or mid-sentence — clearing the timeouts
+  // only stops FUTURE callouts.
+  if (audioAnnouncer && typeof audioAnnouncer.clearQueue === 'function') {
+    try { audioAnnouncer.clearQueue(); } catch (e) { console.warn('clearQueue failed:', e); }
+  }
+
+  const playBtn = document.getElementById('mnHistoryPlayBtn');
+  const stopBtn = document.getElementById('mnHistoryStopBtn');
+  if (playBtn) playBtn.style.display = '';
+  if (stopBtn) stopBtn.style.display = 'none';
+
+  const playhead = document.getElementById('mnHistoryPlayhead');
+  if (playhead) playhead.classList.remove('active');
+
+  if (!opts.keepBoard) return;
+  // Restore the complete race, unhighlighted.
+  const clock = document.getElementById('mnHistoryClock');
+  if (clock) clock.textContent = formatMsDisplay(mnPlaybackTotalMs);
+  mnRenderHistoryRace();
+}
+
+// Draw the imported race into the Race History tab.
+//
+// readOnly     — no edit-pilot pencils or dev tap handlers; this is a past race.
+// skipMnState  — the critical one: do NOT touch mnCurrentNodes or the live
+//                Race tab's controls.  Without it this render would clobber the
+//                live node list, which is the bug described above.
+function mnRenderHistoryRace() {
+  const empty = document.getElementById('mnHistoryEmpty');
+  const box   = document.getElementById('mn-history-race-container');
+  const pb    = document.getElementById('mn-history-playback');
+  if (!box) return;
+
+  if (!Array.isArray(mnHistoryNodes) || mnHistoryNodes.length === 0) {
+    if (empty) empty.style.display = '';
+    if (pb)    pb.style.display    = 'none';
+    box.innerHTML = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  if (pb)    pb.style.display    = '';
+
+  mnRenderRaceTab(mnHistoryNodes, {
+    containerId: 'mn-history-race-container',
+    readOnly:    true,
+    skipMnState: true,
+    raceRunning: false,
+  });
 }
 
 // Stop polling whenever the user navigates away from the Race tab

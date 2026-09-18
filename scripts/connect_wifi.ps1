@@ -1,6 +1,6 @@
 $nodes = @(
-    @{ Profile = "FPVRaceOne_8f818d"; Adapter = "Wi-Fi" }
-    @{ Profile = "FPVRaceOne_8f8001"; Adapter = "Wi-Fi 7" }
+    @{ Profile = "FPVRaceOne_8f8001"; Adapter = "Wi-Fi" }
+    @{ Profile = "FPVRaceOne_901881"; Adapter = "Wi-Fi 7" }
 )
 
 $TimeoutSeconds = 50

@@ -62,7 +62,48 @@
 #define TIMING_STATS_ENABLED 1
 #define CPU_MONITOR_ENABLED  1
 
-// ── Bench telemetry on the serial port ──────────────────────────────────────
+// ╔══════════════════════════════════════════════════════════════════════════╗
+// ║  TURN ON FOR EMULATOR AND HARNESS USE                                    ║
+// ║                                                                          ║
+// ║      #define TIMING_MARKER_ENABLED 1   <- required by the emulator rig    ║
+// ║      #define HARNESS_LOG_ENABLED   1   <- required by the timing harness  ║
+// ║                                                                          ║
+// ║  Both default to 0 and are BENCH EQUIPMENT, not product features.        ║
+// ║                                                                          ║
+// ║  You do NOT have to remember to set them back before shipping: build      ║
+// ║      pio run -e seeed_xiao_esp32c6_release                                ║
+// ║  and the release environment forces both to 0 (targets/ESP32C6.ini).      ║
+// ║  That is why both are #ifndef-guarded — see the note on each below.       ║
+// ║                                                                          ║
+// ║  Neither affects lap timing itself.  Turning them on adds a GPIO pulse    ║
+// ║  and some serial chatter; it does not change detection behaviour.         ║
+// ╚══════════════════════════════════════════════════════════════════════════╝
+
+// ── 1 of 2: Bench timing marker — REQUIRED BY THE EMULATOR ──────────────────
+//
+// Drives PIN_TIMING_MARKER high the instant a lap is confirmed, so the RX5808
+// emulator test rig can timestamp stimulus → detection on its own hardware
+// timer and measure absolute detection latency.  See tools/rx5808-emulator/.
+// With this at 0 the emulator still runs, but cannot measure latency at all.
+//
+// Requires the board block to define PIN_TIMING_MARKER; only XIAO C6 does.
+// RX5808 pin assignments are untouched — this is a spare pin, broken out on a
+// breadboard for the rig, and the whole thing compiles away when disabled.
+//
+// The pulse MUST be emitted before the DEBUG() calls that follow a lap: each
+// of those is a USB CDC write that can block for milliseconds depending on
+// whether the host is draining the port, which would land squarely inside the
+// quantity being measured.
+//
+// #ifndef-guarded so that -D can win.  A bare #define here is processed AFTER
+// the command-line define and silently overrides it — which would mean
+// `pio run -e seeed_xiao_esp32c6_release` shipping with the bench marker still
+// driving GPIO21, the exact failure a release switch exists to prevent.
+#ifndef TIMING_MARKER_ENABLED
+#define TIMING_MARKER_ENABLED 0
+#endif
+
+// ── 2 of 2: Bench telemetry on the serial port — READ BY THE HARNESS ────────
 //
 // Gates ONLY the periodic bench lines that exist to feed the timing harness:
 //   [TIMING]     sample-interval statistics          (laptimer.cpp)
@@ -82,12 +123,17 @@
 // and CPU Load report exactly the same numbers with this off.  Turning it off
 // costs the harness its "Load evidence" section and costs the UI nothing.
 //
+// So: needed only if you are PARSING harness logs.  Running the emulator
+// without the harness needs only TIMING_MARKER_ENABLED above.
+//
 // Forced to 0 by the release environment (targets/ESP32C6.ini).  #ifndef so
 // that -D wins; a bare #define here would be processed after the command line
 // and silently override it.
 #ifndef HARNESS_LOG_ENABLED
-#define HARNESS_LOG_ENABLED 1
+#define HARNESS_LOG_ENABLED 0
 #endif
+
+// ── End of bench-only switches ──────────────────────────────────────────────
 
 // Reporting window for the sample-interval statistics, and the threshold
 // above which an interval is counted as "late".  10 ms is ~2-5x the expected
@@ -100,32 +146,10 @@
 // handler risks the TCP slot exhaustion this project is sensitive to.
 #define CPU_MONITOR_WINDOW_MS           5000
 
-// ── Bench timing marker ─────────────────────────────────────────────────────
-//
-// Drives PIN_TIMING_MARKER high the instant a lap is confirmed, so the RX5808
-// emulator test rig can timestamp stimulus → detection on its own hardware
-// timer and measure absolute detection latency.  See tools/rx5808-emulator/.
-//
-// Requires the board block to define PIN_TIMING_MARKER; only XIAO C6 does.
-// RX5808 pin assignments are untouched — this is a spare pin, broken out on a
-// breadboard for the rig, and the whole thing compiles away when disabled.
-//
-// The pulse MUST be emitted before the DEBUG() calls that follow a lap: each
-// of those is a USB CDC write that can block for milliseconds depending on
-// whether the host is draining the port, which would land squarely inside the
-// quantity being measured.
-//
-// Bench equipment, not a product feature — set to 1 while the emulator rig is
-// wired up.  You do NOT have to remember to set it back for a release: the
-// release environment forces it off (targets/ESP32C6.ini).
-//
-// #ifndef-guarded so that -D can win.  A bare #define here is processed AFTER
-// the command-line define and silently overrides it — which would mean
-// `pio run -e seeed_xiao_esp32c6_release` shipping with the bench marker still
-// driving GPIO21, the exact failure a release switch exists to prevent.
-#ifndef TIMING_MARKER_ENABLED
-#define TIMING_MARKER_ENABLED 0
-#endif
+// (TIMING_MARKER_ENABLED moved up to sit beside HARNESS_LOG_ENABLED under the
+// "TURN ON FOR EMULATOR AND HARNESS USE" banner — the two are always flipped
+// for the same reason, and having them 40 lines apart meant reaching for one
+// and missing the other.)
 
 // (Historical note: a DEBUG_SERIAL_ENABLED flag briefly gated ALL serial
 // output.  It was removed — operational logging always prints; only the bench
