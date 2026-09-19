@@ -145,12 +145,29 @@
 
       <div id="race" class="tabcontent">
 
-        <!-- ── Multi-node status bar (hidden in standalone mode) ── -->
-        <!-- Mode strip.  Was a filled #1565c0 bar; now a quiet line under the
-             header, because it states a standing fact ("this unit is the
-             master") rather than raising an alert. -->
-        <div id="mn-race-status-bar" class="race-mode-strip" style="display:none;">
-          <span id="mn-race-status-text"></span>
+        <!-- The multi-node mode line used to live HERE, as a full-width strip
+             above the race views.  It now sits at the top of each race console
+             (class "race-mode-line", one per view), ruled off from the clock
+             below it — it states a standing fact about the unit, so it does not
+             deserve a band across the top of the page.  There are three, one
+             per console: Single Race, Master Race, and the client's Multi Race
+             view.  All are filled by mnUpdateRaceStatusBar(). -->
+
+        <!-- Shown on a CLIENT while it is racing under the race director and is
+             not ignoring them.  The pilot's race is the director's race, shown
+             on the Multi Race tab — this page's clock and controls are locked
+             so the two can never disagree about who owns the race.
+             Driven by applyClientRaceLockUI(). -->
+        <div id="clientRaceLockNotice" class="banner-locked" style="display:none;">
+          <!-- Lead sentence is set by applyClientRaceLockUI(): the lock engages
+               at pre-arm, when "racing" is not yet true. -->
+          <strong id="clientRaceLockLead">Racing under the race director.</strong>
+          Your laps and race clock are on the
+          <!-- Click the real nav link rather than calling openTab() directly:
+               openTab() marks evt.currentTarget as the active tab, and passing
+               it this anchor would highlight the wrong thing. -->
+          <a href="#" onclick="document.getElementById('nav-link-raceview').click(); return false;">Multi&nbsp;Race</a> tab.
+          <span id="clientRaceLockExitHint">Use <em>Exit Race</em> there to leave this race and unlock this page.</span>
         </div>
 
         <!-- ── Single-pilot view (standalone / client mode) ── -->
@@ -159,6 +176,11 @@
           <!-- Console: clock, run state and controls.  Fixed width, never
                scrolls, so Stop Race is always reachable. -->
           <div class="race-console">
+            <!-- Multi-node mode line, above the clock and ruled off from it.
+                 Hidden in standalone mode, where there is no node role to
+                 report.  One of three; see the note where the old top strip
+                 used to be. -->
+            <div class="race-mode-line" style="display:none;"></div>
             <div class="race-label">Race clock</div>
             <span id="timer">00:00:00s</span>
             <div id="raceStatePill" class="race-state" hidden><i></i><span id="raceStateText">Racing</span></div>
@@ -260,11 +282,18 @@
         </div>
 
         <!-- ── Master multi-node race view ── -->
+        <!-- Shown while the race on screen contains laps fabricated by Dev Mode.
+             Cleared by Start All / Clear.  See mnRaceSimulated. -->
+        <div id="mnSimulatedBanner" class="banner-simulated" style="display:none;">
+          Simulated laps — this race contains fabricated data from Dev Mode and is not a real result.
+        </div>
+
         <div id="master-race-view" class="race-shell" style="display:none;">
 
           <!-- onRaceTabOpen() shows this with style.display = '' (not 'block'),
                which clears the inline value and lets .race-shell's grid apply. -->
           <div class="race-console">
+            <div class="race-mode-line" style="display:none;"></div>
             <div class="race-label">Race clock</div>
             <div id="mn-race-timer" class="mn-race-timer-display">00:00:00s</div>
             <div id="mnRaceStatePill" class="race-state" hidden><i></i><span>Racing</span></div>
@@ -325,10 +354,19 @@
         <div id="rv-status-banner" style="text-align:center; font-size:13px; font-weight:600; color:#fff; background:#1565c0; padding:6px 14px; border-radius:6px; letter-spacing:0.02em; margin:10px 16px;">
           Waiting for race director to start race...
         </div>
+        <!-- The client's copy of the Dev Mode warning.  The master's banner
+             (mnSimulatedBanner) lives in the Race tab, which a client never
+             shows — without this one a pilot had no way to know the director
+             had fabricated laps into the heat they are looking at.
+             Driven by rvSimulatedRace; see rvApplySimulatedBanner(). -->
+        <div id="rvSimulatedBanner" class="banner-simulated" style="display:none;">
+          Simulated laps — this race contains fabricated data from Dev Mode and is not a real result.
+        </div>
         <div class="race-shell">
           <!-- Read-only mirror: no Start / Stop / Clear anywhere, so the console
                carries the clock and the run state and nothing else. -->
           <div class="race-console">
+            <div class="race-mode-line" style="display:none;"></div>
             <div class="race-label">Race clock</div>
             <div id="rv-race-timer" class="mn-race-timer-display">00:00.00</div>
             <div id="rvRaceStatePill" class="race-state" hidden><i></i><span>Racing</span></div>
@@ -346,6 +384,16 @@
                 <span class="rm-value rm-leader">--</span>
               </div>
             </div>
+
+            <!-- Only while this pilot is actually in the director's race.
+                 Quitting records a DNF with the master and unlocks the Single
+                 Race tab — see rvExitRace().  Sits in the console under the
+                 summary so it stays put as the pilot list grows, instead of
+                 sliding down the scrolling right column. -->
+            <div id="rv-exit-race-actions" class="race-actions" style="display:none;">
+              <button id="rvExitRaceBtn" class="danger-button" onclick="rvExitRace()">Exit Race</button>
+              <p class="race-actions-note">Leave the race director's race and unlock your Single Race tab.</p>
+            </div>
           </div>
 
           <div class="race-right">
@@ -356,9 +404,12 @@
             </div>
 
             <div class="race-actions">
-              <button onclick="document.getElementById('rvImportFile').click()">Import Multi Race File</button>
+              <!-- Disabled while a race is live — see applyClientRaceLockUI().
+                   Importing mid-race would replace the live view with a saved
+                   file and freeze it there (rvImportedNodes blocks pushes). -->
+              <button id="rvImportRaceBtn" onclick="document.getElementById('rvImportFile').click()">Import Multi Race File</button>
               <input type="file" id="rvImportFile" accept=".json" style="display:none;" onclick="this.value='';" onchange="importClientRace(this);">
-              <p class="race-actions-note">Load a saved MultiRace file to review.</p>
+              <p class="race-actions-note" id="rvImportRaceNote">Load a saved MultiRace file to review.</p>
             </div>
           </div>
         </div>
@@ -379,6 +430,11 @@
             <input type="file" id="mnImportFileHistory" accept=".json" style="display:none;" onclick="this.value='';" onchange="importMnRace(this);">
           </div>
           <p id="mnHistoryEmpty" class="no-data">No race imported yet. Import a MultiRace file downloaded from master mode to review it here.</p>
+
+          <!-- Shown when the imported file carries simulatedLaps:true. -->
+          <div id="mnHistorySimulatedBanner" class="banner-simulated" style="display:none;">
+            Simulated laps — this race contains fabricated data from Dev Mode and is not a real result.
+          </div>
 
           <!-- Playback.  Hidden until a race is imported.  One thin marker per
                lap, coloured by pilot, with overall time ticks along the bar —

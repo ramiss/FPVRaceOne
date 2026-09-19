@@ -391,6 +391,29 @@ void Webserver::sendRaceStateEvent(const char* state) {
     pushMultiNodeState();  // master mode: keep client Race View timers in sync on start/stop
 }
 
+// ── Simulated-lap mark (race level, not lap level) ─────────────────────────
+//
+// Set the moment any Dev Mode tap fabricates a lap on this device, cleared the
+// moment a race starts or its data is wiped.  Deliberately ONE boolean for the
+// whole race rather than a per-lap field:
+//
+//   * A per-lap flag would have to survive the lap-sync ring, the delta window,
+//     the resync chunks and the download/import round trip — five places where
+//     a real lap and a fabricated one currently travel through identical code.
+//     The healing logic compares counts and CRCs; adding a field that only some
+//     of those paths carry is exactly how a heal starts disagreeing with itself.
+//   * Nobody needs to know WHICH lap was faked.  The question a user asks of a
+//     race file is "is this a real result?", and one mark answers it.
+//
+// Reported as race.simulatedLaps in directorState (so every client's Race View
+// and every download inherits it) and in /api/laps/current (so a single-mode
+// page reload gets it back).  Omitted entirely when false — a clean race sends
+// no extra bytes on the 2 s fanout.
+//
+// Not persisted: a power cycle loses the mark along with the laps it described,
+// which is the agreed behavior.
+static bool _raceSimulatedLaps = false;
+
 // Escape a string for JSON — only handles the common cases (quotes, backslash, control).
 //
 // Appends directly to `dst` instead of returning a fresh String.  Every call
@@ -497,7 +520,24 @@ static void _buildDirectorStatePayloadInto(String& out,
     // actually heard from did not advertise lapSync.  A freshly registered
     // node no longer counts as legacy, which is what used to keep this true
     // indefinitely and stop the heap win from ever landing.
-    const bool emitLegacyLaps = multiNode && multiNode->anyNodeNeedsLegacyLaps();
+    //
+    // ALSO forced on for a simulated race, and this is the only way a
+    // director-fabricated lap can ever reach the pilot it was aimed at.
+    //
+    // The delta window carries the lap live, but nothing can repair it after a
+    // reload: a client's own row repairs from /api/multinode/laps, and on a
+    // CLIENT that endpoint answers out of the local LapTimer (see the
+    // isClientMode() branch there) — which never saw the tap, because the lap
+    // was invented on the master and this device's timer was never involved.
+    // So the client asks itself what it missed, is told "nothing", and sits one
+    // or more laps short forever.  Pushing the full arrays sidesteps the whole
+    // repair question: the recipient is simply given the answer.
+    //
+    // The §6.4 heap win is untouched for real races — this costs bytes only
+    // while a race is marked simulated, which is a bench artifact with a
+    // handful of pilots, never a heat anyone is scoring.
+    const bool emitLegacyLaps = _raceSimulatedLaps ||
+                                (multiNode && multiNode->anyNodeNeedsLegacyLaps());
     const uint16_t masterRetained = timer ? timer->getRetainedLapCount() : 0;
     size_t legacyLapEstimate = 0;
     if (emitLegacyLaps) {
@@ -663,6 +703,9 @@ static void _buildDirectorStatePayloadInto(String& out,
     // comparable and must not merge — this is what stops a new race from
     // inheriting the previous one's laps.
     out += ",\"raceId\":";             out += (uint32_t)(multiNode ? multiNode->getRaceId() : 0);
+    // Only when set — see _raceSimulatedLaps.  Clients read this as
+    // race.simulatedLaps and treat its absence as "real race".
+    if (_raceSimulatedLaps) out += ",\"simulatedLaps\":true";
     out += "}}";
 }
 
@@ -1598,6 +1641,10 @@ EEPROM:\n";
     });
 
     server.on("/timer/start", HTTP_POST, [this](AsyncWebServerRequest *request) {
+        // A start is always the beginning of a fresh race, so the mark goes
+        // unconditionally — clearing it only when there were laps to wipe is
+        // how a clean race ends up wearing the previous one's badge.
+        _raceSimulatedLaps = false;
         timer->start();
         prearmHeartbeatUntilMs = 0;   // countdown finished — stop re-broadcasting
         if (transportMgr) transportMgr->broadcastRaceStateEvent("started");
@@ -1647,6 +1694,7 @@ EEPROM:\n";
 
     server.on("/timer/clearLaps", HTTP_POST, [this](AsyncWebServerRequest *request) {
         if (timer) timer->clearLapData();
+        _raceSimulatedLaps = false;   // the laps it described are gone
         // Broadcast so other tabs viewing this unit wipe their lap tables too.
         // Single-mode multi-tab sync only — see /timer/prearm above for the
         // rationale on why coordinated modes shouldn't fire this broadcast.
@@ -1768,6 +1816,7 @@ EEPROM:\n";
             return;
         }
         timer->clearLapData();   // wipe any solo-race data before the master race
+        _raceSimulatedLaps = false;   // including a Dev Mode mark from that solo race
         if (multiNode && multiNode->isClientMode() && request->hasParam("raceId")) {
             // Adopting the epoch now is what lets the UDP start message be
             // trusted: it carries the same raceId, and a datagram that does
@@ -1803,6 +1852,7 @@ EEPROM:\n";
             }
         }
         timer->clearLapData();  // wipe any solo-race data before master race begins
+        _raceSimulatedLaps = false;   // including a Dev Mode mark from that solo race
         // Scheduled start (§8): the master converts one common target instant
         // into THIS device's clock domain using the offset measured during
         // pre-arm, so every unit begins together rather than whenever its own
@@ -1891,6 +1941,11 @@ EEPROM:\n";
         JsonObject jsonObj = json.as<JsonObject>();
         if (jsonObj.containsKey("lapTime")) {
             uint32_t lapTimeMs = jsonObj["lapTime"].as<uint32_t>();
+            // Dev Mode's Add Lap always sends sim:true.  Read with as<bool>()
+            // rather than `| false`: ArduinoJson's default operator is
+            // type-strict, so a client that sends 1 instead of true would leave
+            // this false forever.
+            if (jsonObj["sim"].as<bool>()) _raceSimulatedLaps = true;
             if (timer) timer->recordManualLap(lapTimeMs);
             if (transportMgr) {
                 transportMgr->broadcastLapEvent(lapTimeMs);
@@ -1929,6 +1984,9 @@ EEPROM:\n";
         JsonObject jsonObj = json.as<JsonObject>();
         if (jsonObj.containsKey("lapTime")) {
             uint32_t lapTimeMs = jsonObj["lapTime"].as<uint32_t>();
+            // Master's own pilot-card Dev tap.  Same race-level mark — see
+            // _raceSimulatedLaps.
+            if (jsonObj["sim"].as<bool>()) _raceSimulatedLaps = true;
             if (timer) timer->recordManualLap(lapTimeMs);
             pushMultiNodeState();
         }
@@ -3011,6 +3069,8 @@ EEPROM:\n";
         // True when the race outran the ring, so the client knows the restored
         // list starts partway through rather than assuming it has everything.
         doc["truncated"] = (held < total);
+        // Only when set, matching directorState — see _raceSimulatedLaps.
+        if (_raceSimulatedLaps) doc["simulatedLaps"] = true;
         JsonArray arr = doc.createNestedArray("laps");
         for (uint16_t i = 0; i < held; i++) {
             LapSyncRecord rec;
@@ -3058,6 +3118,7 @@ EEPROM:\n";
         }
         multiNode->clearAllLaps();
         if (timer) timer->clearLapData();  // also clear master host laps
+        _raceSimulatedLaps = false;        // and the mark that described them
         pushMultiNodeState();
         request->send(200, "application/json", "{\"ok\":true}");
     });
@@ -3133,6 +3194,15 @@ EEPROM:\n";
             }
             JsonObject obj  = json.as<JsonObject>();
             uint8_t  nodeId = obj["nodeId"] | 0;
+
+            // Race-level mark, set BEFORE the store so the pushMultiNodeState()
+            // that carries this lap also carries the mark — a client must never
+            // see the fabricated lap for one broadcast before the badge.
+            //
+            // Deliberately does NOT touch the lap record, the ring, the CRC or
+            // the delta window: a simulated lap heals exactly like a real one,
+            // which is the whole reason the mark lives at race level.
+            if (obj["sim"].as<bool>()) _raceSimulatedLaps = true;
 
             uint32_t ackSeq = 0, oldestSeq = 0;
             bool     ok     = false;
@@ -3909,6 +3979,13 @@ EEPROM:\n";
         // a full start-margin ahead of the race it was displaying — measured at
         // 1.23 s against a client.  The timer and the announcement have to move
         // together, because the announcement is what the UI actually listens to.
+        // Backstop for the simulated-laps mark.  The browser clears it via
+        // /api/multinode/clearLaps on its way here, but that is the browser's
+        // promise to keep and this endpoint is the point past which a race is
+        // definitively starting.  Deliberately NOT in race/prearm: a cancelled
+        // countdown must leave the previous race untouched, which is the same
+        // reason beginRaceEpoch() is non-destructive.
+        _raceSimulatedLaps = false;
         multiNode->queueRaceStart();
         request->send(200, "application/json", "{\"status\":\"OK\"}");
     });

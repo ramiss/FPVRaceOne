@@ -23,7 +23,7 @@ flashing.
 7. [Step 6 — First Power-On](#step-6--first-power-on)
 8. [Step 7 — Verify the Build](#step-7--verify-the-build)
 9. [The 3D-Printed Case](#the-3d-printed-case)
-10. [The PCB](#the-pcb)
+10. [Fitting your build in the case](#fitting-your-build-in-the-case)
 11. [Building the Firmware From Source](#building-the-firmware-from-source)
 12. [Troubleshooting](#troubleshooting)
 
@@ -343,15 +343,22 @@ and no brim are the two worth keeping.
 PETG is the recommended material: a timer sits out in the sun on a gate all day,
 and PLA softens at temperatures a black case reaches easily.
 
-## The PCB
+## Fitting your build in the case
 
-**[`PCB/`](../PCB/)** holds the KiCad project for the FPVRaceOne board, which
-carries the XIAO, the RX5808, and R1/C1/C2 with no hand wiring at all. Render
-images are in [`Schematic/`](../Schematic/).
+The case is designed around a compact board layout, so a hand-wired build needs
+to be tidy to close up. Worth planning before you solder:
 
-A hand-wired build on the diagram above is electrically identical to the PCB.
-The PCB is tidier, more repeatable, and is what the printed case is designed
-around — a hand-wired bundle may need persuading to fit.
+- Keep the wire runs between the XIAO and the RX5808 as short as the diagram
+  allows — long loops are what stop the halves meeting.
+- Put R1 and the two capacitors close to the pads they serve (also better
+  electrically, see [Step 3](#step-3--the-support-components)) rather than out
+  on flying leads.
+- Route both antenna pigtails out before you seat the boards; a u.FL lead
+  trapped under a board is the usual reason a lid won't sit flat.
+
+If it won't quite close, print the case at 100 % and check your wire gauge
+first — 28-30 AWG silicone is specified in the parts list for exactly this
+reason, and thicker wire is the most common culprit.
 
 ---
 

@@ -693,14 +693,28 @@ main {
  * ========================================================================== */
 /* Multi-node mode strip.  mnUpdateRaceStatusBar() shows it with
  * style.display = '', so the class supplies the display value. */
-.race-mode-strip {
-  display: block;
-  padding: 7px 16px;
-  border-bottom: 1px solid var(--border-color);
-  font-size: 11px;
+/* Multi-node mode line: first thing in the race console, above the clock.
+ *
+ * Replaces .race-mode-strip, which was a full-width band above the race views.
+ * The text states a standing fact about the unit ("this is client 4, connected
+ * to <master>"), so it no longer costs every race page a band across the top.
+ *
+ * No background or border box: inside a 224px console those would read as a
+ * second panel.  The separating rule is a border-BOTTOM, so it sits between the
+ * status and the clock, and it uses --rule-color to match the rule that
+ * .race-meta draws on the other side of the clock — one weight, both sides.
+ *
+ * overflow-wrap because an SSID suffix has no spaces to break at and would
+ * otherwise run past the narrow column. */
+.race-mode-line {
+  margin-bottom: 12px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule-color);
+  font-size: 10px;
+  line-height: 1.45;
   letter-spacing: 0.02em;
   color: var(--secondary-color);
-  background-color: var(--bg-secondary);
+  overflow-wrap: anywhere;
 }
 
 .race-shell {
@@ -1402,6 +1416,43 @@ table tr.fastest-lap td {
   font-size: 0.95em;
 }
 
+/* "This race contains fabricated laps."  Warning colours rather than the
+ * accent: the point is that these numbers are not a result, and it must not
+ * read as ordinary race chrome.  Uses --danger-color, which is declared on bare
+ * :root so it resolves in every theme. */
+.banner-simulated {
+  margin: 0 0 10px;
+  padding: 8px 14px;
+  border: 1px solid var(--danger-color);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background-color: var(--table-even-bg);
+  color: var(--danger-color);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* "Your race is on the other tab."  Informational, NOT a warning: nothing is
+ * wrong — this page is simply not where the pilot's race lives right now.  So
+ * it borrows the accent rather than --danger-color, which is reserved for the
+ * simulated-laps banner above and must stay distinct from it. */
+.banner-locked {
+  margin: 0 0 10px;
+  padding: 8px 14px;
+  border: 1px solid var(--accent-color);
+  border-left-width: 4px;
+  border-radius: 6px;
+  background-color: var(--table-even-bg);
+  color: var(--text-color);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.banner-locked a {
+  color: var(--accent-color);
+  font-weight: 600;
+}
+
 /* ── Multi-pilot Race History playback ─────────────────────────────────────
  * Timeline carries one thin marker per lap, coloured by pilot, with overall
  * time ticks underneath.  Markers are deliberately unlabelled: six pilots
@@ -1844,6 +1895,14 @@ footer {
   border-color: var(--border-color);
   border-bottom: 2px solid var(--accent-color);
   font-weight: bold;
+  /* Cancel the pulse inherited from `button.active`.
+   *
+   * These are <button> elements, so the generic `button.active` rule — written
+   * for Start Race during a countdown, where a heartbeat is the point — matched
+   * them too and left the Lap History tab flashing permanently, on every unit
+   * in every mode.  A selected segmented-control tab states which view you are
+   * on; it is not asking for attention. */
+  animation: none;
 }
 
 .analysis-content {

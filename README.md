@@ -176,7 +176,6 @@ Pre-made and flashed hardware — [- Click here to purchase your FPVRaceOne at o
 Prefer to build your own? The wiring diagram, bill of materials, SPI conversion and a step-by-step flashing guide are in **[Build From Scratch →](docs/BUILD_FROM_SCRATCH.md)**.
 
 - **[`case/`](case/)** — 3D-printable enclosure, ready-to-slice `.3mf` projects (single, four-up, and an ironed-lid variant). PETG, no supports — see [The 3D-Printed Case](docs/BUILD_FROM_SCRATCH.md#the-3d-printed-case)
-- **[`PCB/`](PCB/)** — KiCad project for the FPVRaceOne board, so there's no hand wiring at all
 
 **[Detailed hardware setup →](docs/GETTING_STARTED.md)**
 

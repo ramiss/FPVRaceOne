@@ -552,6 +552,10 @@ async function onWiFiReconnect() {
     if (timerRunning && (newMode === 0 || newMode === 2)) {
       startRaceDisplayOnly(raceElapsedMs);
     }
+    // Re-apply the Single Race lockout after the display restore, so a client
+    // that reloads mid-race comes back locked instead of with a live Start Race
+    // button over a race already in progress.
+    applyClientRaceLockUI();
 
     // Always restore lap data regardless of run state — laps persist after race stop.
     if (newMode === 1) {
@@ -568,6 +572,11 @@ async function onWiFiReconnect() {
           // can no longer undo this.
           setLapTimerFromLastLap(ld.laps);
         }
+        // Outside the laps guard on purpose — a marked race can be restored
+        // whatever the lap count is.  OR rather than assign, for the same
+        // reason as mnRefreshNodes(): this can fire mid-race on an SSE
+        // reconnect, and clearing belongs to Start All / Clear.
+        if (ld.simulatedLaps) { mnRaceSimulated = true; mnApplySimulatedBadge(); }
       } catch (_) {}
     }
 
@@ -899,6 +908,7 @@ function setupWiFiEvents() {
   eventSource.addEventListener("masterRaceState", function (e) {
     if (e.data === "prearming") {
       if (mnClientSkipEnabled) return;
+      mnMasterPrearming = true;
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.add('active');
       // Reset the display immediately so pilot sees a clean slate during countdown.
@@ -910,18 +920,31 @@ function setupWiFiEvents() {
       lapNo = -1; lapTimes = []; excludedLaps.clear();
       lastCrossingRaceMs = 0;   // clean slate: current lap begins at race zero
       updateLapCounter();
+      // Lock and switch NOW — the countdown is the commitment point.
+      applyClientRaceLockUI();
     } else if (e.data === "started") {
       if (mnClientSkipEnabled) return;
+      mnMasterPrearming  = false;   // superseded by mnMasterRaceActive below
       mnMasterRaceActive = true;
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.remove('active');
       startRaceDisplayOnly();
+      // AFTER the display start, which enables buttons and starts the clock —
+      // this is what takes them back for the duration of the director's race.
+      applyClientRaceLockUI();
     } else if (e.data === "stopped") {
       if (mnClientSkipEnabled) return;
+      // Were we actually IN the director's race?  Exit Race makes quitting a
+      // first-class action, so a pilot can have left this race and started a
+      // solo one before the director stops the field.  Tearing their display
+      // down on the director's stop would end a race we no longer belong to.
+      const wasInDirectorRace = mnMasterRaceActive;
       mnMasterRaceActive = false;
+      mnMasterPrearming  = false;   // also the CANCELLED-countdown path
       const btn = document.getElementById('startRaceButton');
       if (btn) btn.classList.remove('active');
-      stopRaceDisplayOnly();
+      if (wasInDirectorRace) stopRaceDisplayOnly();
+      applyClientRaceLockUI();   // director's race over — hand the page back
       // The director's race ended, so the lockout no longer applies.  This does
       // not re-enable the button — stopRaceDisplayOnly() has just disabled it
       // because no race is running; it only refreshes visibility.
@@ -3736,7 +3759,13 @@ function queueSpeak(obj) {
 function startRaceDisplayOnly(offsetMs = 0) {
   updateLapCounter();
   startRaceButton.disabled = true;
-  startRaceButton.classList.add('active');
+  // NO 'active' class here.  That class carries a pulse animation and means
+  // "countdown running, arm your quad" — the prearm handlers add it and the
+  // `started` handler removes it again.  Adding it back HERE undid that removal
+  // (the started handler calls this function immediately afterwards), so the
+  // Start Race button pulsed for the whole race as though it were still the
+  // pilot's to press.  Same on any reload mid-race, in single mode too, since
+  // this is the restore path as well.
   stopRaceButton.disabled = false;
   addLapButton.disabled = false;
   // This function runs ONLY when the master started the race on this client,
@@ -4468,8 +4497,16 @@ async function startRace() {
       'Acknowledge', 'Cancel'
     );
     if (choice !== 0) return;   // Cancel — no pre-arm, no state change
-    clearLaps();
   }
+
+  // Wipe unconditionally, warn conditionally — see the matching note in
+  // mnStartRace().  clearLaps() also clears the firmware's simulated-laps mark,
+  // which is race state that outlives the laps it described.
+  clearLaps();
+
+  // Past the cancel point: a race is starting, so it is clean regardless of what
+  // was manually added to the last one.
+  mnClearSimulatedFlag();
 
   updateLapCounter();
   _raceCountdownAborted = false;
@@ -4602,6 +4639,9 @@ function stopRace() {
   // Quit notification is handled server-side: /timer/stop sets _quitPending,
   // which process() forwards to the master. No JS call needed here.
   if (mnMasterRaceActive) mnMasterRaceActive = false;
+  // ...and with that flag down the Single Race page is the pilot's own again.
+  // Also re-renders the Multi Race tab's Exit Race button away.
+  applyClientRaceLockUI();
 
   stopLapTimerDisplay();
 
@@ -4706,6 +4746,9 @@ function downloadCurrentRaceData() {
     // written before this existed simply has no key, and imports with nothing
     // excluded — which is exactly the old behaviour.
     excludedLaps: Array.from(excludedLaps).sort((a, b) => a - b),
+    // Race-level mark: true when any lap in this race was fabricated by Dev
+    // Mode.  Present only when it applies, so an ordinary race is unchanged.
+    ...(raceContainsSimulatedLaps() ? { simulatedLaps: true } : {}),
     fastestLap: Math.round(fastest * 1000),
     medianLap: Math.round(median * 1000),
     best3LapsTotal: Math.round(best3Total * 1000),
@@ -4897,21 +4940,33 @@ function addManualLap() {
     return;
   }
 
-  // Get current timer value and convert to milliseconds
-  const timerText = timer.innerHTML;
-  const match = timerText.match(/(\d{2}):(\d{2}):(\d{2})s/);
-  if (match) {
-    const minutes = parseInt(match[1]);
-    const seconds = parseInt(match[2]);
-    const centiseconds = parseInt(match[3]);
-    const totalMs = (minutes * 60000) + (seconds * 1000) + (centiseconds * 10);
-    
+  // A manually added lap is fabricated data — mark the race so a download of
+  // it can never be mistaken for a real result.  Same race-level flag the
+  // multi-node Dev tap sets; see mnRaceSimulated.
+  mnRaceSimulated = true;
+  mnApplySimulatedBadge();
+
+  // Elapsed comes from the race clock's own anchor, NOT from parsing the
+  // clock's text.
+  //
+  // This used to read timer.innerHTML and match /(\d{2}):(\d{2}):(\d{2})s/.
+  // That was tied to a fixed hundredths format; once every clock moved to
+  // formatMsDisplay() the text became precision-dependent — "00:12:3s" at
+  // tenths, "00:12:345s" at thousandths, and a fourth field past an hour — so
+  // the regex silently failed to match and Add Lap did nothing at all on two of
+  // the three precision settings.  Reading the source the clock is rendered
+  // FROM cannot drift with its formatting.
+  if (raceDisplayStartMs > 0) {
+    const totalMs = Date.now() - raceDisplayStartMs;
+
     // Calculate lap time in milliseconds
     const lapTimeMs = totalMs - (lapNo >= 0 ? lapTimes.reduce((a, b) => a + (b * 1000), 0) : 0);
-    
+
     // Send lap to backend to broadcast to all clients (including OSD)
     if (usbConnected && transportManager) {
-      transportManager.sendCommand('timer/addLap', 'POST', { lapTime: lapTimeMs })
+      // `sim` marks the RACE, not this lap — the firmware holds one boolean and
+      // hands it back in /api/laps/current, so the badge survives a refresh.
+      transportManager.sendCommand('timer/addLap', 'POST', { lapTime: lapTimeMs, sim: true })
         .then(data => console.log('Manual lap broadcasted:', data))
         .catch(err => console.error('Failed to broadcast manual lap:', err));
     } else {
@@ -4921,7 +4976,7 @@ function addManualLap() {
           'Accept': 'application/json',
           'Content-Type': 'application/json',
         },
-        body: JSON.stringify({ lapTime: lapTimeMs })
+        body: JSON.stringify({ lapTime: lapTimeMs, sim: true })
       })
         .then(response => response.json())
         .then(data => console.log('Manual lap broadcasted:', data))
@@ -5375,6 +5430,9 @@ function saveCurrentRace() {
     // Carried through history and downloads so the exclusions survive a reload,
     // a save-and-reopen, and an export/import round trip.
     excludedLaps: Array.from(excludedLaps).sort((a, b) => a - b),
+    // Race-level mark: true when any lap in this race was fabricated by Dev
+    // Mode.  Present only when it applies, so an ordinary race is unchanged.
+    ...(raceContainsSimulatedLaps() ? { simulatedLaps: true } : {}),
     fastestLap: Math.round(fastest * 1000),
     medianLap: Math.round(median * 1000),
     best3LapsTotal: Math.round(best3Total * 1000),
@@ -8966,6 +9024,159 @@ function applyAddLapButtonUI() {
   }
 }
 
+// ── Single Race lockout while racing under the director ────────────────────
+//
+// A client in the director's race has exactly ONE race, and it is the
+// director's.  Leaving the Single Race page live alongside it gave a pilot two
+// clocks and two sets of controls for the same race: its Start Race would
+// re-enter a race already in progress, its Stop Race would quietly DNF them
+// with no mention of the director, and its clock ticked next to a lap table
+// that only ever fills from the master.  That is what made a dev tap look like
+// a bug — the page a pilot naturally watches is not the page their race is on.
+//
+// The gate is mnMasterRaceActive, the same flag applyAddLapButtonUI() uses.
+// Both masterRaceState handlers short-circuit on mnClientSkipEnabled before
+// setting it, so a pilot who is IGNORING the race director is never locked —
+// their Single Race page is genuinely theirs and stays fully live.
+//
+// The lockout is UI only.  The firmware timer keeps running, crossings keep
+// being recorded and synced upstream; nothing here touches the race itself.
+// Locked from PRE-ARM, not from the start of the clock.  The countdown is the
+// moment a pilot is committed to the director's race — they are arming a quad,
+// not deciding whether to run a solo one — and it is also the window in which
+// a stray Start Race on the single page does the most damage.
+//
+// Three inputs, because no one of them covers every way in.  mnMasterPrearming
+// is the fast SSE edge; rvPrearmActive is the same fact carried in the ~2 s
+// director-state push, which is the only source left for a client that reloads
+// mid-countdown; mnMasterRaceActive carries the lock once the race is running.
+function rvClientLockedToDirector() {
+  // The skip rule is stated HERE rather than left to the SSE handlers' early
+  // returns.  Those guard mnMasterPrearming and mnMasterRaceActive, but
+  // rvPrearmActive comes from the director-state push, which every client
+  // receives regardless — so relying on the handlers would have locked a pilot
+  // who had explicitly chosen to ignore the race director.
+  if (mnNodeMode !== 2 || mnClientSkipEnabled) return false;
+  return mnMasterRaceActive || mnMasterPrearming || rvPrearmActive;
+}
+
+// Director countdown in progress on this client.  Deliberately NOT folded into
+// mnMasterRaceActive: that flag means "a director race is running", and other
+// code reads it as exactly that — stopRace() offers a DNF confirmation on it,
+// and applyAddLapButtonUI() blocks lap injection on it.  Widening it to include
+// the countdown would quietly change both.
+let mnMasterPrearming = false;
+
+// Rising-edge latch for the one-time tab switch below.  Reset when the lock
+// releases, so the next race switches the pilot across again.
+let _clientLockSwitched = false;
+
+function applyClientRaceLockUI() {
+  const locked = rvClientLockedToDirector();
+
+  const notice = document.getElementById('clientRaceLockNotice');
+  if (notice) notice.style.display = locked ? '' : 'none';
+
+  // The lock engages at pre-arm, so the wording has to cover the countdown as
+  // well as the race — and the Exit Race hint must not point at a button that
+  // is not on screen yet.
+  const racing = mnMasterRaceActive;
+  const lead   = document.getElementById('clientRaceLockLead');
+  if (lead) {
+    lead.textContent = racing
+      ? 'Racing under the race director.'
+      : 'The race director is starting a race.';
+  }
+  const exitHint = document.getElementById('clientRaceLockExitHint');
+  if (exitHint) exitHint.style.display = racing ? '' : 'none';
+
+  // Exit Race tracks the RUNNING race, not the lock.  The lock starts at
+  // pre-arm, but there is nothing to exit during a countdown: this client's
+  // timer has not started, so /timer/stop has no race to end, and the master's
+  // masterStart broadcast would start us anyway a few seconds later.  Opting
+  // out mid-countdown would need a protocol that does not exist, and the window
+  // is about five seconds — so the button appears once the race is real.
+  const canExit = (mnNodeMode === 2 && mnMasterRaceActive);
+  const exitBox = document.getElementById('rv-exit-race-actions');
+  if (exitBox) exitBox.style.display = canExit ? '' : 'none';
+
+  // Importing a saved file mid-race would replace the live view and FREEZE it
+  // there: rvImportedNodes blocks director-state pushes until the master starts
+  // another race, so a pilot could lose sight of the race they are flying with
+  // no obvious way back.
+  const raceLive  = locked || rvRaceRunning;
+  const importBtn = document.getElementById('rvImportRaceBtn');
+  if (importBtn) importBtn.disabled = raceLive;
+  const importNote = document.getElementById('rvImportRaceNote');
+  if (importNote) {
+    importNote.textContent = raceLive
+      ? 'Unavailable while a race is running.'
+      : 'Load a saved MultiRace file to review.';
+  }
+
+  // HIDE the whole single-pilot view, rather than disabling its controls one by
+  // one.  Disabling was not enough and could not be made enough: `button.active`
+  // carries a CSS pulse animation and `button.active:disabled` only resets
+  // opacity, so a disabled Start Race kept flashing as though the race were
+  // his to start.  Every other live-looking flourish inside this view — the lap
+  // table's header, the state pill, the summary tiles — would have needed the
+  // same treatment, and each new one added later would reintroduce the bug.
+  // One display:none on the container ends the whole class of problem.
+  //
+  // Only ever touched in CLIENT mode: in master mode this element's visibility
+  // belongs to onRaceTabOpen(), and fighting it would blank the master's view.
+  if (mnNodeMode === 2) {
+    const singleView = document.getElementById('single-race-view');
+    if (singleView) singleView.style.display = locked ? 'none' : '';
+  }
+
+  // Move the pilot to the tab their race is actually on — but only on the
+  // RISING EDGE, and only if they are looking at the Race tab right now.
+  // This function runs on every director-state push, so switching every time
+  // would pin them to Multi Race and make the rest of the UI unreachable; and
+  // yanking someone out of Config mid-edit because a race started elsewhere
+  // would be its own bug.
+  if (locked && !_clientLockSwitched) {
+    _clientLockSwitched = true;
+    const raceTab = document.getElementById('race');
+    const rvLink  = document.getElementById('nav-link-raceview');
+    if (raceTab && rvLink && raceTab.style.display !== 'none') rvLink.click();
+  } else if (!locked) {
+    _clientLockSwitched = false;   // re-arm for the next race
+  }
+
+  // FORCE disabled while locked; on release, hand the buttons back to the
+  // ordinary start/stop paths rather than guessing their state here.  Same
+  // one-way rule as applyAddLapButtonUI(), for the same reason: two owners
+  // fighting over one button is how a Start Race ends up live mid-race.
+  //
+  // Clear Laps is the ONE exception, and it has to be: no other code path ever
+  // touches it — it ships enabled in the markup and stays that way — so if this
+  // function disables it and then returns early on release, it is disabled for
+  // the life of the page.
+  if (!locked) {
+    const clr = document.getElementById('clearLapsButton');
+    if (clr) clr.disabled = false;
+    return;
+  }
+
+  ['startRaceButton', 'stopRaceButton', 'clearLapsButton', 'addLapButton']
+    .forEach(id => { const b = document.getElementById(id); if (b) b.disabled = true; });
+
+  // The clock must not tick.  It is the pilot's own race clock, but the number
+  // that matters is on the Multi Race tab, and two clocks drifting apart by a
+  // fanout interval reads as a fault.
+  //
+  // Called AFTER startRaceDisplayOnly() rather than teaching that function
+  // about the lock: it still has to set rvOwnRaceStartMs, raceDisplayStartMs
+  // and lapTimerStartMs, because the Multi Race clock and all lap bookkeeping
+  // are derived from them.  Only the painting stops.
+  clearInterval(timerInterval);
+  stopLapTimerDisplay();
+  const clk = document.getElementById('timer');
+  if (clk) clk.innerHTML = formatMsDisplay(0);
+}
+
 // Show the Diagnostics System Monitor only in Dev Mode.
 //
 // The log stream is engineering output — slot letters, lap-sync state, RSSI
@@ -9011,12 +9222,51 @@ const MN_POLL_STALE_AFTER = 3;     // ~6 s at the 2 s poll interval
 // there is nothing left to freeze — one guarded call site was already missed,
 // which is how a client's laps vanished after an import.)
 let mnHistoryNodes       = null;   // the multi-pilot race currently open on the Race History tab, or null
+let mnHistorySimulated   = false;  // that race's simulatedLaps mark, carried in from the file
 let mnRaceTimerIntervalId = null;
 let _pageInitDone        = false;  // true once DOMContentLoaded IIFE completes successfully
 let mnRaceStartMs         = 0;
 let mnMasterConnected     = false; // client: true when registered with master
 let mnClientPollInterval  = null;  // client: timer for periodic /api/mode polls
 let mnDevMode             = false; // dev mode: click pilot name to simulate a lap
+
+// Has this race had any laps FABRICATED into it by Dev Mode?
+//
+// Race-level, not per-lap, and deliberately so.  Per-lap tagging would mean a
+// flag on the lap record itself, which is the structure the client's peer cache,
+// digest comparison and backfill repair all reconcile — a backfilled chunk would
+// have to carry the flag or the same lap would look different depending on
+// whether it arrived live or by repair.  That is a real way to break the healing
+// logic in exchange for detail nobody needs mid-race.
+//
+// What the tag is actually for is the FILE: a downloaded race that says
+// "contains simulated laps" cannot be mistaken for a result later, whichever
+// laps were fabricated.  One boolean answers that.
+//
+// On the master this is set locally the moment a tap fires.  Clients learn it
+// from the director-state payload, since they have no other way to know.
+let mnRaceSimulated       = false;
+
+// Called wherever a race begins or its data is cleared.
+function mnClearSimulatedFlag() {
+  mnRaceSimulated = false;
+  mnApplySimulatedBadge();
+}
+
+// Show/hide the "Simulated laps" marker on the Race tab.
+function mnApplySimulatedBadge() {
+  const el = document.getElementById('mnSimulatedBanner');
+  if (el) el.style.display = mnRaceSimulated ? '' : 'none';
+}
+
+// Set on a CLIENT from the director-state push — see rvHandleDirectorState.
+let rvSimulatedRace = false;
+
+// True when the race on screen contains fabricated laps: the master's own flag,
+// or the one the director pushed to this client.
+function raceContainsSimulatedLaps() {
+  return !!(mnRaceSimulated || rvSimulatedRace);
+}
 let mnStatusSSID          = '';    // SSID string for the race status bar (master mode: own SSID; client mode: master SSID)
 let mnMyOwnSSID           = '';    // this device's own SSID — needed so the client banner can show its own MAC suffix
 
@@ -9400,6 +9650,20 @@ async function mnRefreshNodes() {
                                  Array.isArray(data.lapDeltas) ? data.lapDeltas : [],
                                  (data.race || {}).raceId);
       ok = true;
+      // The firmware owns this mark now, so a master page refresh gets its
+      // badge back instead of losing it with the tab's local state.
+      //
+      // OR, never assign.  A Dev tap sets the local flag and THEN posts, so an
+      // assignment from a poll landing in that gap would clear a mark the
+      // server has not been told about yet and flicker the badge off.  Clearing
+      // is already handled locally by mnClearSimulatedFlag() at Start All and
+      // Clear, which are the same two points the firmware clears at.  This also
+      // fails in the safe direction: a race wrongly marked simulated is a
+      // nuisance, one wrongly marked real is a bad result in someone's hands.
+      if ((data.race || {}).simulatedLaps) {
+        mnRaceSimulated = true;
+        mnApplySimulatedBadge();
+      }
       mnRenderNodes(nodes);
       // No import guard needed any more: an imported race renders on the Race
       // History tab with skipMnState, so it shares no state with this path.
@@ -9517,29 +9781,63 @@ function _pilotCardTextColor(hexColor) {
 }
 
 // Update the status bar above the race clock based on current multi-node mode.
+// Fill the multi-node mode line in every race console.
+//
+// Was a single full-width strip above the race views; it is now one .race-mode-line
+// per console (Single Race, Master Race, and the client's Multi Race view), sitting
+// above the clock and ruled off from it, so the standing fact about this unit's
+// role travels with the clock instead of costing every page a band of space.
+//
+// Written to ALL of them rather than to whichever is visible: the Race View is a
+// separate tab, so more than one can be in the document at once, and computing
+// the text once and applying it everywhere is cheaper than tracking which view
+// is on screen.
 function mnUpdateRaceStatusBar() {
   rvShowTabIfClient();
-  const bar  = document.getElementById('mn-race-status-bar');
-  const text = document.getElementById('mn-race-status-text');
-  if (!bar || !text) return;
+  const lines = document.querySelectorAll('.race-mode-line');
+  if (!lines.length) return;
+
+  // Built as two explicit lines — role, then what it is connected to — rather
+  // than one string with an em dash.  In a 224px console the single string
+  // always wrapped anyway, and the dash was left dangling at the end of the
+  // first line doing nothing.  Two elements also mean the break is GUARANTEED
+  // rather than a happy accident of the current column width, font and SSID
+  // length, any of which could put both halves on one line or split the SSID.
+  let role = '', detail = '';
   if (mnNodeMode === 1) {
-    bar.style.display = '';
-    text.textContent  = `Multi-Node (Master) — ${mnStatusSSID || 'FPVRaceOne'}`;
+    role   = 'Multi-Node (Master)';
+    detail = mnStatusSSID || 'FPVRaceOne';
   } else if (mnNodeMode === 2) {
-    bar.style.display = '';
     const mySuffix     = _ssidSuffix(mnMyOwnSSID);
     const masterSuffix = _ssidSuffix(mnStatusSSID) || mnStatusSSID || '';
-    const prefix       = mySuffix ? `Multi-Node (Client - ${mySuffix})` : 'Multi-Node (Client)';
+    role = mySuffix ? `Multi-Node (Client - ${mySuffix})` : 'Multi-Node (Client)';
     if (!mnMasterConnected) {
-      text.textContent = `${prefix} — Disconnected from ${masterSuffix}`.trim();
+      detail = `Disconnected from ${masterSuffix}`.trim();
     } else if (mnMyNodeId > 0) {
-      text.textContent = `${prefix} ${mnMyNodeId} — Connected to ${masterSuffix}`.trim();
+      role  += ` ${mnMyNodeId}`;
+      detail = `Connected to ${masterSuffix}`.trim();
     } else {
-      text.textContent = `${prefix} — Searching for master node...`;
+      detail = 'Searching for master node…';
     }
-  } else {
-    bar.style.display = 'none';
   }
+
+  // Standalone (mode 0) has no node role to report, so the line stays hidden
+  // rather than showing an empty row where the clock's spacing used to be.
+  lines.forEach(el => {
+    el.textContent   = '';                      // clears previous children too
+    el.style.display = role ? '' : 'none';
+    if (!role) return;
+    // Built as nodes, not innerHTML: the SSID is user-set text and has no
+    // business being parsed as markup.
+    const a = document.createElement('div');
+    a.textContent = role;
+    el.appendChild(a);
+    if (detail) {
+      const b = document.createElement('div');
+      b.textContent = detail;
+      el.appendChild(b);
+    }
+  });
 }
 
 // Show/hide the correct race view depending on node mode. Called on tab open and on page load.
@@ -9562,6 +9860,10 @@ function onRaceTabOpen() {
   }
   mnUpdateRaceStatusBar();
   updateHistoryTabMode();
+  // LAST: the branch above unconditionally reveals single-race-view for any
+  // non-master mode, so the lock has to get the final word or opening the Race
+  // tab would hand a locked client its live-looking race page back.
+  applyClientRaceLockUI();
 }
 
 // Rename the Race History tab and swap its content based on node mode.
@@ -9591,6 +9893,12 @@ function updateHistoryTabMode() {
 // Dev mode: simulate a lap for a pilot by clicking their name card.
 async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
   if (!mnDevMode) return;
+
+  // Mark the race the instant a lap is fabricated, before anything can fail.
+  // Set locally so the master's own UI and downloads are correct even if the
+  // POST below never lands; the firmware is told too, so clients find out.
+  mnRaceSimulated = true;
+  mnApplySimulatedBadge();
   // Use actual race clock: elapsed since start minus this pilot's already-logged total
   let lapMs;
   if (mnRaceStartMs > 0) {
@@ -9618,17 +9926,20 @@ async function mnDevTriggerLap(nodeId, nextLapNumber, callsign) {
     if (typeof addLap === 'function') addLap(lapSec.toFixed(3));
     mnRenderRaceTab(mnCurrentNodes);
     // Persist server-side without SSE broadcast (avoids double-adding via the 'lap' event).
+    // `sim` marks the RACE as containing fabricated laps so clients — which
+    // cannot see this browser's state — learn it from the director-state push.
     fetch('/timer/persistLap', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lapTime: lapMs }),
+      body: JSON.stringify({ lapTime: lapMs, sim: true }),
     }).catch(() => {});
   } else {
     try {
       await fetch('/api/multinode/lap', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ nodeId, lapNumber: nextLapNumber, lapTimeMs: lapMs }),
+        // `sim` marks the RACE, not this lap — see mnRaceSimulated.
+        body: JSON.stringify({ nodeId, lapNumber: nextLapNumber, lapTimeMs: lapMs, sim: true }),
       });
       setTimeout(() => mnRefreshNodes(), 200);
     } catch (e) { console.warn('[DEV] lap inject failed:', e); }
@@ -9860,7 +10171,10 @@ function mnRenderRaceTab(nodes, opts) {
       ? ranked.find(n => n.fastestMs === globalFastestMs)
       : null;
 
-    _set('.rm-pilots', `${ranked.length} of ${allSlots.length}`);
+    // Just the count.  "3 of 8" invited a reading it never meant: the 8 is the
+    // slot capacity of the unit, not a field that eight pilots were expected to
+    // fill, so a healthy 3-pilot heat looked five pilots short.
+    _set('.rm-pilots', String(ranked.length));
     _set('.rm-fastest', _fastPilot
       ? `${formatMsRace(globalFastestMs)} · ${_name(_fastPilot)}`
       : '—');
@@ -11081,6 +11395,9 @@ async function mnInitTab() {
         mnStatusSSID = cfg.masterSSID || '';
       }
       mnStartClientPoll();
+      // masterRaceActive was just refreshed from the device — apply the Single
+      // Race lockout to match.
+      applyClientRaceLockUI();
     } else {
       mnStopPolling();
       mnStopClientPoll();
@@ -11135,6 +11452,7 @@ let rvElapsedAtPushMs  = 0;
 let rvLocalReceiveMs   = 0;
 let rvTimerInterval    = null;
 let rvImportedNodes    = null;  // non-null while viewing an imported file; blocks live pushes from overwriting
+let rvImportedSimulated = false; // that file's own simulatedLaps mark
 
 function rvShowTabIfClient() {
   const li  = document.getElementById('nav-li-raceview');
@@ -11231,8 +11549,41 @@ function rvRender() {
     raceRunning: rvRaceRunning || rvPrearmActive,
   });
   rvUpdateBanner();
+  rvApplySimulatedBanner();
+  // Keeps Exit Race in step with the race state on every push.  Idempotent, and
+  // a no-op when this pilot is not locked to the director.
+  applyClientRaceLockUI();
   rvUpdateTimerDisplay();
   rvUpdateDownloadButton();
+}
+
+// Leave the race director's race from the Multi Race tab.
+//
+// Delegates to stopRace() rather than reimplementing the exit.  That function
+// already owns every piece of this: it carries the DNF confirmation, POSTs
+// /timer/stop (where the firmware sets _quitPending and process() forwards the
+// quit to the master), stops the clock, resets the buttons, clears
+// mnMasterRaceActive and releases the lockout.  A second confirm here would
+// just ask the same question twice.
+function rvExitRace() {
+  // Gated on the RUNNING race, matching the button's own visibility rule in
+  // applyClientRaceLockUI() — during pre-arm there is no race to exit yet.
+  if (!(mnNodeMode === 2 && mnMasterRaceActive)) return;
+  stopRace();
+}
+
+// Client-side twin of mnApplySimulatedBadge().  A client renders the Race View
+// tab, not the master's Race tab, so it needs its own element — the master's
+// banner is never on screen here.
+//
+// Driven by rvSimulatedRace (from the director-state push) OR the imported-race
+// mark, so reviewing a saved MultiRace file that contains fabricated laps warns
+// the same way the live race does.
+function rvApplySimulatedBanner() {
+  const el = document.getElementById('rvSimulatedBanner');
+  if (!el) return;
+  const show = rvImportedNodes ? rvImportedSimulated : rvSimulatedRace;
+  el.style.display = show ? '' : 'none';
 }
 
 // ── Peer lap cache (Lap Sync Protocol §3, §6.5) ─────────────────────────────
@@ -11336,6 +11687,18 @@ function rvIsUnanchored(n) {
   return (Number(n.lapCount) || 0) > 0;
 }
 
+// Wipe the peer cache outside the epoch rule.
+//
+// The epoch check in rvMergeNodes only fires on a NEW RACE.  A Clear is not a
+// new race — no epoch is minted — so anything that deletes laps without
+// starting a race has to say so explicitly, or the cache re-renders what the
+// firmware just threw away.  rvCacheEpoch is reset too so the next push
+// re-adopts whatever epoch is current instead of matching a stale one.
+function rvResetLapCache() {
+  rvLapCache   = {};
+  rvCacheEpoch = 0;
+}
+
 function rvMergeNodes(nodes, deltas, raceId) {
   // A new epoch invalidates everything: laps from a previous race must never
   // merge into this one's standings.
@@ -11351,7 +11714,14 @@ function rvMergeNodes(nodes, deltas, raceId) {
     // Rule 3: a client ignores anything bearing its own nodeId.  Its own laps
     // are authoritative locally and must never be overwritten by the master's
     // aggregate copy of them.
-    if (mnMyNodeId > 0 && d.nodeId === mnMyNodeId) continue;
+    //
+    // EXCEPT in a simulated race.  A lap the director fabricated into our slot
+    // has no local origin — it was invented on the master and never touched
+    // this device's timer — so "authoritative locally" describes data that does
+    // not exist, and the rule silently discards the only copy there is.  That is
+    // why a dev tap showed on the master and on every OTHER client but never on
+    // the pilot it was aimed at.
+    if (mnMyNodeId > 0 && d.nodeId === mnMyNodeId && !rvSimulatedRace) continue;
     const list = (rvLapCache[d.nodeId] ||= []);
     if (!list.some(l => l.seq === d.seq)) {
       list.push({ seq: d.seq, lapTimeMs: d.lapTimeMs,
@@ -11369,11 +11739,70 @@ function rvMergeNodes(nodes, deltas, raceId) {
       return { ...n, lapsStale: 0, unanchored: rvIsUnanchored(n) };
     }
 
-    const cached = (mnMyNodeId > 0 && n.nodeId === mnMyNodeId)
-                 ? null                       // our own row is rendered from local data
-                 : (rvLapCache[n.nodeId] || []);
+    // OUR OWN ROW — local data is the source of truth, and this path is
+    // deliberately OUTSIDE the peer-cache healing machinery below.
+    //
+    // It reads no cache, computes no lapsStale, and never calls
+    // rvMaybeBackfill: our own laps arrive through addLap() as we fly them, so
+    // there is nothing to reconcile against a peer digest and nothing that
+    // could be "missing".  Routing our own row through the backfill path would
+    // also be pointless — /api/multinode/laps resolves nodes via findNode(),
+    // which only knows OTHER clients.
+    //
+    // The comment here used to promise "rendered from local data" while
+    // returning nothing at all, so a client's own card fell back to whatever
+    // the master happened to push.  That worked only while the master still
+    // sent full lap arrays; once the capability gate flipped and it sent
+    // deltas only, a pilot's own laps vanished from their own card.
+    // In a SIMULATED race the master is authoritative for every row, our own
+    // included, so this branch is skipped entirely and we fall through to the
+    // ordinary peer path below (cache + digest + backfill).
+    //
+    // Local data cannot be the source of truth for laps that were never flown
+    // here: the director invented them on the master and this device's timer
+    // knows nothing about them.  Falling through also removes this row's blind
+    // spot: the own-row branch hard-codes lapsStale: 0 and never calls
+    // rvMaybeBackfill, so an incomplete set could neither report itself as
+    // short nor complete itself.  The peer path at least compares lapCount
+    // against what we hold.  (The actual repair for a fabricated lap comes from
+    // the master pushing full arrays — see the emitLegacyLaps note in
+    // webserver.cpp — because this row's backfill endpoint resolves to our own
+    // empty LapTimer.)
+    //
+    // Tradeoff, accepted deliberately: if this pilot also flew REAL laps in the
+    // same heat, those now render from the master's aggregate rather than from
+    // local state, so they can trail by a lap-sync round trip.  Merging the two
+    // instead would mean reconciling two writers into one seq space that can
+    // genuinely collide (a fabricated lap takes ackSeq + 1, which a real lap in
+    // flight may already own) — complexity that buys nothing, because a race
+    // carrying fabricated laps is a test artifact and never a result.
+    if (mnMyNodeId > 0 && n.nodeId === mnMyNodeId && !rvSimulatedRace) {
+      // lapTimes is in SECONDS, indexed by lap number (0 = first crossing).
+      const mine = (Array.isArray(lapTimes) ? lapTimes : [])
+        .map((t, i) => ({ lapNumber: i, lapTimeMs: Math.round(t * 1000) }));
+      return {
+        ...n,
+        // Fall back to the pushed array only when we have nothing locally —
+        // e.g. straight after a page reload, before the lap restore runs.
+        laps: mine.length ? mine : (Array.isArray(n.laps) ? n.laps : []),
+        lapsStale: 0,                         // authoritative: nothing can be missing
+        unanchored: rvIsUnanchored(n),
+      };
+    }
 
-    if (!cached) return { ...n, lapsStale: 0, unanchored: rvIsUnanchored(n) };
+    // A peer that reports ZERO laps has been cleared, so drop what we hold for
+    // it.  This is the other half of the Clear bug: the director's browser can
+    // call rvResetLapCache() directly, but a CLIENT only ever learns about a
+    // Clear from this payload, and a Clear mints no new epoch — so without this
+    // every client kept rendering the wiped race from its own cache.
+    //
+    // Safe to follow, because for a PEER row the master is the aggregator: it
+    // receives laps before it broadcasts them, so anything we cached for this
+    // node came from the master in the first place.  lapCount 0 therefore means
+    // the master no longer has them, not that it has not seen them yet.
+    if (n.lapCount === 0 && rvLapCache[n.nodeId]) delete rvLapCache[n.nodeId];
+
+    const cached = rvLapCache[n.nodeId] || [];
 
     // Digest comparison (§6.5).  lapCount is the authoritative total; anything
     // we are missing was dropped by the delta cap or arrived while we were away.
@@ -11405,6 +11834,12 @@ function rvHandleDirectorState(payload) {
     rvPrearmActive    = !!race.prearmActive;
     rvElapsedAtPushMs = Number.isFinite(race.elapsedMs) ? race.elapsedMs : 0;
     rvLocalReceiveMs  = Date.now();
+
+    // Race-level simulated mark.  A client has no other way to know the
+    // director fabricated laps into this heat, and without it a file saved
+    // here would look like a real result.  Read every push so it clears when
+    // the director starts a clean race.
+    rvSimulatedRace = !!race.simulatedLaps;
 
     // If master is starting a new race, drop the imported-view freeze so live
     // data takes over again.
@@ -11482,9 +11917,14 @@ function downloadClientRaceData() {
 
   if (allNodes.length === 0) { alert('No race data to download.'); return; }
 
-  const ts   = Math.floor(Date.now() / 1000);
+  const ts      = Math.floor(Date.now() / 1000);
+  // Same race-level mark as the master's download.  A client learns it from the
+  // director-state push, so a heat fabricated on the master is still flagged in
+  // a file saved from a pilot's own unit.
+  const payload = { type: 'MultiRace', timestamp: ts, nodes: allNodes };
+  if (raceContainsSimulatedLaps()) payload.simulatedLaps = true;
   const blob = new Blob(
-    [JSON.stringify({ type: 'MultiRace', timestamp: ts, nodes: allNodes }, null, 2)],
+    [JSON.stringify(payload, null, 2)],
     { type: 'application/json' }
   );
   const url = URL.createObjectURL(blob);
@@ -11535,6 +11975,10 @@ async function importClientRace(input) {
       lapCount, totalMs, avgMs, fastestMs,
     };
   });
+
+  // Carry the file's own mark, so a saved race that contains fabricated laps
+  // warns here exactly as it did live.
+  rvImportedSimulated = !!json.simulatedLaps;
 
   // Freeze: live director-state pushes won't replace this view until the
   // master starts a new race (handled in rvHandleDirectorState).
@@ -11621,12 +12065,34 @@ async function mnStartRace() {
       'Acknowledge', 'Cancel'
     );
     if (choice !== 0) return;   // Cancel — nothing sent, no pre-arm, buttons untouched
-
-    await fetch('/api/multinode/clearLaps', { method: 'POST' }).catch(() => {});
-    clearLaps();
-    const timerEl = document.getElementById('mn-race-timer');
-    if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
   }
+
+  // The WIPE is unconditional; only the WARNING above is conditional.  There is
+  // nothing to warn about when there is no data, but there is still something to
+  // clear: the firmware's simulated-laps mark is race state that outlives the
+  // laps it described.  Skipping the wipe when mnCurrentNodes happens to show no
+  // laps left that mark set on the server, and mnRefreshNodes() would OR it
+  // straight back onto a brand-new race.  clearLaps is idempotent, so running it
+  // on an already-empty race costs one round trip and removes the whole class of
+  // "which of these two clears ran?" bug.
+  await fetch('/api/multinode/clearLaps', { method: 'POST' }).catch(() => {});
+  // A new race mints a new epoch at pre-arm, which invalidates the cache on its
+  // own — but not until that push arrives.  A poll landing in the gap would
+  // render the previous race's laps back over a board we just wiped.
+  rvResetLapCache();
+  clearLaps();
+  const timerEl = document.getElementById('mn-race-timer');
+  if (timerEl) timerEl.textContent = _mnFormatRaceTimer(0);
+
+  // Past the cancel point, so a race is definitely starting: the new one is
+  // clean whatever the last one contained.
+  //
+  // UNCONDITIONAL, and outside the block above.  Clearing it only when there
+  // was data to wipe left a reachable hole: dev-tap a client, let that client
+  // drop off so its laps leave mnCurrentNodes, and with no host laps either the
+  // block is skipped entirely — branding a brand-new, genuinely clean race as
+  // simulated, with no way to shift the banner short of a reload.
+  mnClearSimulatedFlag();
 
   // Check for non-independent pilots solo racing — they'd be overridden by Start All
   const nonIndSolo = (mnCurrentNodes || []).filter(n => n.running && !n.isMaster && !n.independent && !mnRaceRunning);
@@ -11746,6 +12212,18 @@ async function mnStopRace() {
 
 async function mnClearRace() {
   if (!confirm('Clear all race data for all pilots?')) return;
+  mnClearSimulatedFlag();
+  // Drop the peer lap cache BEFORE the refresh below.
+  //
+  // This is why Clear only ever wiped the top summaries: the firmware really
+  // did clear every node's laps, but rvMergeNodes rebuilds each pilot card from
+  // rvLapCache, and that cache is only invalidated when the raceId EPOCH
+  // changes.  clearLaps mints no new epoch — it is not a new race — so the
+  // cache survived, the server's now-empty `laps` array failed the non-empty
+  // test in rvMergeNodes, and every card was re-rendered from the stale cache.
+  // The summaries came from elsewhere and cleared correctly, which is exactly
+  // what made it look like a half-finished wipe.
+  rvResetLapCache();
   try {
     await fetch('/api/multinode/clearLaps', { method: 'POST' });
     mnRaceRunning = false;
@@ -11807,7 +12285,12 @@ function downloadMnRaceData() {
   }
 
   const ts = Math.floor(Date.now() / 1000);
-  const blob = new Blob([JSON.stringify({ type: 'MultiRace', timestamp: ts, nodes: allNodes }, null, 2)],
+  // simulatedLaps marks the whole race, so this file can never be mistaken for
+  // a real result later.  Omitted entirely when false — a clean race carries no
+  // mention of Dev Mode at all.
+  const payload = { type: 'MultiRace', timestamp: ts, nodes: allNodes };
+  if (raceContainsSimulatedLaps()) payload.simulatedLaps = true;
+  const blob = new Blob([JSON.stringify(payload, null, 2)],
                         { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -11869,6 +12352,10 @@ async function importMnRace(input) {
 
   // Any playback of the PREVIOUS import must not keep firing over the new one.
   mnPlaybackStop({ keepBoard: false });
+  // Carry the file's simulated mark onto the history view, so a fabricated race
+  // is still labelled after a round trip through a file.
+  mnHistorySimulated = !!json.simulatedLaps;
+
   mnRenderHistoryRace();
 
   // Draw the timeline immediately, so the lap pattern is visible before Play is
@@ -12212,6 +12699,9 @@ function mnRenderHistoryRace() {
   if (empty) empty.style.display = 'none';
   if (pb)    pb.style.display    = '';
 
+  const simEl = document.getElementById('mnHistorySimulatedBanner');
+  if (simEl) simEl.style.display = mnHistorySimulated ? '' : 'none';
+
   mnRenderRaceTab(mnHistoryNodes, {
     containerId: 'mn-history-race-container',
     readOnly:    true,
@@ -12294,6 +12784,13 @@ document.addEventListener('DOMContentLoaded', () => {
         if (_pnd) _pnd.style.cursor = mnDevMode ? 'pointer' : 'default';
         localStorage.setItem('mnDevMode', mnDevMode ? '1' : '0');
       }
+      // This path never read masterRaceActive, so a client that reloaded during
+      // the director's race came back with the flag at its initial false — Add
+      // Lap re-enabled, and now the Single Race lockout missing too.  The SSE
+      // reconnect handler happened to repair it moments later; on first load
+      // there is nothing to repair it from.
+      mnMasterRaceActive = data.masterRaceActive || false;
+
       // Restore race state before rendering
       if (data.timerRunning) {
         if (data.nodeMode === 1) {
@@ -12303,6 +12800,8 @@ document.addEventListener('DOMContentLoaded', () => {
           startRaceDisplayOnly(data.raceElapsedMs || 0);
         }
       }
+      applyAddLapButtonUI();
+      applyClientRaceLockUI();
       // Always restore lap data regardless of run state — laps persist after race stop.
       if (data.nodeMode === 1) {
         // Master: pre-fetch all node+lap data before first render.
@@ -12319,6 +12818,9 @@ document.addEventListener('DOMContentLoaded', () => {
             // browser refresh still showing the whole race as the current lap.
             setLapTimerFromLastLap(ld.laps);
           }
+          // See the SSE-reconnect copy above — outside the laps guard, and OR
+          // rather than assign.
+          if (ld.simulatedLaps) { mnRaceSimulated = true; mnApplySimulatedBadge(); }
         } catch (_) {}
       }
       onRaceTabOpen();
