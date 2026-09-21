@@ -519,17 +519,62 @@ TestResult SelfTest::testRX5808Noise(RX5808* rx5808, Config* config, LapTimer* t
     uint16_t peak      = 0;
     uint16_t floorRssi = 255;
     uint32_t sum       = 0;
+    // Raw min/max tracked alongside the scaled figures.  The scaled value is
+    // what the thresholds are expressed in and what the operator reads, but it
+    // is ~18 raw counts per step — too coarse to decide whether the input is
+    // MOVING.  The variance verdict below uses these instead.
+    uint16_t rawMin    = 0xFFFF;
+    uint16_t rawMax    = 0;
     for (uint16_t i = 0; i < kSamples; i++) {
         const uint8_t v = rx5808->readRssi();
         if (v > peak)      peak      = v;
         if (v < floorRssi) floorRssi = v;
+        const uint16_t raw = rx5808->lastRawSample();
+        if (raw < rawMin) rawMin = raw;
+        if (raw > rawMax) rawMax = raw;
         sum += v;
         delay(kSampleDelayMs);
     }
     const uint8_t mean = (uint8_t)(sum / kSamples);
 
     const String reading = "floor " + String(floorRssi) + ", mean " + String(mean) +
-                           ", peak " + String(peak) + " at " + String(freq) + " MHz";
+                           ", peak " + String(peak) + " at " + String(freq) +
+                           " MHz; raw spread " + String(rawMax - rawMin);
+
+    // ── Did the signal move at all? ─────────────────────────────────────────
+    //
+    // Free — floor and peak are already in hand from the loop above — and it
+    // must come BEFORE every verdict below, all of which read these numbers as
+    // if they described the RF environment.
+    //
+    // A disconnected or failing RX5808 has exactly one signature: a FLAT
+    // signal.  The level it sticks at is arbitrary, so without this check a
+    // dead receiver gets one of two wrong answers depending purely on where it
+    // happened to park — pinned above Exit fails with "move the gate away from
+    // the interference", sending the operator to chase RF that is not there,
+    // and pinned below Exit PASSES, reporting a dead receiver as a textbook
+    // noise floor.  Observed on a master 2026-09-18.
+    //
+    // Judged on RAW ADC counts, NOT the scaled value.  One scaled count is ~18
+    // raw (RSSI_SCALE_MAX_DMA / 255), so a quiet site can hold the scaled
+    // reading perfectly still while the input underneath moves normally —
+    // testing the scaled value would fail a healthy receiver in exactly the
+    // environment that matters most, a quiet race site.  At raw resolution the
+    // ADC's own noise guarantees movement anywhere, while a genuinely frozen
+    // feed is still bit-identical and still caught.
+    if (rawMin == rawMax) {
+        result.passed = false;
+        result.details = "RSSI is not varying — all " + String(kSamples) +
+                         " samples read raw " + String(rawMax) + " exactly (" +
+                         reading + "). A live receiver always jitters at ADC "
+                         "resolution, so a perfectly flat signal means the RX5808 "
+                         "is disconnected or has failed, whatever level it sits "
+                         "at. Lap detection cannot work. Check the RSSI line and "
+                         "the receiver's power — if a power-cycle clears it, "
+                         "suspect the USB supply.";
+        result.duration_ms = millis() - start;
+        return result;
+    }
 
     // readRssi() returns 0 while recentSetFreqFlag is set.  An all-zero run
     // means we sampled a tuning window, not the floor, and would then compute a

@@ -227,15 +227,38 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
         // happened in handleHeartbeatSync; this only rations the repair.
         MN_STEP("resyncGovernor", _runResyncGovernor(currentTimeMs));
 
-        // Periodic "who's actually connected right now" summary.  Every 10 s
-        // log a single line listing slot=name for every online node — replaces
-        // the firehose of per-heartbeat re-registration lines that used to
-        // confirm fleet health.  Stack-allocated buffer (no heap pressure).
+        // "Who's connected" — logged ONLY when that answer changes.
+        //
+        // This used to print every 10 s unconditionally.  On a stable fleet
+        // that is a line of identical text every ten seconds forever, which
+        // buries the events worth reading: by the time anyone opens the log to
+        // investigate a dropout, the surrounding context has been pushed out of
+        // the ring by dozens of repetitions saying nothing happened.
+        //
+        // Comparing the rendered list, rather than tracking a count, catches
+        // every kind of change for free — a join, a drop, a slot swap, and a
+        // rename all alter the string.
+        //
+        // Still sampled every 10 s, NOT more often now that it is quiet.
+        //
+        // Measured cost is ~10-40 us per pass (eight snprintf's and a 256-byte
+        // compare), so a 1 Hz poll would add ~36 us/s — about 0.004% duty, and
+        // ~25x below the ~1 ms browser jitter already accepted on the peak
+        // timestamp.  Negligible, but so is the gain: a faster poll only
+        // sharpens the stamp on a roll-call line, while the per-node connect
+        // and timeout events already log immediately with their own context.
+        // Nothing on the sampling path buys anything here, so it does not get
+        // spent.
+        //
+        // Consequence, deliberately accepted: the stamp is when the change was
+        // NOTICED, up to 10 s after it happened.  Correct to the second is not
+        // what this line is for — it answers "who was on the fleet, roughly
+        // when", and the immediate per-node lines carry the precise moment.
         static uint32_t lastNodeSummaryMs = 0;
         if (currentTimeMs - lastNodeSummaryMs > 10000) {
             lastNodeSummaryMs = currentTimeMs;
             char buf[256];
-            size_t pos = (size_t)snprintf(buf, sizeof(buf), "[MULTINODE] connected:");
+            size_t pos = 0;
             bool any = false;
             for (const auto& n : _nodes) {
                 if (!n.online) continue;
@@ -244,10 +267,28 @@ void MultiNodeManager::process(uint32_t currentTimeMs) {
                                  slotLetter(n.nodeId), n.pilotName.c_str());
                 if (w < 0) break;
                 pos += (size_t)w;
-                if (pos >= sizeof(buf) - 8) break;   // leave room for trailing " (none)" / newline
+                if (pos >= sizeof(buf) - 8) break;   // room for " (none)"
             }
             if (!any) snprintf(buf + pos, sizeof(buf) - pos, " (none)");
-            DEBUG("%s\n", buf);
+
+            // Previous render, so the comparison survives across ticks.  static
+            // rather than a member: this is log bookkeeping, and the one master
+            // instance is the only writer.
+            static char lastBuf[256] = { 1 };   // non-empty: forces a first log
+            if (strncmp(buf, lastBuf, sizeof(buf)) != 0) {
+                strncpy(lastBuf, buf, sizeof(lastBuf) - 1);
+                lastBuf[sizeof(lastBuf) - 1] = '\0';
+                // Seconds since boot, not wall-clock: a timer has no RTC and
+                // may never see an NTP server at a track, so uptime is the only
+                // stamp that is always correct and always comparable against
+                // the rest of this log.
+                const uint32_t upSec = currentTimeMs / 1000;
+                DEBUG("[MULTINODE] %02u:%02u:%02u connected:%s\n",
+                      (unsigned)(upSec / 3600),
+                      (unsigned)((upSec % 3600) / 60),
+                      (unsigned)(upSec % 60),
+                      buf);
+            }
         }
 
         // Periodic director-state resync — every 10 s, force a rebroadcast

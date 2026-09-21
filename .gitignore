@@ -102,3 +102,5 @@ tools/apply_frontend_defaults.html
 /tools/timing-harness/logs
 /CLAUDE.md
 /tools/test-data
+/tools/boot-soak-logs
+/tools/boot-soak.py

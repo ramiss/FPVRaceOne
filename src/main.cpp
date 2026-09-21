@@ -439,6 +439,13 @@ void loop() {
         digitalWrite(LED_BUILTIN, HIGH); // LED off when services not started
     }
     
+    // Re-arm the ADC stream if a WiFi bring-up asked for it.  HERE and nowhere
+    // else: this is loopTask, the task that started the stream in setup() and
+    // therefore the only one allowed to stop it (the ADC unit lock is a
+    // mutex).  Before the timer update so this iteration's sample comes from
+    // the re-armed feed.  No-op on every other iteration.
+    rx.serviceRearm();
+
     // Timing always runs
     timer.handleLapTimerUpdate(currentTimeMs);
 #if RSSI_LOGGING_ENABLED

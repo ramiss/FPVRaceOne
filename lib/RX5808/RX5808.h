@@ -36,6 +36,11 @@ enum RssiAdcMode : uint8_t {
 // stays short, infrequent enough that ISR overhead stays negligible.
 #define ADC_DMA_FRAME_BYTES  128
 #define ADC_DMA_POOL_BYTES   (ADC_DMA_FRAME_BYTES * 4)
+// How long the one-shot boot variance check observes RSSI before deciding
+// whether the input is alive.  A few seconds: long enough that even a very
+// quiet gate must show some jitter, short enough to be over before anyone has
+// opened the web UI.  Costs nothing after it closes.
+#define RSSI_BOOT_CHECK_MS   3000
 
 class RX5808 {
    public:
@@ -46,16 +51,60 @@ class RX5808 {
     // Which path is actually running — may differ from what was requested if
     // DMA init failed.  Surfaced in Diagnostics so the A/B is unambiguous.
     uint8_t getAdcMode() const { return adcMode; }
+    // Did RSSI hold one constant value for the whole boot check window?
+    //
+    // A disconnected or failing RX5808 has ONE signature: a flat signal.  The
+    // level it sticks at is arbitrary — high, low, or anywhere between,
+    // depending on how the module died — so the level tells you nothing and
+    // the VARIANCE tells you everything.  A live receiver always jitters; a
+    // value that never moves is not a quiet gate, it is a disconnected one.
+    //
+    // This also covers a stopped ADC feed, where readRssi() repeats a held
+    // sample forever: same flat signal, same detector, no second mechanism.
+    //
+    // Answers false until the window closes, so a caller during the first few
+    // seconds sees "no fault" rather than a premature verdict.
+    bool rssiInputFlat()  const { return bootFlat; }
+    bool rssiCheckDone()  const { return bootCheckDone; }
+    uint16_t rssiFlatLevel() const { return bootCheckMax; }   // raw ADC counts
+
+    // The RAW ADC value behind the most recent readRssi(), before scaling to
+    // 0-255.  Exposed so a caller measuring VARIANCE can work at full ADC
+    // resolution: the scale divides by ~18 (RSSI_SCALE_MAX_DMA / 255), which is
+    // plenty for reporting a level but throws away exactly the detail a
+    // liveness check needs in a quiet RF environment.
+    uint16_t lastRawSample() const { return lastRawUsed; }
+
+    // Re-arm DMA acquisition after a WiFi bring-up — a two-step handshake,
+    // and the split is NOT optional.
+    //
+    //   requestRearm()  — safe from ANY task.  Sets a flag.  The webserver
+    //                     calls it from the WiFi AP_START / STA_START events,
+    //                     which run on the arduino_events task.
+    //   serviceRearm()  — MUST run on the task that called init(), i.e. the
+    //                     Arduino loopTask.  main.cpp calls it from loop().
+    //
+    // Why: IDF's adc_continuous_start() takes the ADC1 unit lock — a FreeRTOS
+    // mutex — and HOLDS it for the life of the stream; adc_continuous_stop()
+    // releases it.  A mutex may only be released by the task that owns it, and
+    // that owner is whoever started the stream: loopTask, via init() from
+    // setup().  Doing the stop from the WiFi event task released a mutex it
+    // did not hold, and FreeRTOS asserted in xTaskPriorityDisinherit — a boot
+    // loop on every unit, observed 2026-09-20.  See the .cpp for the full
+    // account of why the re-arm exists at all.
+    void requestRearm(const char* reason);
+    void serviceRearm();
     void setFrequency(uint16_t frequency);
     uint8_t readRssi();
     void handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyNewFreq);
-    bool verifyFrequency();
     bool isSettingFrequency();
-    // Whatever frequency setFrequency() last programmed.  Exposed for the
-    // selftest's cleanup path: after the frequency-sweep loop it needs to
-    // restore this value and re-verify so the UI's "Calibrating pilot
-    // frequency" banner gets its expected "RX5808 frequency verified
-    // properly" log line.
+    // Whatever frequency setFrequency() last programmed.  Read by Diagnostics
+    // to report the frequency alongside the RSSI noise floor.
+    //
+    // There is deliberately no verifyFrequency() counterpart.  SPI readback
+    // does not work on these modules — see handleFrequencyChange() — and the
+    // receiver's health is established from the analog line instead, by the
+    // RSSI variance check.  One check, one thing to troubleshoot.
     uint16_t getCurrentFrequency() const { return currentFrequency; }
     bool recentSetFreqFlag = false;
 
@@ -85,6 +134,28 @@ class RX5808 {
     // the DMA path on its own scale rather than falling back to a oneshot
     // read, which reports ~1.9x lower counts for the same voltage.
     uint16_t lastDmaRaw = 0;
+    // Raw value behind the last readRssi() on EITHER path — see lastRawSample().
+    uint16_t lastRawUsed = 0;
+    // ── Boot variance check ─────────────────────────────────────────────
+    // One-shot: min/max of the first RSSI_BOOT_CHECK_MS of readings, then a
+    // single verdict and the tracking stops.  Re-opened by serviceRearm()
+    // after each WiFi bring-up, so the verdict describes the feed that is
+    // actually running, not the one WiFi may have just disturbed.  See
+    // rssiInputFlat().
+    // RAW ADC counts, not the scaled 0-255 value — see updateBootVarianceCheck().
+    bool     bootCheckDone  = false;
+    uint32_t bootCheckEndMs = 0;
+    uint16_t bootCheckMin   = 0xFFFF;
+    uint16_t bootCheckMax   = 0;
+    bool     bootFlat       = false;
+    void     updateBootVarianceCheck(uint16_t raw);
+    void     resetBootCheck();
+
+    // Cross-task handshake for the re-arm — see requestRearm()/serviceRearm().
+    // volatile: written on the WiFi event task, read and cleared on loopTask.
+    // The reason is only ever a string literal, so a bare pointer is safe.
+    volatile bool rearmPending = false;
+    const char*   rearmReason  = "";
 
     bool startDmaSampling();
     void stopDmaSampling();

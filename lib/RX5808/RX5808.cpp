@@ -167,6 +167,106 @@ void RX5808::stopDmaSampling() {
     adcHandle = nullptr;
 }
 
+// ── Re-arm after WiFi bring-up ──────────────────────────────────────────────
+//
+// THE INTERMITTENT FLATLINE.  Observed 2026-09-18..20 on several units, in
+// single and master mode, on good power: RSSI froze at one arbitrary non-zero
+// level from boot, the calibration trace drew a flat line, and a reboot
+// cleared it.  Compared against v1.0.1 the only firmware change was a logging
+// flag with no side effects, and DMA mode was the default in both — so this
+// is not a regression, it is a boot race that heavier rebooting finally hit.
+//
+// The race, as read from the IDF 5.5 sources the framework ships with:
+//
+//   * The ESP32-C6 has a single SAR ADC and NO hardware arbiter for it —
+//     hal/esp32c6/include/hal/adc_ll.h: "Only ADC2 have arbiter function",
+//     and the C6 has no ADC2.
+//   * The WiFi PHY uses that same SAR ADC as its power detector.  esp_phy/
+//     phy_override.c acquires it (set_xpd_sar / phy_set_pwdet_power) and
+//     writes PWDET_CONF_REG while the RF calibration in esp_phy_enable() runs.
+//   * setup() starts this DMA stream (rx.init) BEFORE WiFi, and the first
+//     parallelTask tick then starts the AP.  If the PHY takes the SAR while a
+//     digital-controller conversion is in flight, that conversion never
+//     completes, the DMA descriptor never sees its EOF, and the conv-done
+//     ISR never fires again.  readRssi() then repeats lastDmaRaw forever —
+//     a real reading, taken before WiFi started, now frozen.
+//
+// Intermittent because it depends on where in a conversion the PHY lands;
+// reboot-fixable because the next boot rolls the dice again.  The sequence
+// power-refcounting in sar_periph_ctrl.c does NOT prevent it: that only keeps
+// the SAR powered, it does not sequence two controllers' conversions.
+//
+// The mechanism is inferred from source, not observed on a scope.  The fix
+// does not depend on it being exactly right: re-arming the stream after any
+// WiFi bring-up is safe and cheap (~1 ms) whatever disturbed it.
+//
+// Why a stop/start on the existing handle and not deinit/reinit:
+// adc_continuous_stop() releases the digital controller and adc_continuous_
+// start() fully re-initialises it (adc_hal_set_controller, adc_hal_digi_init)
+// and re-arms the DMA — the API is designed for exactly this.  Deinit would
+// also free and re-allocate the GDMA channel and the ring, for nothing.
+//
+// Why deferring the initial start until after WiFi was NOT chosen: the timer
+// would have to sample via analogRead() until then, and the oneshot and DMA
+// paths return counts on different scales (see RSSI_DMA_GAIN_NUM).  The
+// median filter would see a 1.9x step at the switch-over.
+//
+// lastDmaRaw is deliberately NOT cleared here.  During the ~1 ms gap readRssi()
+// finds an empty peak and holds the previous sample, which is the designed
+// behaviour; zeroing it would inject a false trough into the median filter.
+//
+// TASK AFFINITY — the part that caused a boot loop the first time round.
+//
+// adc_continuous_start() acquires the ADC1 unit lock, a FreeRTOS mutex, and
+// holds it until adc_continuous_stop() releases it.  FreeRTOS asserts if a
+// mutex is released by any task other than its holder (xTaskPriorityDisinherit,
+// "pxTCB == pxCurrentTCBs[0]").  The holder is whichever task started the
+// stream — loopTask, because init() runs from setup().  So the stop/start
+// below MUST execute on loopTask, and the WiFi event (arduino_events task)
+// may only ASK for it.  requestRearm() sets a flag; serviceRearm() does the
+// work from loop().  Observed 2026-09-20: the first version did the restart
+// directly in the event handler and every unit rebooted on WiFi start.
+//
+// Concurrency of the work itself: serviceRearm() runs on the same task as
+// readRssi(), so the two never overlap.  The only other party is the ISR,
+// which adc_dma_stop() disables for the duration.
+void RX5808::requestRearm(const char* reason) {
+    if (adcMode != ADC_MODE_DMA || !adcHandle) return;
+    rearmReason  = reason ? reason : "";
+    rearmPending = true;
+}
+
+void RX5808::serviceRearm() {
+    if (!rearmPending) return;
+    rearmPending = false;
+    if (adcMode != ADC_MODE_DMA || !adcHandle) return;
+    adc_continuous_handle_t handle = (adc_continuous_handle_t)adcHandle;
+
+    // Start is attempted even if stop reports "already stopped": that is the
+    // state a wedged controller may well be in, and start is what revives it.
+    const esp_err_t s = adc_continuous_stop(handle);
+    const esp_err_t r = adc_continuous_start(handle);
+    if (r != ESP_OK) {
+        DEBUG("[ADC] DMA restart (%s) FAILED — stop=%d start=%d; RSSI feed may be dead\n",
+              rearmReason, (int)s, (int)r);
+    } else {
+        DEBUG("[ADC] DMA re-armed after %s\n", rearmReason);
+    }
+
+    // The liveness verdict has to describe the feed AFTER WiFi, not before:
+    // a window that closed pre-WiFi would say "alive" about a stream that
+    // this very event may just have killed, and then stay silent about it.
+    resetBootCheck();
+}
+
+void RX5808::resetBootCheck() {
+    bootCheckDone  = false;
+    bootCheckEndMs = 0;      // 0 = the window re-opens on the next readRssi()
+    bootCheckMin   = 0xFFFF; // raw counts
+    bootCheckMax   = 0;
+    bootFlat       = false;
+}
+
 void RX5808::handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyNewFreq) {
     // If a frequency change is requested and bus is free, program it
     if ((currentFrequency != potentiallyNewFreq) &&
@@ -180,13 +280,24 @@ void RX5808::handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyN
         return; // avoid falling through and "tune done" on the same tick
     }
 
-    // If we recently set frequency, wait for tune time then verify once
+    // If we recently set a frequency, wait out the tune time and release the bus.
+    //
+    // NOTHING IS VERIFIED HERE, deliberately.  A verifyFrequency() call used to
+    // sit on this line, reading register 0x01 back over SPI.  These modules do
+    // not drive the SPI data line, so it read a floating pin: 7680 on every
+    // boot of every unit, which decodes to 4319 MHz — not a frequency at all,
+    // let alone the one we set.  It could not pass, and a check that always
+    // fails is worse than none, because it would mask a real fault.
+    //
+    // The receiver is confirmed alive by the RSSI variance check instead (see
+    // updateBootVarianceCheck): a live module's analog output always jitters,
+    // a dead or disconnected one is flat.  That measures the signal path the
+    // timer actually depends on, and it is the ONLY such check by design —
+    // two of them means two things to troubleshoot when one goes wrong.
     if (recentSetFreqFlag) {
         const uint32_t dt = currentTimeMs - lastSetFreqTimeMs;
         if (dt > RX5808_MIN_TUNETIME + 100) {
             DEBUG("RX5808 Tune done: %u\n", currentFrequency);
-            verifyFrequency();     // NOTE: consider making this debug-only if flaky
-
             settingFrequency = false;
             recentSetFreqFlag = false;  // don't need to check again until next freq change
             // Do NOT update lastSetFreqTimeMs here; it is used as the write timestamp
@@ -195,60 +306,12 @@ void RX5808::handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyN
 }
 
 
-bool RX5808::verifyFrequency() {
-    // Start of Read Reg code :
-    // Verify read HEX value in RX5808 module Frequency Register 0x01
-    uint16_t vtxRegisterHex = 0;
-    //  Modified copy of packet code in setRxModuleToFreq(), to read Register 0x01
-    //  20 bytes of register data are read, but the
-    //  MSB 4 bits are zeros
-    //  Data Packet is: register address (4-bits) = 0x1, read/write bit = 1 for read, data D0-D15 stored in vtxHexVerify, data15-19=0x0
-
-    rx5808SerialEnableHigh();
-    rx5808SerialEnableLow();
-
-    rx5808SerialSendBit1();  // Register 0x1
-    rx5808SerialSendBit0();
-    rx5808SerialSendBit0();
-    rx5808SerialSendBit0();
-
-    rx5808SerialSendBit0();  // Read register r/w
-
-    // receive data D0-D15, and ignore D16-D19
-    pinMode(rx5808DataPin, INPUT_PULLUP);
-    for (uint8_t i = 0; i < 20; i++) {
-        delayMicroseconds(10);
-        // only use D0-D15, ignore D16-D19
-        if (i < 16) {
-            if (digitalRead(rx5808DataPin)) {
-                bitWrite(vtxRegisterHex, i, 1);
-            } else {
-                bitWrite(vtxRegisterHex, i, 0);
-            }
-        }
-        if (i >= 16) {
-            digitalRead(rx5808DataPin);
-        }
-        digitalWrite(rx5808ClkPin, HIGH);
-        delayMicroseconds(10);
-        digitalWrite(rx5808ClkPin, LOW);
-        delayMicroseconds(10);
-    }
-
-    pinMode(rx5808DataPin, OUTPUT);  // return status of Data pin after INPUT_PULLUP above
-    rx5808SerialEnableHigh();        // Finished clocking data in
-    delay(2);
-
-    digitalWrite(rx5808ClkPin, LOW);
-    digitalWrite(rx5808DataPin, LOW);
-
-    if (vtxRegisterHex != freqMhzToRegVal(currentFrequency)) {
-        DEBUG("RX5808 frequency not matching, register = %u, currentFreq = %u\n", vtxRegisterHex, currentFrequency);
-        return false;
-    }
-    DEBUG("RX5808 frequency verified properly %u\n", currentFrequency);
-    return true;
-}
+// verifyFrequency() lived here.  Removed 2026-09-20 — it read register 0x01
+// back over SPI, but these modules do not drive the data line, so it was
+// sampling a floating pin: 7680 on every boot of every unit, which decodes to
+// 4319 MHz.  Never passed, could never pass.  See handleFrequencyChange() for
+// why the RSSI variance check replaces it rather than anything being added
+// here.  freqMhzToRegVal() stays — setFrequency() still needs it to WRITE.
 
 // Set frequency on RX5808 module to given value
 void RX5808::setFrequency(uint16_t vtxFreq) {
@@ -343,6 +406,62 @@ bool RX5808::isSettingFrequency() {
 #define RSSI_DMA_GAIN_DEN  1000UL
 #define RSSI_SCALE_MAX_DMA (RSSI_SCALE_MAX * RSSI_DMA_GAIN_NUM / RSSI_DMA_GAIN_DEN)
 
+// One-shot liveness verdict: did RSSI move at all in the first few seconds?
+//
+// The only failure signature a disconnected or failing RX5808 has is a FLAT
+// signal.  Which level it sticks at depends on how it died — pinned to a rail,
+// parked mid-scale, or a frozen sample repeated by a stopped ADC feed — so the
+// level is not diagnostic and the variance is.  One check, all causes.
+//
+// Runs on both ADC paths: a pinned input looks the same sampled by DMA or by
+// analogRead.  Ends permanently once the window closes, so the steady-state
+// cost is the single `bootCheckDone` test in readRssi().
+//
+// MEASURED ON THE RAW ADC VALUE, NOT THE SCALED 0-255 ONE, and that matters.
+// The scale maps 0..RSSI_SCALE_MAX_DMA (4610) onto 0..255, so one display count
+// is ~18 raw counts: sub-18-count movement is invisible after scaling.  In a
+// NOISY environment that is harmless — measured spreads there ran 14-77 display
+// counts — but a race site is far quieter, and the whole point of this check is
+// that it must not cry wolf on a healthy receiver in a quiet field.  At raw
+// resolution the ADC's own noise on a steady input (tens of counts) guarantees
+// movement regardless of the RF environment, while the fault this exists to
+// catch — a frozen feed repeating lastDmaRaw — is still bit-identical and
+// therefore still caught exactly.
+void RX5808::updateBootVarianceCheck(uint16_t raw) {
+    const uint32_t now = millis();
+
+    // First call opens the window.  Started here rather than in init() because
+    // the module needs its first tune to settle, and readRssi() returns 0
+    // throughout that — a window opened earlier would spend its first samples
+    // on the tuning gap and could call a healthy receiver flat.
+    if (bootCheckEndMs == 0) {
+        bootCheckEndMs = now + RSSI_BOOT_CHECK_MS;
+        bootCheckMin   = raw;
+        bootCheckMax   = raw;
+        return;
+    }
+
+    if (raw < bootCheckMin) bootCheckMin = raw;
+    if (raw > bootCheckMax) bootCheckMax = raw;
+
+    if (now < bootCheckEndMs) return;
+
+    bootCheckDone = true;
+    bootFlat      = (bootCheckMin == bootCheckMax);
+    if (bootFlat) {
+        DEBUG("[ADC] RSSI FLAT at raw %u for %u ms — receiver disconnected or "
+              "failed; lap detection cannot work\n",
+              (unsigned)bootCheckMax, (unsigned)RSSI_BOOT_CHECK_MS);
+    } else {
+        // Spread is printed so the margin against the fail threshold (zero) is
+        // visible at a glance in any environment, not just inferred.
+        DEBUG("[ADC] RSSI input alive (raw %u-%u, spread %u, over %u ms)\n",
+              (unsigned)bootCheckMin, (unsigned)bootCheckMax,
+              (unsigned)(bootCheckMax - bootCheckMin),
+              (unsigned)RSSI_BOOT_CHECK_MS);
+    }
+}
+
 uint8_t RX5808::readRssi() {
     if (recentSetFreqFlag) return 0; // RSSI unstable immediately after tune
 
@@ -365,6 +484,13 @@ uint8_t RX5808::readRssi() {
         // arriving precisely when the median filter is least able to reject
         // it.  Hold the previous DMA sample instead; at worst that repeats a
         // value for one tick, which the median absorbs harmlessly.
+        //
+        // A feed that stops ALTOGETHER freezes this value indefinitely, which
+        // is not handled here: a frozen read is a flat signal, and flatness is
+        // detected once, generically, by the variance check below — the same
+        // check that catches a receiver whose output is pinned while the ADC
+        // keeps sampling happily.  Both faults look identical on the wire, so
+        // they get one detector rather than two.
         if (raw == 0) raw = lastDmaRaw;
         else          lastDmaRaw = raw;
 
@@ -374,9 +500,19 @@ uint8_t RX5808::readRssi() {
         scaleMax = RSSI_SCALE_MAX;
     }
 
-    return (raw >= scaleMax)
-           ? 255
-           : (uint8_t)((raw * 255UL) / scaleMax);
+    // Published for callers measuring variance at full ADC resolution.
+    lastRawUsed = raw;
+
+    const uint8_t scaled = (raw >= scaleMax)
+                           ? 255
+                           : (uint8_t)((raw * 255UL) / scaleMax);
+
+    // RAW, not scaled — see updateBootVarianceCheck().  One-shot, and only
+    // while the module is actually powered: a deliberate power-down parks RSSI
+    // at a constant by design and is not a fault.
+    if (!bootCheckDone && !rxPoweredDown) updateBootVarianceCheck(raw);
+
+    return scaled;
 }
 
 

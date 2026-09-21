@@ -199,8 +199,20 @@
 // FPV Scanner Hardware (XIAO ESP32C6)
 #elif defined(APP_BOARD_XIAO_C6)
 
-#define USE_EXT_ANTENNA true
-#define WIFI_POWER WIFI_POWER_21dBm    // Max power for AP mode to improve range
+// WiFi antenna selection and TX power are RUNTIME config, NOT board macros.
+//
+// Two dead defines lived here — `USE_EXT_ANTENNA true` and
+// `WIFI_POWER WIFI_POWER_21dBm` — each referenced nowhere in the firmware.
+// They were worse than merely unused: both read exactly like the setting they
+// name, so editing one would change nothing while looking as though it had.
+// The real controls are:
+//
+//   antenna  : conf.wifiExtAntenna -> main.cpp drives WIFI_ENABLE (GPIO3) and
+//              WIFI_ANT_CONFIG (GPIO14) in setup(), before WiFi starts
+//   TX power : conf.wifiTxPower    -> Webserver::applyTxPower(), re-applied on
+//              every WiFi bring-up because esp_wifi_init() resets it
+//
+// Both are settable from the Settings UI and need no rebuild.
 //#define PIN_LED 0
 //#define PIN_VBAT 35
 //#define VBAT_SCALE 2

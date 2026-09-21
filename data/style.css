@@ -1453,6 +1453,28 @@ table tr.fastest-lap td {
   font-weight: 600;
 }
 
+/* Hardware FAULT.  The one banner that is allowed to shout: a solid fill in
+ * --danger-color with white text, not the outlined treatment the simulated
+ * and locked banners use.  Those inform; this one says the timer cannot do
+ * its job and must be dealt with before anything else.
+ *
+ * White text is a literal on purpose — the fill is a fixed red that does not
+ * change with the theme, so the text must not either; a theme's --text-color
+ * could be dark and vanish into it. */
+.banner-fault {
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  border-radius: 6px;
+  background-color: var(--danger-color);
+  color: #fff;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.banner-fault strong {
+  color: #fff;
+}
+
 /* ── Multi-pilot Race History playback ─────────────────────────────────────
  * Timeline carries one thin marker per lap, coloured by pilot, with overall
  * time ticks underneath.  Markers are deliberately unlabelled: six pilots

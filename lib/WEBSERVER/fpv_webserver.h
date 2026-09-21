@@ -117,6 +117,19 @@ class Webserver : public TransportInterface {
 
     void startServices();
 
+    // Re-apply the configured WiFi TX power.  Must run after EVERY bring-up —
+    // esp_wifi_init() resets max TX power to the driver default, so a setting
+    // applied once at boot is silently lost by any later re-init.  Driven from
+    // the WiFi AP_START / STA_START events so no bring-up path can miss it.
+    void applyTxPower();
+    // Last dBm actually logged, so a re-application of the SAME value stays
+    // quiet.  A single boot legitimately applies power ~5 times (STA start for
+    // the channel scan, then AP start and softAP()'s own restart, each firing
+    // the event alongside startAP()'s explicit call) — all correct, all
+    // identical, and five identical lines per boot is the kind of noise that
+    // buries the events worth reading.  -1 = nothing applied yet.
+    int16_t _lastTxPowerLoggedDbm = -1;
+
     Config *conf;
     LapTimer *timer;
     // §11 — race-history endpoints build a 16-32 KB DynamicJsonDocument and
@@ -138,6 +151,12 @@ class Webserver : public TransportInterface {
     WebhookManager *webhooks;
     MultiNodeManager *multiNode;
     TransportManager *transportMgr;
+
+    // Edge detector for the RSSI boot-check verdict: true once the verdict
+    // has been published for the CURRENT check window.  Falls back to false
+    // whenever the window re-opens (serviceRearm), so a re-verdict after
+    // a WiFi bring-up is published again.  See handleWebUpdate().
+    bool _rssiVerdictPublished = false;
 
     wifi_mode_t wifiMode = WIFI_OFF;
     wl_status_t lastStatus = WL_IDLE_STATUS;

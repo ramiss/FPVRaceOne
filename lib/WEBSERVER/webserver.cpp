@@ -253,14 +253,49 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
           wifi_ap_ssid.c_str(),
           apMac[0], apMac[1], apMac[2], apMac[3], apMac[4], apMac[5]);
 
+    // Stops the WiFi driver persisting credentials to NVS.  Sets a flag only —
+    // it does not touch the driver — so it is safe this early.
     WiFi.persistent(false);
-    // Belt-and-suspenders: also wipe NVS creds + tear down any AP that may
-    // have survived a non-clean previous run (crash, brownout, older firmware
-    // version without the /reboot cleanup path).
-    WiFi.softAPdisconnect(true);
-    WiFi.disconnect(true, true);
-    WiFi.mode(WIFI_OFF);
-    delay(50);
+
+    // ── DO NOT "restore" a WiFi teardown here ───────────────────────────────
+    //
+    // This used to read:
+    //
+    //     WiFi.softAPdisconnect(true);
+    //     WiFi.disconnect(true, true);
+    //     WiFi.mode(WIFI_OFF);
+    //     delay(50);
+    //
+    // described as belt-and-suspenders cleanup of "an AP that may have survived
+    // a non-clean previous run".  It was corrupting memory on ~1.5% of boots.
+    //
+    // WHY IT BROKE.  This function contains the FIRST WiFi call in the entire
+    // program — main.cpp never touches WiFi, and multinode.cpp:28 documents
+    // that the stack is still WIFI_MODE_NULL at this point.  softAPdisconnect()
+    // and disconnect() cannot run on a non-existent driver, so Arduino-ESP32
+    // lazily esp_wifi_init()s one purely to service them, and mode(WIFI_OFF)
+    // then esp_wifi_deinit()s it again.  That cold-boot init/deinit cycle is
+    // what corrupted the heap.
+    //
+    // Measured over 200 soak boots (2026-09-20), always at this exact point,
+    // with THREE different signatures — which is the tell for corruption rather
+    // than one bad free:
+    //     CORRUPT HEAP -> assert in multi_heap_free          x3
+    //     Guru Meditation, Load access fault (MCAUSE 0x5)    x1
+    //     wifi_init_default: netstack cb reg failed 12308    x1 (survived)
+    //
+    // WHY REMOVING IT IS SAFE.  The cleanup could not do anything in the first
+    // place: a chip reset clears the WiFi peripheral, so no SoftAP survives a
+    // reboot — there was never an AP here to tear down.  The NVS credential
+    // erase is equally redundant: persistent(false) above stops us writing
+    // any, and nothing in this firmware ever calls a bare WiFi.begin(), so
+    // stored credentials can never be used implicitly.  Every connection
+    // passes an explicit SSID and password, and startAP() passes an explicit
+    // softAP() config that overrides whatever NVS held.
+    //
+    // The driver is now first initialised by selectBestWifiChannel()'s
+    // WiFi.mode(WIFI_STA), which is a clean single init and has always been
+    // stable across those same 200 boots.
 
     // ── Diagnostic: log AP station connect / disconnect events ──────────────
     // Registered once at boot.  When a station joins or leaves the master's
@@ -271,6 +306,30 @@ void Webserver::init(Config *config, LapTimer *lapTimer, BatteryMonitor *batMoni
     // an AP / WiFi-stack failure) vs. the browser silently dropping (which
     // doesn't normally take everyone else down).
     WiFi.onEvent([this](WiFiEvent_t event, WiFiEventInfo_t info) {
+        // Re-arm RSSI acquisition after EVERY WiFi bring-up.  Hooked on the
+        // event rather than at the call sites because WiFi is started from at
+        // least six places — boot AP, three reconnect tiers, the OTA excursion
+        // and the recruit job's WIFI_OFF -> STA — and every one of them runs
+        // the PHY calibration that can kill a running ADC stream.  AP_START /
+        // STA_START are posted after esp_wifi_start() returns, which is after
+        // esp_phy_enable() and its calibration have completed.  See
+        // RX5808::serviceRearm() for the full account.
+        //
+        // REQUEST only — never the restart itself.  This handler runs on the
+        // arduino_events task, and the ADC unit lock is a mutex owned by
+        // loopTask; releasing it from here asserts inside FreeRTOS and reboots
+        // the unit.  loop() performs the actual re-arm.
+        if (event == ARDUINO_EVENT_WIFI_AP_START || event == ARDUINO_EVENT_WIFI_STA_START) {
+            if (rx) rx->requestRearm(event == ARDUINO_EVENT_WIFI_AP_START ? "AP start" : "STA start");
+            // TX power is reset by esp_wifi_init(), so it belongs on the same
+            // event for the same reason the ADC re-arm does: there are at least
+            // six places that bring WiFi up, and hooking the event is the only
+            // way none of them can forget.  Calling an esp_wifi API from this
+            // handler is already established practice here — the station
+            // logging below calls softAPgetStationNum(), which is one too.
+            applyTxPower();
+            return;
+        }
         if (event == ARDUINO_EVENT_WIFI_AP_STACONNECTED) {
             const uint8_t* mac = info.wifi_ap_staconnected.mac;
             DEBUG("[AP] STA connected: %02x:%02x:%02x:%02x:%02x:%02x  (now %u stations)\n",
@@ -803,6 +862,31 @@ bool Webserver::isConnected() {
 // and by the recruit job after it returns from STA-only mode.  apChannel is a
 // member: scanned once on first call, reused thereafter.  startServices() is
 // idempotent so calling this multiple times is safe.
+// Re-apply the configured TX power.  See the declaration for why this cannot
+// be a one-shot at boot.
+//
+// The gap this closes, measured 2026-09-20: setTxPower() was called from
+// exactly ONE place, inside startAP().  Two bring-up paths bypass startAP()
+// entirely — the OTA return (ota.cpp does a bare WiFi.mode(WIFI_AP) on purpose,
+// to avoid dropping the director's browser) and the client's AP+STA reconnect
+// tier (WiFi.mode(WIFI_AP_STA) + softAP() directly).  Either one left the unit
+// running at the driver's default power instead of the configured value, with
+// nothing in the log to say so, until the next reboot.
+void Webserver::applyTxPower() {
+    if (!conf) return;
+    const uint8_t dbm = conf->getWifiTxPower();
+    // ALWAYS applied — the whole point is that every bring-up re-asserts it.
+    WiFi.setTxPower(dBmToWifiPower(dbm));
+    // ...but only LOGGED when the value changes.  Applying is cheap and must
+    // happen every time; saying so five times a boot is just noise.  This is
+    // still the line someone chasing range or dropouts needs to confirm, and
+    // it now appears exactly once unless the setting actually changes.
+    if ((int16_t)dbm != _lastTxPowerLoggedDbm) {
+        _lastTxPowerLoggedDbm = (int16_t)dbm;
+        DEBUG("[WIFI] TX power applied: %u dBm\n", (unsigned)dbm);
+    }
+}
+
 void Webserver::startAP() {
     if (apChannel == 0) {
         apChannel = selectBestWifiChannel();
@@ -814,7 +898,11 @@ void Webserver::startAP() {
     WiFi.setHostname(wifi_hostname);  // must be set before WiFi.mode()
     WiFi.mode(WIFI_AP);
 
-    WiFi.setTxPower(dBmToWifiPower(conf->getWifiTxPower()));
+    // Also applied by the AP_START event above; kept here so the power is
+    // certainly in force before softAP() below, without depending on event
+    // dispatch order.  Both routes call the same helper, so there is one
+    // definition of what the power should be.
+    applyTxPower();
 
     // Master node uses 192.168.5.1 so client nodes can keep the standard 192.168.4.1
     if (conf->getNodeMode() == 1) {
@@ -877,6 +965,29 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     if (sendRssi && ((currentTimeMs - rssiSentMs) > WEB_RSSI_SEND_TIMEOUT_MS)) {
         sendRssiEvent(timer->getRssi());
         rssiSentMs = currentTimeMs;
+    }
+
+    // Publish the RSSI boot-check verdict the moment it is decided.
+    //
+    // A pilot must not have to open the Calibration tab to learn the receiver
+    // is dead — the Race page is what they are looking at, and a timer that
+    // cannot see the gate is the one fault worth interrupting them for.  This
+    // is two bool reads per tick, not a poll of the signal: the check itself
+    // is the one-shot in RX5808, this only notices when it has concluded.
+    //
+    // Sent on the EDGE (window closes → publish once) rather than every tick,
+    // and re-armed when serviceRearm() re-opens the window after a WiFi
+    // bring-up, so the browser always holds the verdict for the feed that is
+    // actually running.  "ok" is sent too, so a banner raised by an earlier
+    // window clears if a re-armed feed comes back healthy.
+    if (rx && servicesStarted) {
+        const bool done = rx->rssiCheckDone();
+        if (done && !_rssiVerdictPublished) {
+            events.send(rx->rssiInputFlat() ? "flat" : "ok", "rssiHealth");
+            _rssiVerdictPublished = true;
+        } else if (!done) {
+            _rssiVerdictPublished = false;
+        }
     }
 
     // Coalesced director-state push.  Request threads only set a flag; the
@@ -2052,8 +2163,14 @@ EEPROM:\n";
     // instantaneous filtered value makes the two views consistent.
     server.on("/timer/rssi", HTTP_GET, [this](AsyncWebServerRequest *request) {
         uint8_t rssi = timer ? timer->getRssi() : 0;
-        char buf[24];
-        snprintf(buf, sizeof(buf), "{\"rssi\":%u}", rssi);
+        // inputFlat is the boot variance verdict: RSSI never moved, so the
+        // receiver is disconnected or failed whatever level it sits at.  Sent
+        // here so the master's per-client RSSI modal can say so — a flat trace
+        // is otherwise indistinguishable from a quiet gate.
+        const bool flat = (rx && rx->rssiInputFlat());
+        char buf[48];
+        snprintf(buf, sizeof(buf), "{\"rssi\":%u,\"inputFlat\":%s}",
+                 rssi, flat ? "true" : "false");
         request->send(200, "application/json", buf);
     });
 
@@ -2191,6 +2308,16 @@ EEPROM:\n";
             DEBUG("Client reconnected! Last message ID that it got is: %u\n", client->lastId());
         }
         client->send("start", NULL, millis(), 1000);
+
+        // Replay a standing RSSI fault to this late joiner.  The rssiHealth
+        // event is edge-triggered, so a browser that connects after the verdict
+        // — the normal case, since the check concludes ~3 s into boot — would
+        // otherwise never hear it.  Only the fault is replayed: a healthy
+        // verdict is the default the page assumes.
+        if (rx && rx->rssiCheckDone() && rx->rssiInputFlat()) {
+            client->send("flat", "rssiHealth", millis(), 1000);
+        }
+
         // Multi-tab sync: if a race is already running when this browser
         // connects (late-joiner scenario), replay raceState=started so the
         // new tab can start its display timer and enter spectator mode

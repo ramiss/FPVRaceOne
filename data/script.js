@@ -687,6 +687,18 @@ function setupWiFiEvents() {
     if (rssiBuffer.length > 10) rssiBuffer.shift();
   }, false);
 
+  // Receiver boot-check verdict.  Edge-triggered by the firmware when its
+  // one-shot variance check concludes, and replayed on connect if a fault is
+  // standing — so this fires at most a couple of times per boot, never
+  // continuously.  "ok" clears a banner raised by an earlier window, which
+  // happens when a WiFi bring-up re-arms the ADC and the new feed is healthy.
+  eventSource.addEventListener("rssiHealth", function (e) {
+    rssiInputFlat = (e.data === 'flat');
+    applyRssiFaultBanners();
+    if (rssiInputFlat) console.warn('[RSSI] receiver not responding — RSSI flat since startup');
+  }, false);
+
+
   eventSource.addEventListener("lap", function (e) {
     // Format: "lapTimeMs,peakRssi"  (peakRssi may be absent on older firmware)
     const parts   = e.data.split(',');
@@ -2021,6 +2033,22 @@ function rescalePausedScannerFrameToCanvas() {
 
   // Redraw overlay lines (gray start + current)
   drawPausedOverlayLines();
+}
+
+// Receiver fault state, shared by every .rssi-fault-banner on the page — the
+// Race tab, the client's Multi Race tab, and Calibration all show the same
+// verdict, because a pilot may be looking at any of them when it lands.
+//
+// Set only by the rssiHealth SSE event (live edge + connect replay).  There is
+// deliberately no fetch here: streaming the verdict is what lets the Race page
+// raise the banner the moment the check concludes, ~3 s into boot, without
+// anyone having to visit Calibration to find out the timer cannot see the gate.
+let rssiInputFlat = false;
+
+function applyRssiFaultBanners() {
+  document.querySelectorAll('.rssi-fault-banner').forEach(el => {
+    el.style.display = rssiInputFlat ? '' : 'none';
+  });
 }
 
 function addRssiPoint() {
@@ -8420,14 +8448,15 @@ function handleLogForCalibrationBanner(line) {
 
   if (line.includes('Setting frequency to')) {
     showCalibrationBanner();
-  } else if (line.includes('RX5808 Tune done') ||
-             line.includes('RX5808 frequency verified properly')) {
-    // "Tune done" is the real end-of-tune signal.  Hiding only on "verified
-    // properly" tied this banner to SPI register READBACK, which most RX5808
-    // modules do not support — verifyFrequency() then logs "frequency not
-    // matching" instead and the banner never cleared.  There is no timeout
-    // behind it, so it stayed up indefinitely.  "verified properly" is kept as
-    // a second trigger for modules that do read back.
+  } else if (line.includes('RX5808 Tune done')) {
+    // "Tune done" is the only end-of-tune signal now.
+    //
+    // This used to also accept "RX5808 frequency verified properly", from a
+    // verifyFrequency() that read the tuning register back over SPI.  That
+    // never fired on real hardware — these modules do not drive the SPI data
+    // line — so the banner once hung indefinitely waiting for it, and the
+    // "Tune done" trigger was added to rescue it.  The firmware side has since
+    // been removed outright (RX5808.cpp), so the dead trigger goes with it.
     hideCalibrationBanner();
   }
 }

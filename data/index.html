@@ -145,6 +145,18 @@
 
       <div id="race" class="tabcontent">
 
+        <!-- RECEIVER FAULT.  Raised the instant the firmware's boot check finds
+             RSSI perfectly flat — a timer that cannot see the gate is the one
+             fault worth putting in front of a pilot on the page they are
+             actually looking at.  Covers both the single and master views,
+             which live inside this tab.  One of three (.rssi-fault-banner);
+             all driven by applyRssiFaultBanners() from the rssiHealth event. -->
+        <div class="banner-fault rssi-fault-banner" style="display:none;">
+          <strong>RX5808 receiver not responding.</strong>
+          RSSI has not varied since startup, so lap detection cannot work.
+          <strong>Reboot the timer.</strong> If this comes back after a reboot, check the receiver's power and the RSSI wire.
+        </div>
+
         <!-- The multi-node mode line used to live HERE, as a full-width strip
              above the race views.  It now sits at the top of each race console
              (class "race-mode-line", one per view), ruled off from the clock
@@ -348,6 +360,13 @@
 
       <!-- ── Client read-only Race View tab (mirrors master's race display) ── -->
       <div id="raceview" class="tabcontent" style="display: none;">
+        <!-- Receiver fault, client copy — a pilot under a race director is
+             looking at THIS tab, not the Race tab.  See the note in #race. -->
+        <div class="banner-fault rssi-fault-banner" style="display:none; margin:10px 16px;">
+          <strong>RX5808 receiver not responding.</strong>
+          RSSI has not varied since startup, so lap detection cannot work.
+          <strong>Reboot the timer.</strong> If this comes back after a reboot, check the receiver's power and the RSSI wire.
+        </div>
         <!-- margin has side gutters now that the tab is full-bleed — with
              `margin: 6px 0` a rounded banner sat hard against both edges.
              rvUpdateBanner() only ever writes background/textContent. -->
@@ -545,6 +564,15 @@
         </div>
         <div style="margin-bottom: 16px;">
           <button id="startWizardButton" onclick="startCalibrationWizard()" style="width: 100%; padding: 12px; font-size: 16px; background-color: var(--primary-color);">Start Calibration Wizard</button>
+        </div>
+
+        <!-- Receiver fault, calibration copy.  The trace below cannot convey
+             it on its own — a dead receiver and a quiet gate draw the same flat
+             line.  Same class and driver as the Race page banner. -->
+        <div class="banner-fault rssi-fault-banner" style="display:none;">
+          <strong>RX5808 receiver not responding.</strong>
+          The trace below is not a live measurement — RSSI has not varied since startup.
+          <strong>Reboot the timer.</strong> If this comes back after a reboot, check the receiver's power and the RSSI wire.
         </div>
 
         <div class="rssi-chart-wrap">
