@@ -325,31 +325,77 @@ TestResult SelfTest::testTimingJitter(LapTimer* timer, RX5808* rx5808) {
     const uint32_t maxMs  = s.maxIntervalUs / 1000;
     const uint32_t meanUs = s.meanIntervalUs;
 
-    // Pass condition is the WORST gap, not the mean.  A healthy system shows
-    // zero late samples; any late sample means a scheduling stall long enough
-    // that a fast pass could have been missed.
-    result.passed = (s.lateCount == 0);
+    // ── The verdict depends on WHICH acquisition path is running ────────────
+    //
+    // A late sample means two completely different things on the two paths,
+    // and judging both by the polled rule reports failures that do not exist.
+    //
+    // POLLED: one analogRead() per loop() iteration, so a scheduling gap is a
+    //   genuine BLIND WINDOW.  A narrow gate peak landing inside it is lost
+    //   forever.  Any late sample is a real risk, so the bar stays at zero.
+    //
+    // DMA: the ADC free-runs at ADC_DMA_SAMPLE_HZ (20 kHz) in hardware,
+    //   independent of CPU scheduling, and the conv-done ISR merges each
+    //   frame's MAXIMUM into a running peak that readRssi() drains.  A late
+    //   read still returns the highest value seen since the previous read, so
+    //   a gap CANNOT lose a pass — it only delays the lap TIMESTAMP by the
+    //   length of the gap.  That is a different, much smaller problem.
+    //
+    // Why this changed (2026-09-20): the 10 ms threshold was chosen when
+    // sampling ran at 200-500 Hz, where it was 2-5 sample intervals.  The DMA
+    // path measures ~990 Hz, so 10 ms is now TEN intervals, and the rule
+    // failed healthy units on 2 outliers in 9914 samples — 0.02% — with the
+    // stalls coming from ordinary operating load: an open calibration page
+    // streams RSSI over SSE at 10 Hz, and the self-test's own noise-floor
+    // check blocks ~1 s inside an AsyncWebServer handler.  A pre-race check
+    // that fails under normal use trains the operator to ignore it.
+    //
+    // What DMA mode still fails on, both tied to real consequences:
+    //   - a gap long enough to put a lap timestamp visibly wrong, and which
+    //     indicates a genuine stall rather than scheduling noise
+    //   - a mean rate collapsed far below the ~1 kHz loop cadence, which means
+    //     sampling is starved even though the hardware is still converting
+    const uint32_t DMA_STALL_FAIL_MS = 250;   // timestamp error that would show
+    const uint32_t DMA_MIN_RATE_HZ   = 200;   // starved; polled territory
+    const bool dmaMode = (rx5808 && rx5808->getAdcMode() == ADC_MODE_DMA);
+
+    if (dmaMode) {
+        result.passed = (s.maxIntervalUs <= (DMA_STALL_FAIL_MS * 1000UL))
+                     && (hz >= DMA_MIN_RATE_HZ);
+    } else {
+        result.passed = (s.lateCount == 0);
+    }
 
     // Report the mode actually running, not the one requested — DMA falls
     // back to polled on init failure, and the A/B is worthless if the two
     // runs are silently the same mode.
-    const char* modeStr = "polled";
-    if (rx5808 && rx5808->getAdcMode() == ADC_MODE_DMA) modeStr = "DMA";
+    const char* modeStr = dmaMode ? "DMA" : "polled";
 
     result.details = String("[") + modeStr + "] " + String(hz) + " Hz, worst gap "
                    + String(s.maxIntervalUs) + "us (" + String(maxMs) + "ms), mean "
                    + String(meanUs) + "us, late(>"
                    + String(TIMING_STATS_LATE_THRESHOLD_MS) + "ms)=" + String(s.lateCount)
                    + "/" + String(s.sampleCount);
+    // On DMA, say what a gap actually costs.  Without this the raw late count
+    // reads as an unexplained defect on a unit that is working perfectly —
+    // which is exactly how the old wording misled.
+    if (dmaMode && s.lateCount > 0) {
+        result.details += ". Gaps delay a lap TIMESTAMP by their own length; "
+                          "they cannot miss a pass, because the ADC free-runs "
+                          "at 20 kHz and readRssi() returns the peak since the "
+                          "last read";
+    }
     if (!result.passed) {
         // The old hint said "see [CORE0] log for the blocking call".  That is
         // only true for work on parallelTask, which is all CORE0_TIME wraps.
         // A stall caused by an AsyncWebServer handler — the self-test itself
         // included — never appears there, so the hint sent people to a log that
         // could not contain the answer.
-        result.details += " — sampling stalled. [CORE0] names the call only if it "
-                          "ran on parallelTask; a stall from an AsyncWebServer "
-                          "handler or a USB serial write will not appear there.";
+        result.details += String(" — ")
+                       + (dmaMode ? "sampling genuinely stalled" : "sampling stalled")
+                       + ". [CORE0] names the call only if it ran on parallelTask; "
+                         "a stall from an AsyncWebServer handler or a USB serial "
+                         "write will not appear there.";
     }
 #else
     (void)timer;

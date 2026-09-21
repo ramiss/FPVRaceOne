@@ -2168,9 +2168,13 @@ EEPROM:\n";
         // here so the master's per-client RSSI modal can say so — a flat trace
         // is otherwise indistinguishable from a quiet gate.
         const bool flat = (rx && rx->rssiInputFlat());
-        char buf[48];
-        snprintf(buf, sizeof(buf), "{\"rssi\":%u,\"inputFlat\":%s}",
-                 rssi, flat ? "true" : "false");
+        // dmaRecoveries: lifetime count of stall-watchdog re-arms.  A few per
+        // session is normal (one per config save); a climbing number on an
+        // idle unit is a hardware problem worth a look.
+        const uint32_t recov = rx ? rx->dmaRecoveries() : 0;
+        char buf[72];
+        snprintf(buf, sizeof(buf), "{\"rssi\":%u,\"inputFlat\":%s,\"dmaRecoveries\":%u}",
+                 rssi, flat ? "true" : "false", (unsigned)recov);
         request->send(200, "application/json", buf);
     });
 
@@ -2954,6 +2958,17 @@ EEPROM:\n";
         TestResult cpuTest = selftest->testCpuLoad();
 
         // ── Active tests, which block this handler ────────────────────────
+        //
+        // Sample-interval accounting is suspended for the whole blocking
+        // section.  Running the passive tests first (above) stops this run
+        // from reporting its OWN stalls, but the stalls still landed in the
+        // open 10 s window, which closes later and is then read back by the
+        // NEXT run — so each run reported the previous one's interference,
+        // scattering the worst gap from 16 ms to 200 ms depending only on how
+        // recently diagnostics was last opened.  Pausing removes the whole
+        // class of artefact.  See LapTimer::setTimingStatsPaused().
+        if (timer) timer->setTimingStatsPaused(true);
+
         // Ambient noise floor at the configured frequency, against the
         // Enter/Exit thresholds.  Replaces the two band sweeps that used to sit
         // here: together they blocked this handler for 2.16 s and neither could
@@ -3013,9 +3028,16 @@ EEPROM:\n";
         TestResult sdTest = selftest->testSDCard();
 #endif
         
+        // ── End of the blocking section ───────────────────────────────────
+        // Resume BEFORE building the response: serialising ~20 results into a
+        // String is ordinary work, not a deliberate stall, and leaving the
+        // pause on past here would silently freeze the statistics for good if
+        // a later edit ever returned early from the JSON build.
+        if (timer) timer->setTimingStatsPaused(false);
+
         // Build JSON response
         String json = "{\"tests\":[";
-        
+
         auto addTest = [&json](const TestResult& test, bool first = false) {
             if (!first) json += ",";
             json += "{\"name\":\"" + test.name + "\",\"passed\":" + String(test.passed ? "true" : "false") + 

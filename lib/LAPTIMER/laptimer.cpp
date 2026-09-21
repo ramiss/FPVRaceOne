@@ -441,6 +441,14 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
     // which millis() cannot resolve to any useful precision.
     {
         const uint32_t nowUs = micros();
+        // Paused: record nothing, but keep lastSampleUs current so that the
+        // FIRST interval after resuming is measured from here rather than
+        // spanning the whole paused period.  Without that, un-pausing would
+        // book one enormous gap — precisely the artefact this exists to
+        // remove.  See setTimingStatsPaused().
+        if (_tsPaused) {
+            _ts.lastSampleUs = nowUs;
+        } else
         if (_ts.lastSampleUs != 0) {
             // Unsigned subtraction is wrap-safe (micros() wraps ~71 min).
             const uint32_t dtUs = nowUs - _ts.lastSampleUs;
@@ -453,7 +461,11 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
         _ts.lastSampleUs = nowUs;
 
         if (_ts.windowStartMs == 0) _ts.windowStartMs = currentTimeMs;
-        if (currentTimeMs - _ts.windowStartMs >= TIMING_STATS_WINDOW_MS &&
+        // Never publish while paused: the window would carry only the samples
+        // from before the pause, i.e. a short window dressed up as a full one.
+        // The resume path discards it and starts fresh instead.
+        if (!_tsPaused &&
+            currentTimeMs - _ts.windowStartMs >= TIMING_STATS_WINDOW_MS &&
             _ts.sampleCount > 0) {
             const uint32_t meanUs = (uint32_t)(_ts.sumIntervalUs / _ts.sampleCount);
             const uint32_t hz     = meanUs ? (1000000UL / meanUs) : 0;
@@ -856,6 +868,40 @@ void LapTimer::finishLap() {
     if (webhooks && conf->getGateLEDsEnabled() && conf->getWebhookLap()) {
         webhooks->triggerLap();
     }
+}
+
+void LapTimer::setTimingStatsPaused(bool paused) {
+#if TIMING_STATS_ENABLED
+    if (paused == _tsPaused) return;
+    _tsPaused = paused;
+    if (paused) return;
+
+    // RESUMING: discard the partial window and open a clean one.
+    //
+    // DO NOT try to "stretch" windowStartMs by the paused duration instead.
+    // That was the first attempt and it corrupted the statistics outright: a
+    // window can close DURING the pause (the close check still ran, and
+    // sampleCount is non-zero from before it), which resets windowStartMs to
+    // that moment — and adding the held time then pushed it into the FUTURE.
+    // `currentTimeMs - windowStartMs` is unsigned, so it underflowed to ~4.29e9,
+    // which is >= the window length, and every following sample published
+    // immediately.  The giveaway was "late(>10ms)=1/1" with mean equal to max:
+    // a whole window reported from a single interval.  Observed 2026-09-20.
+    //
+    // Discarding is also the honest answer.  A window spanning a pause
+    // describes two disjoint periods stitched together and means nothing, and
+    // _tsPublished is deliberately untouched here — readers keep the last
+    // COMPLETE clean window until a new one closes.
+    _ts.minIntervalUs = 0xFFFFFFFFUL;
+    _ts.maxIntervalUs = 0;
+    _ts.sumIntervalUs = 0;
+    _ts.sampleCount   = 0;
+    _ts.lateCount     = 0;
+    _ts.lastSampleUs  = 0;   // first interval after resume is not recorded
+    _ts.windowStartMs = 0;   // reopens on the next sample
+#else
+    (void)paused;
+#endif
 }
 
 uint8_t LapTimer::getRssi() {

@@ -319,6 +319,10 @@ void setup() {
     // 1 = DMA continuous with peak-hold.  Changing it requires a reboot,
     // which is why it is read once at init rather than polled per sample.
     rx.init(config.getAdcMode());
+    // Every flash write (EEPROM commit, LittleFS file write) halts the DMA
+    // stream — see storage.h.  Ask for a re-arm; loop() services it below.
+    // requestRearm() is safe from any task, and both writers run off loopTask.
+    Storage::setFlashWriteNotify([]() { rx.requestRearm("flash write"); });
 #ifdef PIN_BUZZER
     buzzer.init(PIN_BUZZER, BUZZER_INVERTED);
 #endif
@@ -439,11 +443,13 @@ void loop() {
         digitalWrite(LED_BUILTIN, HIGH); // LED off when services not started
     }
     
-    // Re-arm the ADC stream if a WiFi bring-up asked for it.  HERE and nowhere
-    // else: this is loopTask, the task that started the stream in setup() and
-    // therefore the only one allowed to stop it (the ADC unit lock is a
-    // mutex).  Before the timer update so this iteration's sample comes from
-    // the re-armed feed.  No-op on every other iteration.
+    // Re-arm the ADC stream if a WiFi bring-up or flash write asked for it,
+    // or if the stall watchdog inside finds the stream has stopped.  HERE and
+    // nowhere else: this is loopTask, the task that started the stream in
+    // setup() and therefore the only one allowed to stop it (the ADC unit
+    // lock is a mutex).  Before the timer update so this iteration's sample
+    // comes from the re-armed feed.  A counter compare on every other
+    // iteration.
     rx.serviceRearm();
 
     // Timing always runs

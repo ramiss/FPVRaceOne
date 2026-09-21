@@ -73,12 +73,17 @@ void RX5808::init(uint8_t mode) {
 // with the same aliasing problem the polled path has.
 //
 // Kept minimal and IRAM-resident: no logging, no allocation, no floating
-// point. `user_data` is the RX5808 instance's dmaPeakRaw.
+// point. `user_data` is the RX5808 instance's RX5808DmaShared.
+//
+// The frame counter is the stall watchdog's only input: a stream that has
+// halted stops incrementing it.  One add per frame, nothing else.
 static bool IRAM_ATTR rx5808AdcConvDone(adc_continuous_handle_t handle,
                                         const adc_continuous_evt_data_t *edata,
                                         void *user_data) {
-    volatile uint32_t *peak = (volatile uint32_t *)user_data;
-    if (!peak || !edata || !edata->conv_frame_buffer) return false;
+    RX5808DmaShared *shared = (RX5808DmaShared *)user_data;
+    if (!shared || !edata || !edata->conv_frame_buffer) return false;
+    volatile uint32_t *peak = &shared->peak;
+    shared->frames++;
 
     uint32_t frameMax = 0;
     const uint32_t n = edata->size / SOC_ADC_DIGI_RESULT_BYTES;
@@ -143,7 +148,7 @@ bool RX5808::startDmaSampling() {
 
     adc_continuous_evt_cbs_t cbs = {};
     cbs.on_conv_done = rx5808AdcConvDone;
-    if (adc_continuous_register_event_callbacks(handle, &cbs, (void *)&dmaPeakRaw) != ESP_OK) {
+    if (adc_continuous_register_event_callbacks(handle, &cbs, (void *)&dma) != ESP_OK) {
         DEBUG("[ADC] callback registration failed\n");
         adc_continuous_deinit(handle);
         return false;
@@ -156,6 +161,10 @@ bool RX5808::startDmaSampling() {
     }
 
     adcHandle = (void *)handle;
+    // Watchdog baseline: "now" counts as the last frame so the first check
+    // measures from the start, not from time zero.
+    dmaLastFrames  = dma.frames;
+    dmaLastFrameMs = millis();
     return true;
 }
 
@@ -230,6 +239,35 @@ void RX5808::stopDmaSampling() {
 // Concurrency of the work itself: serviceRearm() runs on the same task as
 // readRssi(), so the two never overlap.  The only other party is the ISR,
 // which adc_dma_stop() disables for the duration.
+//
+// ── Flash writes and the stall watchdog ─────────────────────────────────────
+//
+// THE SECOND FLATLINE.  Observed 2026-09-20: four or five config saves in a
+// row and the RSSI trace froze, on a unit that had booted clean.  Cause, from
+// the IDF sources: every flash erase/program runs with the instruction cache
+// off, so loopTask stops and every non-IRAM ISR is masked — and the Arduino
+// core does not set CONFIG_ADC_CONTINUOUS_ISR_IRAM_SAFE, so that includes the
+// ADC driver's ISR.  A sector erase takes ~50-100 ms; the DMA ring holds
+// 6.4 ms.  When it fills, the GDMA owner check halts the channel with
+// RX_DESC_ERROR.  adc_continuous registers only on_recv_eof, never
+// on_descr_err, so nothing restarts it: readRssi() repeats lastDmaRaw
+// until reboot.  Not new — as old as DMA mode itself — just never provoked.
+//
+// Two layers, sharing this one re-arm path:
+//
+//   1. Every flash writer asks for a re-arm when it finishes
+//      (Storage::notifyFlashWrite → requestRearm).  Deterministic, no
+//      detection wait, covers the writes we can name.
+//   2. The watchdog in serviceRearm() covers the ones we cannot: if the
+//      ISR's frame counter has not moved for ADC_DMA_STALL_MS, request a
+//      re-arm.  After a flash write the counter's age already includes the
+//      write, so it fires on the first loop() back.  The value, not the
+//      counter, is what a disconnected receiver freezes — so a flat RX5808
+//      never trips this.
+//
+// The gap is the write itself plus ~1 ms: nothing can sample while the
+// cache is off.  A gate pass sits above threshold for 150-400 ms, so the
+// worst case is a peak timestamp shifted by up to the gap, not a lost lap.
 void RX5808::requestRearm(const char* reason) {
     if (adcMode != ADC_MODE_DMA || !adcHandle) return;
     rearmReason  = reason ? reason : "";
@@ -237,9 +275,38 @@ void RX5808::requestRearm(const char* reason) {
 }
 
 void RX5808::serviceRearm() {
+    if (adcMode != ADC_MODE_DMA || !adcHandle) return;
+    const uint32_t nowMs = millis();
+
+    // Stall watchdog.  Reads the ISR's counter once; a plain 32-bit load is
+    // atomic on RISC-V so no critical section is needed.
+    const uint32_t frames = dma.frames;
+    if (frames != dmaLastFrames) {
+        dmaLastFrames  = frames;
+        dmaLastFrameMs = nowMs;
+        dmaStallRearms = 0;                 // stream is alive — reset the strike count
+    } else if (!rearmPending && !rxPoweredDown &&
+               (nowMs - dmaLastFrameMs) >= ADC_DMA_STALL_MS) {
+        if (dmaStallRearms < ADC_DMA_STALL_MAX_REARMS) {
+            dmaStallRearms++;
+            dmaStallRecoveries++;
+            // Uptime stamp, same format as the MULTINODE log — a timer has no
+            // RTC, so this is the only stamp comparable across the log.
+            const uint32_t upSec = nowMs / 1000;
+            DEBUG("[ADC] %02u:%02u:%02u DMA stalled (no frame for %u ms) — re-arming (#%u of %u)\n",
+                  (unsigned)(upSec / 3600), (unsigned)((upSec % 3600) / 60), (unsigned)(upSec % 60),
+                  (unsigned)(nowMs - dmaLastFrameMs),
+                  (unsigned)dmaStallRearms, (unsigned)ADC_DMA_STALL_MAX_REARMS);
+            requestRearm("DMA stall");
+        }
+        // At the cap: stop retrying.  The last re-arm re-opened the variance
+        // window; the held value reads flat and rssiInputFlat() reports it.
+        // A stream that keeps failing is a hardware fault, and retrying would
+        // only keep resetting that window and hide the verdict.
+    }
+
     if (!rearmPending) return;
     rearmPending = false;
-    if (adcMode != ADC_MODE_DMA || !adcHandle) return;
     adc_continuous_handle_t handle = (adc_continuous_handle_t)adcHandle;
 
     // Start is attempted even if stop reports "already stopped": that is the
@@ -253,8 +320,12 @@ void RX5808::serviceRearm() {
         DEBUG("[ADC] DMA re-armed after %s\n", rearmReason);
     }
 
-    // The liveness verdict has to describe the feed AFTER WiFi, not before:
-    // a window that closed pre-WiFi would say "alive" about a stream that
+    // Give the restarted stream a fresh ADC_DMA_STALL_MS before the watchdog
+    // may judge it; the first frame lands ~1.6 ms from now.
+    dmaLastFrameMs = nowMs;
+
+    // The liveness verdict has to describe the feed AFTER the event, not
+    // before: a window that closed earlier would say "alive" about a stream
     // this very event may just have killed, and then stay silent about it.
     resetBootCheck();
 }
@@ -473,7 +544,7 @@ uint8_t RX5808::readRssi() {
         // read-then-zero would race the ISR: a frame completing between the
         // two would have its peak discarded.  __atomic_exchange_n is a single
         // instruction on RISC-V and needs no critical section.
-        raw = (uint16_t)__atomic_exchange_n(&dmaPeakRaw, 0, __ATOMIC_RELAXED);
+        raw = (uint16_t)__atomic_exchange_n(&dma.peak, 0, __ATOMIC_RELAXED);
 
         // Zero means no frame completed since the last read — possible when
         // loop() runs faster than the ~625 Hz frame rate.
@@ -485,12 +556,13 @@ uint8_t RX5808::readRssi() {
         // it.  Hold the previous DMA sample instead; at worst that repeats a
         // value for one tick, which the median absorbs harmlessly.
         //
-        // A feed that stops ALTOGETHER freezes this value indefinitely, which
-        // is not handled here: a frozen read is a flat signal, and flatness is
-        // detected once, generically, by the variance check below — the same
-        // check that catches a receiver whose output is pinned while the ADC
-        // keeps sampling happily.  Both faults look identical on the wire, so
-        // they get one detector rather than two.
+        // A feed that stops ALTOGETHER freezes this value until the stall
+        // watchdog in serviceRearm() restarts the stream (~100 ms).  If three
+        // restarts cannot revive it, the held value is a flat signal and the
+        // variance check below reports it — the same check that catches a
+        // receiver whose output is pinned while the ADC keeps sampling
+        // happily.  Both faults look identical on the wire, so they share one
+        // detector.
         if (raw == 0) raw = lastDmaRaw;
         else          lastDmaRaw = raw;
 

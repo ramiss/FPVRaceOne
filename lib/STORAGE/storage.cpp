@@ -2,6 +2,8 @@
 #include "debug.h"
 #include <FS.h>
 
+void (*Storage::flashWriteNotify)() = nullptr;
+
 Storage::Storage() : sdAvailable(false) {
 #ifdef ESP32S3
     spi = nullptr;
@@ -137,6 +139,7 @@ bool Storage::writeFile(const String& path, const String& data) {
     }
     size_t written = file.print(data);
     file.close();
+    notifyFlashWrite();   // LittleFS just erased/programmed — see storage.h
     return written > 0;
 }
 

@@ -281,6 +281,25 @@ class LapTimer {
     // Last completed sample-interval window.  `valid` is false until the
     // first window closes (TIMING_STATS_WINDOW_MS after the first sample).
     const TimingStats& getTimingStats() const { return _tsPublished; }
+
+    // Suspend sample-interval accounting around work that deliberately blocks
+    // the sampler — currently only the self-test's active checks.
+    //
+    // WHY THIS EXISTS.  The statistics are meant to answer "is sampling
+    // punctual during normal operation".  The self-test's noise-floor check
+    // blocks the async_tcp task for ~1 s, and those stalls landed in whichever
+    // 10 s window was open at the time.  That window closes up to 10 s later,
+    // so the NEXT diagnostics run read it back and reported the PREVIOUS run's
+    // interference: observed 2026-09-20 scattering the worst gap from 16 ms to
+    // 200 ms purely on how long ago the button was last pressed.  Running the
+    // passive tests first (see the /api/selftest route) stops a run polluting
+    // itself, but cannot stop it polluting its successor.
+    //
+    // Deliberately NARROWS what the test measures: load the operator invoked
+    // is excluded, load a race produces is not.  That is the intended question
+    // — whether lap detection is punctual while racing — and self-inflicted
+    // diagnostic stalls are both known and irrelevant to it.
+    void setTimingStatsPaused(bool paused);
 #endif
     uint8_t getRssi();
     uint32_t getLapTime();
@@ -358,6 +377,7 @@ class LapTimer {
 #if TIMING_STATS_ENABLED
     TimingStats _ts;           // accumulating window
     TimingStats _tsPublished;  // last completed window, safe for readers
+    bool        _tsPaused = false;  // see setTimingStatsPaused()
 #endif
 
 #if TIMING_MARKER_ENABLED

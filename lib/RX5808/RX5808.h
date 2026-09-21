@@ -41,6 +41,27 @@ enum RssiAdcMode : uint8_t {
 // quiet gate must show some jitter, short enough to be over before anyone has
 // opened the web UI.  Costs nothing after it closes.
 #define RSSI_BOOT_CHECK_MS   3000
+// DMA stall watchdog — see RX5808::serviceRearm().  A healthy stream delivers
+// a frame every ~1.6 ms; if none arrives for this long the DMA has halted and
+// the stream is re-armed.  100 ms is >10x any legitimate runtime loop() stall,
+// so a live stream is never torn down by mistake, and short enough that a
+// gate pass (150-400 ms above threshold) cannot fall entirely inside the gap.
+#define ADC_DMA_STALL_MS         100
+// Consecutive stall re-arms with no frame in between before giving up.  A
+// stream that three restarts cannot revive is a hardware fault; retrying
+// forever would also keep resetting the boot variance window and hide it.
+#define ADC_DMA_STALL_MAX_REARMS 3
+
+// Shared between the DMA ISR and readRssi()/serviceRearm().  The ISR gets a
+// pointer to this and nothing else — no access to the object.
+struct RX5808DmaShared {
+    // Running peak written by the ISR, drained by readRssi().  uint32_t
+    // rather than uint8_t so __atomic_exchange_n operates on a native word.
+    volatile uint32_t peak   = 0;
+    // Frames delivered since start.  Only ever compared for "has it moved",
+    // so wrap-around is harmless.  The stall watchdog's sole input.
+    volatile uint32_t frames = 0;
+};
 
 class RX5808 {
    public:
@@ -75,14 +96,19 @@ class RX5808 {
     // liveness check needs in a quiet RF environment.
     uint16_t lastRawSample() const { return lastRawUsed; }
 
-    // Re-arm DMA acquisition after a WiFi bring-up — a two-step handshake,
-    // and the split is NOT optional.
+    // Re-arm DMA acquisition — a two-step handshake, and the split is NOT
+    // optional.
     //
-    //   requestRearm()  — safe from ANY task.  Sets a flag.  The webserver
-    //                     calls it from the WiFi AP_START / STA_START events,
-    //                     which run on the arduino_events task.
+    //   requestRearm()  — safe from ANY task.  Sets a flag.  Called from the
+    //                     WiFi AP_START / STA_START events (arduino_events
+    //                     task) and after every flash write (parallelTask or
+    //                     the webserver task, via Storage::notifyFlashWrite).
     //   serviceRearm()  — MUST run on the task that called init(), i.e. the
-    //                     Arduino loopTask.  main.cpp calls it from loop().
+    //                     Arduino loopTask.  main.cpp calls it from loop()
+    //                     every iteration.  Also runs the DMA stall watchdog:
+    //                     if no frame has arrived for ADC_DMA_STALL_MS it
+    //                     requests a re-arm itself, up to
+    //                     ADC_DMA_STALL_MAX_REARMS times in a row.
     //
     // Why: IDF's adc_continuous_start() takes the ADC1 unit lock — a FreeRTOS
     // mutex — and HOLDS it for the life of the stream; adc_continuous_stop()
@@ -94,6 +120,9 @@ class RX5808 {
     // account of why the re-arm exists at all.
     void requestRearm(const char* reason);
     void serviceRearm();
+    // Lifetime count of stall-watchdog recoveries.  Reported in /timer/rssi
+    // so a unit that keeps re-arming is visible without a serial port.
+    uint32_t dmaRecoveries() const { return dmaStallRecoveries; }
     void setFrequency(uint16_t frequency);
     uint8_t readRssi();
     void handleFrequencyChange(uint32_t currentTimeMs, uint16_t potentiallyNewFreq);
@@ -127,9 +156,13 @@ class RX5808 {
     uint8_t  adcMode      = ADC_MODE_POLLED;
     void*    adcHandle    = nullptr;
     uint8_t  adcChannel   = 0;
-    // Running peak written by the DMA ISR, drained by readRssi().  uint32_t
-    // rather than uint8_t so __atomic_exchange_n operates on a native word.
-    volatile uint32_t dmaPeakRaw = 0;
+    // Peak + frame counter shared with the ISR — see RX5808DmaShared.
+    RX5808DmaShared dma;
+    // ── DMA stall watchdog state (loopTask only) ────────────────────────
+    uint32_t dmaLastFrames       = 0;   // dma.frames as of the last check
+    uint32_t dmaLastFrameMs      = 0;   // millis() when it last advanced
+    uint8_t  dmaStallRearms      = 0;   // consecutive re-arms with no frame since
+    uint32_t dmaStallRecoveries  = 0;   // lifetime, see dmaRecoveries()
     // Last non-zero DMA sample, held when a read finds the peak empty.  Keeps
     // the DMA path on its own scale rather than falling back to a oneshot
     // read, which reports ~1.9x lower counts for the same voltage.
@@ -152,8 +185,9 @@ class RX5808 {
     void     resetBootCheck();
 
     // Cross-task handshake for the re-arm — see requestRearm()/serviceRearm().
-    // volatile: written on the WiFi event task, read and cleared on loopTask.
-    // The reason is only ever a string literal, so a bare pointer is safe.
+    // volatile: written on the WiFi event task or parallelTask, read and
+    // cleared on loopTask.  The reason is only ever a string literal, so a
+    // bare pointer is safe.
     volatile bool rearmPending = false;
     const char*   rearmReason  = "";
 

@@ -109,6 +109,9 @@ void Config::write(void) {
 
     EEPROM.put(0, conf);
     EEPROM.commit();
+    // The commit erased and programmed a flash sector with the cache off,
+    // which halts the RSSI DMA stream.  Ask for a re-arm — see storage.h.
+    Storage::notifyFlashWrite();
 
     DEBUG("Writing to EEPROM done");
 
