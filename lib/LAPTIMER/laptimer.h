@@ -302,6 +302,27 @@ class LapTimer {
     void setTimingStatsPaused(bool paused);
 #endif
     uint8_t getRssi();
+
+    // ── RSSI envelope for the live display ──────────────────────────────
+    // The detector evaluates every filtered sample (~1 kHz); the live chart
+    // receives one value per 100 ms.  Sending the instantaneous sample meant
+    // a 3 ms excursion that fired a lap went undrawn 97 % of the time, and the
+    // chart showed laps "below enter" — the 2026-09-21 false-lap
+    // investigation.  The envelope is the MAX and MIN of every filtered sample
+    // since this reader's previous take, so a chart drawing max sees every
+    // excursion the detector could have acted on, at its true height.
+    //
+    // Two readers drain on their own schedules — the SSE sender (100 ms) and
+    // the /timer/rssi poll behind the master's per-client modal — so each has
+    // its own accumulator and neither steals the other's peaks.
+    //
+    // A take after more than kEnvStaleMs of not reading returns last for all
+    // three: an accumulator nobody has drained for minutes holds the max and
+    // min since then, and drawing that as one point would put a bogus spike
+    // at the start of every session.
+    enum RssiEnvelopeReader : uint8_t { ENV_SSE = 0, ENV_POLL = 1, ENV_READERS = 2 };
+    void takeRssiEnvelope(uint8_t reader, uint8_t *last, uint8_t *maxV, uint8_t *minV);
+
     uint32_t getLapTime();
     uint8_t  getLastLapPeakRssi() const;
     bool isLapAvailable();
@@ -316,10 +337,30 @@ class LapTimer {
     void     stopCalibrationWizard();
     uint16_t getCalibrationCapacity() const { return calibrationCapacity; }
     uint16_t getCalibrationRssiCount();
-    uint8_t getCalibrationRssi(uint16_t index);
+    // Per 20 ms slot: the MAX and MIN of every filtered sample in that slot.
+    // Not the instantaneous value at the slot boundary — that was 1 sample in
+    // ~20, blind to exactly the short excursions the detector fires on, so the
+    // wizard placed thresholds inside the real noise envelope.  Max is what
+    // enter is tested against (a sample >= enter starts a crossing); min is
+    // what exit is tested against (a single sample < exit ends one).  Both
+    // are needed to place both thresholds.
+    uint8_t getCalibrationRssi(uint16_t index);      // slot max
+    uint8_t getCalibrationRssiMin(uint16_t index);   // slot min
     uint32_t getCalibrationTimestamp(uint16_t index);
-    
+
    private:
+    // Envelope accumulators, one per reader.  Packed (max << 8) | min in one
+    // 32-bit word so the reader's exchange and the sampler's compare-and-swap
+    // are each a single atomic operation: the readers run on parallelTask and
+    // async_tcp, the sampler on loopTask, and a plain read-then-reset would
+    // drop any sample that landed between the two — for a value whose whole
+    // purpose is "never miss a peak", the one failure that matters.
+    static constexpr uint32_t kEnvEmpty   = 0x00FFu;   // max 0, min 255
+    static constexpr uint32_t kEnvStaleMs = 1000;
+    volatile uint32_t _env[ENV_READERS]   = { kEnvEmpty, kEnvEmpty };
+    uint32_t          _envTakenMs[ENV_READERS] = { 0, 0 };
+    void _noteEnvelope(uint8_t v);
+
     laptimer_state_e state = STOPPED;
     RX5808 *rx;
     Config *conf;
@@ -455,9 +496,14 @@ private:
 
     uint16_t calibrationRssiCount;
     uint16_t calibrationCapacity = 0;   // granted samples; 0 = not allocated
-    uint8_t  *calibrationRssi       = nullptr;
+    uint8_t  *calibrationRssi       = nullptr;   // slot max — see getCalibrationRssi()
+    uint8_t  *calibrationRssiMin    = nullptr;   // slot min
     uint32_t *calibrationTimestamps = nullptr;
     uint32_t lastCalibrationSampleMs;  // Track when last sample was taken
+    // Envelope of the filtered samples since the last stored slot.  loopTask
+    // only, so no guard needed.
+    uint8_t  calSlotMax = 0;
+    uint8_t  calSlotMin = 255;
 
     void lapPeakCapture();
     bool lapPeakCaptured();

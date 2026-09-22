@@ -51,6 +51,11 @@ class Webserver : public TransportInterface {
     // TransportInterface implementation
     void sendLapEvent(uint32_t lapTimeMs, uint8_t peakRssi = 0) override;
     void sendRssiEvent(uint8_t rssi) override;
+    // The live chart's feed: "last,max,min" of the filtered RSSI since the
+    // previous send — see LapTimer::takeRssiEnvelope().  Older browser code
+    // that parseInt()s the payload still reads `last`, since parseInt stops
+    // at the first comma.
+    void sendRssiEnvelopeEvent(uint8_t last, uint8_t maxV, uint8_t minV);
     void sendRaceStateEvent(const char* state) override;
     bool isConnected() override;
     void update(uint32_t currentTimeMs) override;
@@ -164,6 +169,14 @@ class Webserver : public TransportInterface {
     volatile uint32_t changeTimeMs = 0;
     bool sendRssi = false;
     uint32_t rssiSentMs = 0;
+    // millis() of the last /calibration/data PAGE served (limit > 0), local or
+    // proxied.  handleWebUpdate() holds the live RSSI stream for a short
+    // window after it, so the stream never competes with a recording
+    // download for the link.  Keyed on the traffic itself rather than on the
+    // wizard's state so an abandoned session on some other browser can never
+    // leave this one's chart frozen.  Written on async_tcp, read on
+    // parallelTask; a 32-bit store is atomic on this core.
+    uint32_t _calDataServedMs = 0;
     uint32_t sseKeepaliveMs = 0;
     uint8_t apChannel = 0;  // 0 = not yet scanned; first AP start picks the least-congested 1/6/11
 

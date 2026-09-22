@@ -922,6 +922,13 @@
           <p id="wizardProcessingDetail" style="margin-top: 6px; color: var(--secondary-color); font-size: 14px;">
             Crunching peak data — this usually takes a few seconds.
           </p>
+          <!-- The download now waits out a lost connection for up to ~90 s
+               rather than failing; this is the way out if the pilot would
+               rather re-fly than wait.  Discards the recording on the device
+               so the live RSSI stream, held while the wizard owns the device,
+               resumes. -->
+          <button id="wizardProcessingCancel" onclick="cancelCalibrationDownload()"
+                  style="margin-top: 22px; background-color: var(--btn-secondary-bg);">Cancel and discard recording</button>
         </div>
 
         <div id="wizardMarking" style="display: none;">

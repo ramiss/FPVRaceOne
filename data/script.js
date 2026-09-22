@@ -45,10 +45,21 @@ let wizardAbortController = null;
 // String was exhausting the heap.  It was not: the failure surfaced as fetch's
 // "Failed to fetch", a connection-level rejection, where a truncated body would
 // have been a JSON SyntaxError.  The pressure is on the connection, not the
-// heap, so keep the page count DOWN — 500 means 10 requests for a full
-// recording instead of 25.  Pacing and retries live in
-// _fetchCalibrationPageRetrying(); the firmware clamps limit to 1000.
-const CALIBRATION_PAGE_SIZE = 500;
+// heap, so keep the page count DOWN.  Pages are fetched in the firmware's
+// compact form (fmt=c, ~9 bytes/sample against ~38 for objects), so 1250
+// samples is ~12 KB — smaller than the old 500-object page — and a full
+// 5000-sample recording is 4 requests instead of 10.  Pacing and retries live
+// in _fetchCalibrationPageRetrying(); the firmware clamps compact pages at 2500.
+const CALIBRATION_PAGE_SIZE = 1250;
+// Per-request ceiling.  Without it a fetch whose TCP connection silently died
+// (phone roamed, AP reset) sits until the browser's own timeout — minutes —
+// and the retry logic never gets its turn.
+const CALIBRATION_FETCH_TIMEOUT_MS = 8000;
+// How long a single page keeps retrying before the download is declared
+// failed.  A lost WiFi association comes back in seconds; a phone that walked
+// out of range comes back when it walks back.  The recording sits untouched on
+// the device the whole time, so waiting costs nothing but patience.
+const CALIBRATION_RETRY_BUDGET_MS = 90000;
 
 // --- Calibration overview mode (draw full wizard dataset on the live scanner canvas) ---
 let calibOverviewMode = false;     // true when we're showing the full recorded dataset on the live chart canvas
@@ -303,7 +314,8 @@ const addLapButton = document.getElementById("addLapButton");
 const batteryVoltageDisplay = document.getElementById("bvolt");
 
 const rssiBuffer = [];
-var rssiValue = 0;
+var rssiValue = 0;      // envelope max of the last draw interval — what the trace shows
+var rssiMinValue = 0;   // envelope min of the same interval
 var rssiSending = false;
 
 let lastKeepaliveMs = 0;
@@ -312,6 +324,7 @@ const KEEPALIVE_TIMEOUT_MS = 12000; // flag stale connection after 2+ missed kee
 var rssiChart;
 var crossing = false;
 var rssiSeries = null;          // initialised inside createRssiChart() after smoothie.js loads
+var rssiMinSeries = null;       // lower edge of the 100 ms envelope — see addRssiPoint()
 var rssiCrossingSeries = null;
 var rssiLapMarkerSeries = null; // brief full-height spike at each lap detection
 var maxRssiValue = enterRssi + 10;
@@ -514,6 +527,14 @@ async function onWiFiReconnect() {
     } catch (err) {
       console.error('[Reconnect] Failed to restart RSSI streaming:', err);
     }
+  }
+
+  // A recording left on the device by a download the connection drop killed —
+  // ask before the early return below, because this is the one reconnect
+  // case that has something to recover.  No-op when nothing is pending or a
+  // wizard is already open.
+  if (_pageInitDone && typeof wizardOfferResumeIfPending === 'function') {
+    wizardOfferResumeIfPending();
   }
 
   // On initial page load the DOMContentLoaded IIFE already ran the full init. The
@@ -2081,30 +2102,48 @@ function addRssiPoint() {
 
     rssiChart.start();
     if (rssiBuffer.length > 0) {
-      // Firmware streams RSSI at 10 Hz but addRssiPoint runs at 5 Hz.  Using
-      // FIFO shift() here meant the chart drew the oldest queued sample each
-      // cycle, accumulating up to ~10 samples (~1 s) of artificial lag in
-      // steady state and feeling much more sluggish than the actual signal
-      // processing.  Take the newest sample instead and discard the rest —
-      // the chart only renders one point per cycle anyway, so older samples
-      // would never have been drawn.
-      rssiValue = parseInt(rssiBuffer[rssiBuffer.length - 1], 10);
+      // Each SSE frame is "last,max,min": the instantaneous filtered value
+      // and the envelope of EVERY filtered sample since the previous frame
+      // (~100 of them).  The chart used to draw `last` alone, which is one
+      // sample in ~100 — a 3 ms excursion that fired a lap was drawn 3 % of
+      // the time, and laps appeared to trigger "below enter".  The detector
+      // sees every sample, so the chart must too: the trace is drawn through
+      // MAX, the lower edge through MIN, and any excursion however brief is
+      // on screen at its true height.
+      //
+      // Several frames can queue between draws (firmware 10 Hz, this loop
+      // 10 Hz, jitter).  Merging their envelopes rather than keeping only
+      // the newest frame is what makes "never miss a peak" hold end to end.
+      // A USB frame is a bare number; parse tolerates both.
+      let mergedLast = NaN, mergedMax = -Infinity, mergedMin = Infinity;
+      for (const frame of rssiBuffer) {
+        const p  = String(frame).split(',');
+        const l  = parseInt(p[0], 10);
+        if (!Number.isFinite(l)) continue;
+        const mx = p.length > 1 ? parseInt(p[1], 10) : l;
+        const mn = p.length > 2 ? parseInt(p[2], 10) : l;
+        mergedLast = l;
+        mergedMax  = Math.max(mergedMax, Number.isFinite(mx) ? mx : l);
+        mergedMin  = Math.min(mergedMin, Number.isFinite(mn) ? mn : l);
+      }
       rssiBuffer.length = 0;
-      // A malformed/empty SSE frame yields NaN. Math.max/min(x, NaN) === NaN, which
-      // would poison maxRssiValue/minRssiValue (and thus the chart's axis range) for
-      // the rest of the session, and the crossing comparisons silently evaluate false.
-      // Drop the bad sample instead.
-      if (!Number.isFinite(rssiValue)) return;
-      if (crossing && rssiValue < exitRssi) {
+      // Every frame malformed: nothing to draw, and NaN must not reach the
+      // axis trackers or the crossing compares below.
+      if (!Number.isFinite(mergedLast)) return;
+      rssiValue    = mergedMax;
+      rssiMinValue = mergedMin;
+      // Mirror the firmware: a crossing starts on a sample >= enter (the
+      // envelope's max) and ends on a sample < exit (its min).
+      if (crossing && rssiMinValue < exitRssi) {
         crossing = false;
-      } else if (!crossing && rssiValue > enterRssi) {
+      } else if (!crossing && rssiValue >= enterRssi) {
         crossing = true;
       }
       // Y-axis range tracker: monotonically expands to fit observed extremes,
       // never contracts within a session.  Reset on Calibration tab exit
       // (see `else` branch below) so each visit starts fresh.
       maxRssiValue = Math.max(maxRssiValue, rssiValue);
-      minRssiValue = Math.min(minRssiValue, rssiValue);
+      minRssiValue = Math.min(minRssiValue, rssiMinValue);
     }
 
     // update horizontal lines and min max values
@@ -2119,6 +2158,7 @@ function addRssiPoint() {
 
     var now = Date.now();
     rssiSeries.append(now, rssiValue);
+    if (rssiMinSeries) rssiMinSeries.append(now, rssiMinValue);
     if (crossing) {
       rssiCrossingSeries.append(now, 256);
     } else {
@@ -2276,6 +2316,7 @@ setInterval(addRssiPoint, 100);
 async function createRssiChart() {
   await loadScript('smoothie.js');
   rssiSeries         = new TimeSeries();
+  rssiMinSeries      = new TimeSeries();
   rssiCrossingSeries = new TimeSeries();
   rssiLapMarkerSeries = new TimeSeries();
   rssiChart = new SmoothieChart({
@@ -2313,6 +2354,14 @@ async function createRssiChart() {
     maxValue: 1,
     minValue: 0,
   });
+  // Trace = envelope MAX: every excursion the detector could act on, at its
+  // true height.  This is the ONE line thresholds are set against — enter
+  // above it at rest and below it at the peaks, exit above it at rest.  The
+  // envelope's MIN is still received (rssiMinSeries is fed, for anyone
+  // debugging) but deliberately NOT drawn: a second line invited the question
+  // "which one do I set the threshold against?", and the only decision the
+  // min informs — exit inside a peak's fluctuation — the wizard now makes
+  // itself from the recorded min data.
   rssiChart.addTimeSeries(rssiSeries, {
     lineWidth: 1.7,
     strokeStyle: "hsl(214, 53%, 60%)",
@@ -7126,6 +7175,11 @@ function beginCalibrationRecording() {
       }
 
       wizardState.recording = true;
+      // A fresh recording is a fresh thing to lose; let the resume prompt
+      // fire again if this one's download gets interrupted, and claim the
+      // recording for this tab so only this tab is ever offered it.
+      _wizardResumeOffered = false;
+      _wizardSetClaim(wizardTargetNodeId);
       // Only now does the screen claim to be recording — after the device has
       // confirmed it granted a buffer.
       if (btn) btn.disabled = false;
@@ -7146,7 +7200,7 @@ function beginCalibrationRecording() {
 
 
 async function fetchCalibrationMeta(signal) {
-  const resp = await fetch(_wizardPath('data', 'limit=0'), { signal });
+  const resp = await _fetchWithTimeout(_wizardPath('data', 'limit=0'), CALIBRATION_FETCH_TIMEOUT_MS, signal);
   if (!resp.ok) {
     const t = await resp.text().catch(() => '');
     throw new Error(`GET calibration/data?limit=0 failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
@@ -7154,13 +7208,54 @@ async function fetchCalibrationMeta(signal) {
   return await resp.json(); // { total: N }
 }
 
+// fetch() with a hard per-request timeout layered on the wizard's own abort
+// signal: either one cancels the request.  A timeout surfaces as a normal
+// error (retried); a wizard abort stays an AbortError (not retried).
+async function _fetchWithTimeout(url, timeoutMs, signal) {
+  const ctrl  = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; ctrl.abort(); }, timeoutMs);
+  const onAbort = () => ctrl.abort();
+  if (signal) {
+    if (signal.aborted) { clearTimeout(timer); throw new DOMException('Aborted', 'AbortError'); }
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+  try {
+    return await fetch(url, { signal: ctrl.signal, cache: 'no-store' });
+  } catch (e) {
+    if (timedOut) throw new Error(`no response within ${Math.round(timeoutMs / 1000)} s`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+    if (signal) signal.removeEventListener('abort', onAbort);
+  }
+}
+
 async function fetchCalibrationPage(offset, limit, signal) {
-  const resp = await fetch(_wizardPath('data', `offset=${offset}&limit=${limit}`), { signal });
+  // Compact form: {total, offset, limit, count, t0, d:[max,min,dt, ...]} —
+  // see /calibration/data in webserver.cpp.  Expanded here into the
+  // {rssi, min, time} rows the rest of the wizard has always consumed, so
+  // the wire format is the only thing that changed.  A firmware that ignores
+  // fmt=c returns the object form, which passes through untouched.
+  const resp = await _fetchWithTimeout(
+    _wizardPath('data', `offset=${offset}&limit=${limit}&fmt=c`),
+    CALIBRATION_FETCH_TIMEOUT_MS, signal);
   if (!resp.ok) {
     const t = await resp.text().catch(() => '');
     throw new Error(`GET calibration/data page failed: HTTP ${resp.status} ${resp.statusText} ${t}`);
   }
-  return await resp.json(); // { total, offset, limit, count, data:[...] }
+  const page = await resp.json();
+  if (Array.isArray(page.d) && !Array.isArray(page.data)) {
+    const rows = [];
+    let t = Number(page.t0) || 0;
+    for (let i = 0; i + 2 < page.d.length; i += 3) {
+      t += Number(page.d[i + 2]) || 0;
+      rows.push({ rssi: page.d[i], min: page.d[i + 1], time: t });
+    }
+    page.data = rows;
+    delete page.d;
+  }
+  return page; // { total, offset, limit, count, data:[{rssi,min,time}, ...] }
 }
 
 // Pause that respects the wizard's AbortController, so cancelling during a
@@ -7182,28 +7277,50 @@ function _wizardSleep(ms, signal) {
   });
 }
 
-// One page, with retries.
+// One page, with retries — patient ones.
 //
 // The device refuses connections when these requests go out back-to-back: the
 // recording loop polls the very same endpoint every 200 ms for minutes without
 // a single failure, while an unpaced download fails with "Failed to fetch"
 // partway through.  Spacing is the variable, so pace the requests and retry the
-// ones that still lose the race.  The offset is carried into the final error
-// because how FAR the download got is the first thing worth knowing.
-async function _fetchCalibrationPageRetrying(offset, limit, signal, attempts = 4) {
+// ones that still lose the race.
+//
+// Four quick attempts used to be the whole budget (~1 s), after which the
+// wizard closed and the pilot re-flew — while the recording was still sitting
+// on the device, untouched, because /calibration/stop is only posted after a
+// successful download.  A lost WiFi association or a phone at the edge of
+// range needs seconds, not one.  So: retry the SAME offset with a backoff
+// that settles at 3 s, for up to CALIBRATION_RETRY_BUDGET_MS, and say so on
+// the spinner.  The buffer is append-only and `total` was pinned before the
+// first page, so a page resumed 60 s later is byte-identical to one fetched
+// immediately.  The offset is carried into the final error because how FAR
+// the download got is the first thing worth knowing.
+async function _fetchCalibrationPageRetrying(offset, limit, signal, pageIdx = 1, pageCount = 1) {
+  const startedMs = Date.now();
+  let attempt = 0;
   let lastErr = null;
-  for (let attempt = 1; attempt <= attempts; attempt++) {
+  for (;;) {
+    attempt++;
     try {
       return await fetchCalibrationPage(offset, limit, signal);
     } catch (e) {
       if (e?.name === 'AbortError') throw e;
       lastErr = e;
-      console.warn(`[calibration] page at offset ${offset} attempt ${attempt}/${attempts} failed:`, e);
-      if (attempt < attempts) await _wizardSleep(150 * attempt, signal);   // 150 / 300 / 450 ms
+      const elapsedMs = Date.now() - startedMs;
+      console.warn(`[calibration] page ${pageIdx}/${pageCount} (offset ${offset}) attempt ${attempt} failed after ${Math.round(elapsedMs / 1000)} s:`, e);
+      if (elapsedMs >= CALIBRATION_RETRY_BUDGET_MS) break;
+      // 150 / 300 / 450 ms for the connection-refused case that motivated the
+      // original retries, then 1 s, then 3 s for as long as the link is down.
+      const backoff = attempt <= 3 ? 150 * attempt : (attempt === 4 ? 1000 : 3000);
+      showWizardProcessing(
+        'Connection lost — retrying…',
+        `Page ${pageIdx} of ${pageCount} has not answered for ${Math.round(elapsedMs / 1000)} s. `
+        + `The recording is safe on the timer; the download resumes automatically when the link returns.`);
+      await _wizardSleep(backoff, signal);
     }
   }
   throw new Error(
-    `page at offset ${offset} failed after ${attempts} attempts — ${lastErr?.message || lastErr}`);
+    `page ${pageIdx} of ${pageCount} (offset ${offset}) failed after ${Math.round((Date.now() - startedMs) / 1000)} s of retrying — ${lastErr?.message || lastErr}`);
 }
 
 async function fetchAllCalibrationData(signal) {
@@ -7212,16 +7329,20 @@ async function fetchAllCalibrationData(signal) {
 
   const all = [];
   let offset = 0;
+  const pageCount = Math.max(1, Math.ceil(total / CALIBRATION_PAGE_SIZE));
 
   while (offset < total) {
-    const page = await _fetchCalibrationPageRetrying(offset, CALIBRATION_PAGE_SIZE, signal);
+    const pageIdx = Math.floor(offset / CALIBRATION_PAGE_SIZE) + 1;
+    showWizardProcessing('Processing recording…',
+      `Downloading samples from the device — page ${pageIdx} of ${pageCount}.`);
+    const page = await _fetchCalibrationPageRetrying(offset, CALIBRATION_PAGE_SIZE, signal, pageIdx, pageCount);
     if (Array.isArray(page.data) && page.data.length) {
       all.push(...page.data);
       offset += page.data.length;
       // Breathing room between pages.  200 ms is not a tuned number — it is
       // exactly the cadence wizardRecordingLoop() sustains against this same
       // endpoint for the whole recording, hundreds of consecutive connections,
-      // without ever failing.  Ten pages therefore cost ~2 s of deliberate
+      // without ever failing.  Four pages therefore cost ~0.6 s of deliberate
       // waiting, which is invisible behind the spinner.
       if (offset < total) await _wizardSleep(200, signal);
     } else {
@@ -7338,6 +7459,14 @@ async function stopCalibrationWizard() {
   document.getElementById('wizardRecording').style.display = 'none';
   showWizardProcessing('Processing recording…', 'Downloading samples from the device and detecting peaks.');
 
+  await wizardProcessRecording();
+}
+
+// Download → release the device → marking screen.  Shared by the normal Stop
+// Recording path and by the reload-resume path (wizardOfferResumeIfPending),
+// which has no recording UI to hide and no wizard state beyond the target
+// node — it just needs everything from the download onward.
+async function wizardProcessRecording() {
   // How many samples the device said it had.  Reported in the failure alert
   // below, because it is the one fact that separates "the device gave us
   // nothing" from "we had the data and the rendering broke" — a distinction the
@@ -7360,6 +7489,11 @@ async function stopCalibrationWizard() {
     // Harmless: fetchAllCalibrationData pins `total` before requesting the
     // first page and the buffer is append-only, so anything recorded during the
     // download simply isn't read.
+    //
+    // And because the stop comes AFTER, a download that fails — connection
+    // lost, page reloaded — leaves the recording on the device.  The retry
+    // budget in _fetchCalibrationPageRetrying rides out the first; the
+    // resume prompt in wizardOfferResumeIfPending recovers from the second.
     try {
       const { total, data } = await fetchAllCalibrationData(wizardAbortController?.signal);
       downloaded = total;
@@ -7384,6 +7518,9 @@ async function stopCalibrationWizard() {
         console.warn('calibration/stop failed after download (data already held):', e);
       }
     }
+    // The recording is in this tab's memory now; nothing left on the device
+    // to come back for.
+    _wizardClearClaim();
 
     if (!Array.isArray(wizardState.data) || wizardState.data.length < 10) {
       hideWizardProcessing();
@@ -7429,6 +7566,103 @@ async function stopCalibrationWizard() {
     alert(`Error processing calibration data.\n\n${error?.message || error}\n\n`
         + `The device reported ${downloaded} sample(s).`);
     closeCalibrationWizard();
+    // The recording is still on the device and this tab still holds the
+    // claim — offer to try the download again, or discard, right now rather
+    // than leaving it for a reload to find.
+    _wizardResumeOffered = false;
+    wizardOfferResumeIfPending();
+  }
+}
+
+// "Cancel and discard recording" on the processing panel.  Aborts the download
+// (the retry loop and its sleeps all honour the wizard's signal) and releases
+// the device.  The release matters beyond tidiness: the live RSSI stream is
+// held while the wizard owns the device, so an abandoned session would leave
+// the Calibration tab's chart frozen until the next wizard run.
+async function cancelCalibrationDownload() {
+  const path = _wizardPath('stop');
+  _wizardClearClaim();
+  closeCalibrationWizard();            // aborts the fetch, tears down the UI, resets target
+  try {
+    await fetch(path, { method: 'POST' });
+  } catch (e) {
+    console.warn('[calibration] discard after cancel failed (device may still hold the recording):', e);
+  }
+}
+
+// After a page reload the wizard's JavaScript state is gone, but the device
+// is still in CALIBRATION_WIZARD holding the samples — the stop is only ever
+// posted after a successful download.  If THIS tab holds the claim on that
+// recording (see _wizardSetClaim), ask the device whether the samples are
+// still there and offer to pick up where the download left off.
+//
+// Called once page init completes, on every SSE reconnect, and after a
+// failed download.  Free when nothing is claimed (no network at all); one
+// small GET when something is.  Skipped while a wizard is already open, which
+// is the normal case during a live download.  Never fires in a tab that did
+// not start the recording — see the claim note for why that matters.
+let _wizardResumeOffered = false;
+async function wizardOfferResumeIfPending() {
+  if (_wizardResumeOffered) return;
+  const modal = document.getElementById('calibrationWizardModal');
+  if (modal && modal.style.display !== 'none' && modal.style.display !== '') return;
+
+  const claim = _wizardGetClaim();
+  if (!claim) return;
+  const targetNodeId = claim.nodeId > 0 ? claim.nodeId : 0;
+  if (targetNodeId > 0 && mnNodeMode !== 1) {
+    // A client claim only means anything on the master that proxies to it.
+    _wizardClearClaim();
+    return;
+  }
+
+  try {
+    const metaUrl = targetNodeId > 0
+      ? `/api/multinode/calibration/data?nodeId=${targetNodeId}&limit=0`
+      : '/calibration/data?limit=0';
+    const r = await fetch(metaUrl, { cache: 'no-store' });
+    if (!r.ok) return;
+    const meta = await r.json();
+    const total = Number(meta?.total) || 0;
+    if (total < 10) {
+      // The device no longer has it (rebooted, or a new wizard run freed it):
+      // the claim is stale.
+      _wizardClearClaim();
+      return;
+    }
+
+    _wizardResumeOffered = true;
+    const node  = targetNodeId > 0 ? (mnCurrentNodes || []).find(n => n.nodeId === targetNodeId) : null;
+    const who   = targetNodeId > 0
+      ? ((node && node.pilotName) ? node.pilotName : ('Node ' + _slotLetter(targetNodeId)))
+      : 'this timer';
+    const secs  = Math.round(total * WIZARD_SAMPLE_INTERVAL_MS / 1000);
+    const resume = confirm(
+      `A calibration recording for ${who} is still on the device ` +
+      `(${total} samples, about ${secs} s) — its download did not finish.\n\n` +
+      `OK to download it again and mark the peaks.  Cancel to discard it.`);
+
+    if (!resume) {
+      const stopUrl = targetNodeId > 0
+        ? `/api/multinode/calibration/stop?nodeId=${targetNodeId}`
+        : '/calibration/stop';
+      _wizardClearClaim();
+      await fetch(stopUrl, { method: 'POST' }).catch(() => {});
+      return;
+    }
+
+    // Open the wizard exactly as the two normal entry points do, then skip
+    // straight past the recording screen into the download.
+    wizardTargetNodeId = targetNodeId;
+    document.querySelectorAll('.wizardPilotSuffix').forEach(el => {
+      el.textContent = targetNodeId > 0 ? ' (' + who + ')' : '';
+    });
+    startCalibrationWizard();
+    document.getElementById('wizardRecording').style.display = 'none';
+    showWizardProcessing('Resuming…', 'Downloading the recording left on the device.');
+    await wizardProcessRecording();
+  } catch (e) {
+    console.warn('[calibration] resume check failed:', e);
   }
 }
 
@@ -7574,11 +7808,13 @@ function drawWizardChart() {
   const chartWidth = width - 2 * padding;
   const chartHeight = height - 2 * padding;
   
-  // Get RSSI values
+  // Get RSSI values.  Each sample is its 20 ms slot's MAX — the value the
+  // detector tests enter against.  (The slot MIN travels alongside in
+  // d.min for calculateThresholds(); it is not part of this chart.)
   const rssiValues = wizardState.data.map(d => d.rssi);
   const minRssi = Math.min(...rssiValues);
   const maxRssi = Math.max(...rssiValues);
-  const rssiRange = maxRssi - minRssi;
+  const rssiRange = Math.max(1, maxRssi - minRssi);
   
   // Apply visual smoothing with moving average (window size 15 for smoother appearance)
   // IMPORTANT: This is ONLY for visual display - does NOT affect actual data
@@ -7633,10 +7869,28 @@ function drawWizardChart() {
   ctx.textAlign = 'left';
   ctx.textBaseline = 'alphabetic';
 
+  // Raw max envelope first, faint, under the smoothed line: the 15-slot visual
+  // smoothing that keeps the trace readable also averages away exactly the
+  // short excursions this recording now captures, so the raw max edge is
+  // drawn as-is behind it.  Thresholds are computed from the raw data either
+  // way; this just lets the eye see what the maths sees.  The slot MIN is
+  // deliberately not drawn — see createRssiChart(); it feeds the pass-floor
+  // rule in calculateThresholds() and nothing the user reads.
+  const envelopeY = v => height - padding - ((v - minRssi) / rssiRange) * chartHeight;
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = 'rgba(0, 212, 255, 0.35)';
+  ctx.beginPath();
+  for (let i = 0; i < rssiValues.length; i++) {
+    const x = padding + (i / (rssiValues.length - 1)) * chartWidth;
+    if (i === 0) ctx.moveTo(x, envelopeY(rssiValues[i]));
+    else         ctx.lineTo(x, envelopeY(rssiValues[i]));
+  }
+  ctx.stroke();
+
   // Draw filled area under RSSI line (similar to SmoothieChart style)
   ctx.fillStyle = 'rgba(0, 212, 255, 0.4)';
   ctx.beginPath();
-  
+
   for (let i = 0; i < smoothedRssi.length; i++) {
     const x = padding + (i / (smoothedRssi.length - 1)) * chartWidth;
     const rssi = smoothedRssi[i];
@@ -7816,9 +8070,22 @@ async function calculateThresholds() {
   let calculatedExit = calculatedEnter - EXIT_GAP;
 
   // Noise floor: 35th-percentile of the recording keeps exit above ambient.
+  // Each sample is now its 20 ms slot's MAX, so this is the percentile of the
+  // envelope's upper edge — the level ambient actually reaches, not the
+  // level it happened to sit at when a slot boundary fell.
   const sorted = [...allRssiValues].sort((a, b) => a - b);
   const noiseFloor = sorted[Math.floor(sorted.length * 0.35)];
   calculatedExit = Math.max(noiseFloor + 3, calculatedExit);
+
+  // NOT done here, deliberately: lowering exit to sit under the slot MINs near
+  // each peak (a "pass floor").  Tried 2026-09-21 and removed the same day.
+  // A racing pass is often double-humped — RSSI dips sharply as the quad goes
+  // through the antenna null directly over the gate — and that dip is well
+  // below enter-4, so the rule dragged exit ~20 counts down.  Ending the
+  // crossing at the dip is the BETTER behaviour: the lap is stamped at the
+  // first hump every time, and the second hump's crossing ends inside minLap
+  // and is discarded.  Spanning both humps stamps whichever is taller that
+  // lap.  The slot MIN stays in the recording (d.min) for anyone who needs it.
 
   // Final clamp — exit must stay above MIN_RSSI and at least 4 below enter.
   const MIN_RSSI = 30;
@@ -8044,6 +8311,33 @@ function dismissPeakSpreadWarning() {
   if (banner) banner.style.display = 'none';
 }
 
+// ── Recording claim ────────────────────────────────────────────────────────
+// The tab that pressed Start Recording owns the recording on the device, and
+// only that tab may be offered a resume of it after a reload — or offered to
+// DISCARD it, which posts /calibration/stop.  Without this, any other tab (or
+// another phone on the same AP) that asked the device "is there a recording?"
+// would be offered someone else's live session, and Cancel would wipe it.
+//
+// sessionStorage is exactly the right scope: it survives a reload of THIS
+// tab and is invisible to every other tab and device.  The cost is that a
+// tab the OS killed loses its claim and is not offered a resume; its
+// recording is freed at the next wizard start like any other.
+const _WIZARD_CLAIM_KEY = 'fpvWizardPending';
+function _wizardSetClaim(nodeId) {
+  try { sessionStorage.setItem(_WIZARD_CLAIM_KEY, JSON.stringify({ nodeId: nodeId | 0, ts: Date.now() })); } catch (_) {}
+}
+function _wizardClearClaim() {
+  try { sessionStorage.removeItem(_WIZARD_CLAIM_KEY); } catch (_) {}
+}
+function _wizardGetClaim() {
+  try {
+    const raw = sessionStorage.getItem(_WIZARD_CLAIM_KEY);
+    if (!raw) return null;
+    const c = JSON.parse(raw);
+    return (c && Number.isFinite(c.nodeId)) ? c : null;
+  } catch (_) { return null; }
+}
+
 // Tear down the in-progress recording, then immediately re-enter the wizard
 // at the recording step so the user can re-fly the calibration laps.
 async function restartCalibrationWizard() {
@@ -8055,6 +8349,7 @@ async function restartCalibrationWizard() {
   try {
     await fetch(_wizardPath('stop'), { method: 'POST' });
   } catch (_) {}
+  _wizardClearClaim();
   // startCalibrationWizard resets wizardState and reshows wizardRecording.
   startCalibrationWizard();
 }
@@ -8066,6 +8361,7 @@ function cancelCalibrationWizard() {
     clearTimeout(wizardRecordingTimerId);
     wizardRecordingTimerId = null;
   }
+  _wizardClearClaim();
 
   // Tell firmware to stop (best effort), then close
   fetch(_wizardPath('stop'), { method: 'POST' })
@@ -10701,17 +10997,24 @@ async function _mnModalRssiPoll() {
     const data = await r.json();
     const rssi = parseInt(data.rssi, 10);
     if (!Number.isFinite(rssi)) return;
+    // max/min: the envelope of every filtered sample since the previous poll
+    // (firmware >= this change); older firmware sends only the instantaneous
+    // value.  The trace is drawn through max so a brief excursion the
+    // detector could act on is visible — the same rule as the Calibration
+    // tab.  The readout shows the instantaneous value.
+    const mx = Number.isFinite(parseInt(data.max, 10)) ? parseInt(data.max, 10) : rssi;
+    const mn = Number.isFinite(parseInt(data.min, 10)) ? parseInt(data.min, 10) : rssi;
     if (valEl) valEl.textContent = String(rssi);
     window.__mnRssiLoggedErr = false;
 
-    _mnModalRssiMax = Math.max(_mnModalRssiMax, rssi);
-    _mnModalRssiMin = Math.min(_mnModalRssiMin, rssi);
+    _mnModalRssiMax = Math.max(_mnModalRssiMax, mx);
+    _mnModalRssiMin = Math.min(_mnModalRssiMin, mn);
 
     // sync now consults _mnModalRssiMin/Max directly, so wandering trace
     // values flow into the axis range without a separate expansion clause
     // here.  Slider drags and poll ticks both go through the same path.
     _mnModalRssiSyncThresholds();
-    _mnModalRssiSeries.append(Date.now(), rssi);
+    _mnModalRssiSeries.append(Date.now(), mx);
   } catch (e) {
     if (valEl) valEl.textContent = '(fetch error)';
     if (!window.__mnRssiLoggedErr) {
@@ -12854,6 +13157,10 @@ document.addEventListener('DOMContentLoaded', () => {
       }
       onRaceTabOpen();
       _pageInitDone = true;
+      // A calibration recording left on the device by a reload mid-download?
+      // Offer it now that mode and node list are known.  Not awaited — a
+      // confirm() must not hold up the rest of init.
+      if (typeof wizardOfferResumeIfPending === 'function') wizardOfferResumeIfPending();
       if (data.nodeMode === 2) {
         if (!mnStatusSSID) {
           try {

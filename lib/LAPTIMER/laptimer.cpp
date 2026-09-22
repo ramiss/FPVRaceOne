@@ -59,14 +59,26 @@ static const uint8_t kGate1RelaxMargin = 4;   // effective Gate-1 enter ~= exit 
 // either to false ONLY for bench characterisation of pipeline behaviour;
 // production builds should keep both enabled.
 //
-// kEnableEnterDebounce=true: require kEnterHoldMin consecutive at-or-
-//   above-enter samples before the crossing starts.  Backs up the median
-//   filter's spike rejection so a 4-sample noise burst that lifts the
-//   median to enter can't start a false crossing.  Detection latency
-//   added: (kEnterHoldMin - 1) samples ≈ 3-7 ms depending on loop rate.
-//   Disable ONLY if characterising pipeline behaviour on the bench — a
-//   drone would need to be flying faster than any current racing drone
-//   for this to become the failure mode.
+// kEnableEnterDebounce=true: a crossing starts only once the filtered value
+//   has been at-or-above enter for kEnterHoldMin consecutive samples AND
+//   kEnterHoldMinMs of wall time.  The sample count alone was the rule until
+//   2026-09-21, and two samples is 2-4 ms at the loop rate: a noise burst
+//   that grazed enter for that long fired a lap with a peak of exactly
+//   enter, several times a minute in a noisy room.  The time bound makes
+//   the rule loop-rate independent (polled and DMA behave the same).
+//
+//   Why 5 ms and not more: the wizard places enter at 95 % of the weakest
+//   calibration peak, and the part of an RSSI lobe within 5 % of its peak
+//   is only ~0.64x the antenna's distance from the flight line wide.  At
+//   150 mph with the antenna 0.5 m off the line that is ~10 ms above enter
+//   — so 20 ms would sit on top of a legitimate fast pass, and 5 ms keeps
+//   2-4x margin against the worst realistic one while still rejecting the
+//   2-4 ms grazes.
+//
+//   The hold does NOT cost timing precision: the peak is tracked from the
+//   FIRST at-or-above-enter sample, and the hold only decides whether that
+//   provisional peak becomes a crossing.  A lap is stamped at its true peak
+//   either way.  Disable ONLY for bench characterisation.
 //
 // kEnableCeilingWatchdog=true: if we've been "in gate" longer than
 //   kCeilingDriftTimeoutMs without an exit, force-reset the crossing
@@ -74,6 +86,7 @@ static const uint8_t kGate1RelaxMargin = 4;   // effective Gate-1 enter ~= exit 
 //   detection.
 static constexpr bool     kEnableEnterDebounce   = true;
 static constexpr uint8_t  kEnterHoldMin          = 2;
+static constexpr uint32_t kEnterHoldMinMs        = 5;
 static constexpr bool     kEnableCeilingWatchdog = true;
 static constexpr uint32_t kCeilingDriftTimeoutMs = 3000;
 
@@ -411,6 +424,7 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
 
     lastRawRssi      = rawRssi;
     lastFilteredRssi = out;
+    _noteEnvelope(out);
 
     // Store final value used by lap logic
     rssi[rssiCount] = out;
@@ -632,9 +646,25 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
                 canCapture = minLapElapsed;
             }
 
-            if (canCapture) {
-                lapPeakCapture();
-                if (lapPeakCaptured()) {
+            // Track the signal on EVERY tick, minLap or not.  Until 2026-09-21
+            // lapPeakCapture() was skipped while minLap had not elapsed, so a
+            // pass already in progress when minLap expired was picked up on
+            // its way DOWN: the recorded peak was whatever value the detector
+            // woke up to, and the lap was stamped there instead of at the true
+            // peak — a late timestamp and an understated peak on any lap
+            // close to the minimum.  Now the crossing is followed from its
+            // first sample, and minLap decides only what happens when it ENDS:
+            // a crossing that ends before minLap is discarded whole; one that
+            // started before minLap and ends after it fires with its real
+            // peak and real time.
+            lapPeakCapture();
+            if (lapPeakCaptured()) {
+                if (!canCapture) {
+                    DEBUG("[LAP] Crossing ended %lu ms before minLap — discarded (peak %u)\n",
+                          (unsigned long)(conf->getMinLapMs() - (currentTimeMs - startTimeMs)),
+                          rssiPeak);
+                    lapPeakReset();
+                } else {
 #if TIMING_MARKER_ENABLED && defined(PIN_TIMING_MARKER)
                     // FIRST statement in this block, deliberately.  Everything
                     // below — the DEBUG here, and more inside finishLap() and
@@ -669,14 +699,24 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
             // can preempt between the bounds check and the store.  See the note
             // on calibrationMux in laptimer.h.  Capacity is per-session and may
             // be below LAPTIMER_CALIBRATION_HISTORY if the heap was tight.
+            //
+            // Every sample feeds the slot envelope; the 20 ms gate decides only
+            // WHEN the envelope is stored, never which sample survives.  A
+            // 3 ms excursion between two slot boundaries therefore lands in
+            // the recording at its true height instead of vanishing.
+            if (out > calSlotMax) calSlotMax = out;
+            if (out < calSlotMin) calSlotMin = out;
             portENTER_CRITICAL(&calibrationMux);
-            if (calibrationRssi && calibrationTimestamps &&
+            if (calibrationRssi && calibrationRssiMin && calibrationTimestamps &&
                 calibrationRssiCount < calibrationCapacity &&
                 (currentTimeMs - lastCalibrationSampleMs) >= 20) {
-                calibrationRssi[calibrationRssiCount] = out;
+                calibrationRssi[calibrationRssiCount]       = calSlotMax;
+                calibrationRssiMin[calibrationRssiCount]    = calSlotMin;
                 calibrationTimestamps[calibrationRssiCount] = currentTimeMs;
                 calibrationRssiCount++;
                 lastCalibrationSampleMs = currentTimeMs;
+                calSlotMax = 0;
+                calSlotMin = 255;
             }
             portEXIT_CRITICAL(&calibrationMux);
             break;
@@ -691,16 +731,33 @@ void LapTimer::handleLapTimerUpdate(uint32_t currentTimeMs) {
 // ===========================================================================
 //  Lap detection — RotorHazard-style state machine
 // ===========================================================================
-//   - Enter when filtered RSSI ≥ enterAt
+//   - A sample ≥ enterAt starts a PROVISIONAL crossing: the peak is tracked
+//     from this very sample, so the eventual timestamp is the true peak.
+//   - The crossing is QUALIFIED once the value has stayed ≥ enterAt for
+//     kEnterHoldMin samples and kEnterHoldMinMs (5 ms).  A dip below enter
+//     before that discards the provisional peak — that was a graze, not a
+//     pass.  See the constants block at the top for why 5 ms.
 //   - Track running max of filtered RSSI while inside the crossing
 //   - Exit when filtered RSSI < exitAt (single sample — the median filter
 //     is what rejects spikes; a second-sample confirm on top of a median
 //     is redundant)
-//   - Fire lap if peak reached enterAt during the crossing
-//   - No enter-hold debounce, no peak-above-exit margin, no ceiling-drift
-//     watchdog: the median filter's inherent spike rejection replaces all
-//     of that machinery.
+//   - Fire lap if the crossing was qualified; discard it if it ends before
+//     minLap has elapsed (handled by the caller in handleLapTimerUpdate)
+//   - Ceiling-drift watchdog: a crossing that never ends is reset after
+//     kCeilingDriftTimeoutMs so a drifted baseline can't lock detection
 // ---------------------------------------------------------------------------
+
+// Back to "not in a crossing" without touching lap state.  Used when a
+// crossing is discarded (ended before minLap) — startLap() does the same
+// reset but also moves the lap clock, which a discarded crossing must not.
+void LapTimer::lapPeakReset() {
+    enteredGate      = false;
+    gateExited       = true;
+    rssiPeak         = 0;
+    rssiPeakTimeMs   = 0;
+    enterHoldSamples = 0;
+    enterHoldStartMs = 0;
+}
 
 void LapTimer::lapPeakCapture() {
     const uint8_t cur = rssi[rssiCount];
@@ -723,24 +780,35 @@ void LapTimer::lapPeakCapture() {
         if (enterHoldSamples < 255) enterHoldSamples++;
         if (enterHoldStartMs == 0) enterHoldStartMs = now;
 
-        // Enter debounce: require kEnterHoldMin consecutive samples above
-        // enter before starting the crossing.  Compile-time constant —
-        // flip kEnableEnterDebounce to false in this file for bench
-        // characterisation.
-        const uint8_t needed = kEnableEnterDebounce ? kEnterHoldMin : 1;
+        // Peak is tracked from the FIRST at-or-above-enter sample, before
+        // the crossing is qualified.  If the hold below fails the provisional
+        // peak is discarded in the else-branch; if it succeeds the peak — and
+        // its timestamp — are exactly what they would have been with no hold
+        // at all.  The hold decides whether a crossing exists, never when it
+        // peaked.
+        if (cur > rssiPeak) {
+            rssiPeak       = cur;
+            rssiPeakTimeMs = now;
+            DEBUG("*** PEAK CAPTURED: %u (raw=%u) at %lu ms%s ***\n",
+                  rssiPeak, lastRawRssi,
+                  (unsigned long)(rssiPeakTimeMs - startTimeMs),
+                  enteredGate ? "" : " (provisional)");
+        }
 
-        if (enterHoldSamples >= needed) {
-            if (!enteredGate) {
-                enteredGate = true;
-                gateExited  = false;
-            }
-            if (cur > rssiPeak) {
-                rssiPeak       = cur;
-                rssiPeakTimeMs = now;
-                DEBUG("*** PEAK CAPTURED: %u (raw=%u) at %lu ms ***\n",
-                      rssiPeak, lastRawRssi,
-                      (unsigned long)(rssiPeakTimeMs - startTimeMs));
-            }
+        // Enter debounce: kEnterHoldMin consecutive samples AND kEnterHoldMinMs
+        // of wall time at-or-above enter before the crossing is qualified.
+        // Compile-time constants — flip kEnableEnterDebounce to false in this
+        // file for bench characterisation.
+        const uint8_t  needed   = kEnableEnterDebounce ? kEnterHoldMin   : 1;
+        const uint32_t neededMs = kEnableEnterDebounce ? kEnterHoldMinMs : 0;
+
+        if (!enteredGate &&
+            enterHoldSamples >= needed &&
+            (now - enterHoldStartMs) >= neededMs) {
+            enteredGate = true;
+            gateExited  = false;
+            DEBUG("[LAP] Crossing qualified after %lu ms / %u samples (peak so far %u)\n",
+                  (unsigned long)(now - enterHoldStartMs), enterHoldSamples, rssiPeak);
         }
 
         // Ceiling-drift watchdog (Fix #3): if we've been "in gate" too long
@@ -762,11 +830,18 @@ void LapTimer::lapPeakCapture() {
     } else {
         // Below enter: reset the debounce counter so a future above-enter
         // burst starts a fresh count.  Do NOT clear enteredGate here — if
-        // the crossing already started (debounce satisfied earlier in this
+        // the crossing already started (hold satisfied earlier in this
         // pass), we're descending from the peak and lapPeakCaptured() will
         // fire the lap when we drop below exit.
         enterHoldSamples = 0;
-        if (!enteredGate) enterHoldStartMs = 0;
+        if (!enteredGate) {
+            // The hold failed: whatever was above enter was shorter than
+            // kEnterHoldMinMs.  That is the graze this exists to reject, so
+            // its provisional peak goes with it.
+            enterHoldStartMs = 0;
+            rssiPeak         = 0;
+            rssiPeakTimeMs   = 0;
+        }
     }
 }
 
@@ -911,6 +986,45 @@ uint8_t LapTimer::getRssi() {
     return rssi[(rssiCount + LAPTIMER_RSSI_HISTORY - 1) % LAPTIMER_RSSI_HISTORY];
 }
 
+// Sampler side of the envelope — see takeRssiEnvelope() in the header.
+// Compare-and-swap loop per reader: usually one pass, because a sample
+// already inside the envelope needs no write at all.  RV32 has native 32-bit
+// atomics, so this is a handful of instructions on the 1 kHz path.
+void LapTimer::_noteEnvelope(uint8_t v) {
+    for (uint8_t r = 0; r < ENV_READERS; r++) {
+        uint32_t old = _env[r];
+        for (;;) {
+            const uint8_t mx = (uint8_t)(old >> 8);
+            const uint8_t mn = (uint8_t)(old & 0xFF);
+            if (v <= mx && v >= mn) break;           // already covered
+            const uint32_t nw = ((uint32_t)(v > mx ? v : mx) << 8) | (v < mn ? v : mn);
+            if (__atomic_compare_exchange_n(&_env[r], &old, nw, false,
+                                            __ATOMIC_RELAXED, __ATOMIC_RELAXED)) break;
+            // `old` now holds the value that beat us; loop and merge into it.
+        }
+    }
+}
+
+void LapTimer::takeRssiEnvelope(uint8_t reader, uint8_t *last, uint8_t *maxV, uint8_t *minV) {
+    const uint8_t l = getRssi();
+    if (reader >= ENV_READERS) { *last = *maxV = *minV = l; return; }
+
+    const uint32_t nowMs = millis();
+    const uint32_t p     = __atomic_exchange_n(&_env[reader], kEnvEmpty, __ATOMIC_RELAXED);
+    const bool     stale = (_envTakenMs[reader] == 0) ||
+                           (nowMs - _envTakenMs[reader]) > kEnvStaleMs;
+    _envTakenMs[reader] = nowMs;
+
+    uint8_t mx = (uint8_t)(p >> 8);
+    uint8_t mn = (uint8_t)(p & 0xFF);
+    // Empty (max < min: nothing sampled since the last take) or stale — the
+    // instantaneous value is the only honest answer for both.
+    if (stale || mx < mn) { mx = l; mn = l; }
+    *last = l;
+    *maxV = mx;
+    *minV = mn;
+}
+
 uint32_t LapTimer::getLapTime() {
     uint32_t lapTime = 0;
     lapAvailable = false;
@@ -988,9 +1102,12 @@ uint16_t LapTimer::startCalibrationWizard() {
         if (!ts) continue;
         uint8_t *rssi = (uint8_t *)calloc(n, sizeof(uint8_t));
         if (!rssi) { free(ts); continue; }
+        uint8_t *rssiMin = (uint8_t *)calloc(n, sizeof(uint8_t));
+        if (!rssiMin) { free(rssi); free(ts); continue; }
 
         calibrationTimestamps = ts;
         calibrationRssi       = rssi;
+        calibrationRssiMin    = rssiMin;
         calibrationCapacity   = n;
         break;
     }
@@ -1005,8 +1122,10 @@ uint16_t LapTimer::startCalibrationWizard() {
 
     DEBUG("Calibration wizard started: %u samples (%u s) using %u bytes, free=%u\n",
           (unsigned)calibrationCapacity, (unsigned)(calibrationCapacity / 50),
-          (unsigned)(calibrationCapacity * 5), (unsigned)ESP.getFreeHeap());
+          (unsigned)(calibrationCapacity * 6), (unsigned)ESP.getFreeHeap());
 
+    calSlotMax = 0;
+    calSlotMin = 255;
     state = CALIBRATION_WIZARD;
     calibrationRssiCount = 0;
     lastCalibrationSampleMs = 0;  // Reset sample timing
@@ -1052,16 +1171,19 @@ void LapTimer::_freeCalibrationBuffers() {
     // so the critical section covers only the pointer swap, which is all that
     // is needed to make the sampler's guarded write safe.
     portENTER_CRITICAL(&calibrationMux);
-    uint8_t  *rssi = calibrationRssi;
-    uint32_t *ts   = calibrationTimestamps;
+    uint8_t  *rssi    = calibrationRssi;
+    uint8_t  *rssiMin = calibrationRssiMin;
+    uint32_t *ts      = calibrationTimestamps;
     calibrationRssi       = nullptr;
+    calibrationRssiMin    = nullptr;
     calibrationTimestamps = nullptr;
     calibrationCapacity   = 0;
     calibrationRssiCount  = 0;
     portEXIT_CRITICAL(&calibrationMux);
 
-    if (rssi) free(rssi);
-    if (ts)   free(ts);
+    if (rssi)    free(rssi);
+    if (rssiMin) free(rssiMin);
+    if (ts)      free(ts);
 }
 
 uint16_t LapTimer::getCalibrationRssiCount() {
@@ -1073,6 +1195,13 @@ uint16_t LapTimer::getCalibrationRssiCount() {
 uint8_t LapTimer::getCalibrationRssi(uint16_t index) {
     if (calibrationRssi && index < calibrationRssiCount) {
         return calibrationRssi[index];
+    }
+    return 0;
+}
+
+uint8_t LapTimer::getCalibrationRssiMin(uint16_t index) {
+    if (calibrationRssiMin && index < calibrationRssiCount) {
+        return calibrationRssiMin[index];
     }
     return 0;
 }

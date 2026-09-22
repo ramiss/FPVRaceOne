@@ -444,6 +444,13 @@ void Webserver::sendRssiEvent(uint8_t rssi) {
     events.send(buf, "rssi");
 }
 
+void Webserver::sendRssiEnvelopeEvent(uint8_t last, uint8_t maxV, uint8_t minV) {
+    if (!servicesStarted) return;
+    char buf[16];
+    snprintf(buf, sizeof(buf), "%u,%u,%u", last, maxV, minV);
+    events.send(buf, "rssi");
+}
+
 void Webserver::sendRaceStateEvent(const char* state) {
     if (!servicesStarted) return;
     events.send(state, "raceState");
@@ -962,8 +969,22 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
     // Note: Lap events are now broadcast via TransportManager in main.cpp
     // This method only handles WiFi-specific logic
 
-    if (sendRssi && ((currentTimeMs - rssiSentMs) > WEB_RSSI_SEND_TIMEOUT_MS)) {
-        sendRssiEvent(timer->getRssi());
+    // Held for 2 s after every calibration page served: on a weak phone link
+    // the 10 Hz stream was measurably slowing the recording download, and
+    // nobody can see the chart behind the wizard overlay anyway.  Keyed on
+    // the download traffic, NOT on the wizard's state — a first version held
+    // it for as long as the device was in CALIBRATION_WIZARD, which froze the
+    // chart for every viewer whenever any session was left open (a killed
+    // tab, a failed download on another phone).  Resumes by itself; the
+    // envelope's stale rule makes the first frame after the gap clean.
+    const bool downloading = (_calDataServedMs != 0) &&
+                             ((currentTimeMs - _calDataServedMs) < 2000);
+    if (sendRssi && !downloading && ((currentTimeMs - rssiSentMs) > WEB_RSSI_SEND_TIMEOUT_MS)) {
+        // Envelope, not the instantaneous sample: the chart must show every
+        // excursion the detector could act on, however brief.
+        uint8_t last, mx, mn;
+        timer->takeRssiEnvelope(LapTimer::ENV_SSE, &last, &mx, &mn);
+        sendRssiEnvelopeEvent(last, mx, mn);
         rssiSentMs = currentTimeMs;
     }
 
@@ -2162,7 +2183,15 @@ EEPROM:\n";
     // of the Calibration tab for the same idle signal.  Returning the
     // instantaneous filtered value makes the two views consistent.
     server.on("/timer/rssi", HTTP_GET, [this](AsyncWebServerRequest *request) {
-        uint8_t rssi = timer ? timer->getRssi() : 0;
+        // rssi is the instantaneous filtered value; max/min are the envelope
+        // of every filtered sample since the previous poll (see
+        // LapTimer::takeRssiEnvelope).  Peak-of-window was once removed from
+        // here because the Edit Pilot chart "bounced 3x the amplitude of the
+        // Calibration tab" — but that bounce is what the detector sees, and
+        // hiding it is how thresholds ended up inside the noise.  Both are
+        // sent; the client chooses what to draw.
+        uint8_t rssi = 0, mx = 0, mn = 0;
+        if (timer) timer->takeRssiEnvelope(LapTimer::ENV_POLL, &rssi, &mx, &mn);
         // inputFlat is the boot variance verdict: RSSI never moved, so the
         // receiver is disconnected or failed whatever level it sits at.  Sent
         // here so the master's per-client RSSI modal can say so — a flat trace
@@ -2172,9 +2201,10 @@ EEPROM:\n";
         // session is normal (one per config save); a climbing number on an
         // idle unit is a hardware problem worth a look.
         const uint32_t recov = rx ? rx->dmaRecoveries() : 0;
-        char buf[72];
-        snprintf(buf, sizeof(buf), "{\"rssi\":%u,\"inputFlat\":%s,\"dmaRecoveries\":%u}",
-                 rssi, flat ? "true" : "false", (unsigned)recov);
+        char buf[96];
+        snprintf(buf, sizeof(buf),
+                 "{\"rssi\":%u,\"max\":%u,\"min\":%u,\"inputFlat\":%s,\"dmaRecoveries\":%u}",
+                 rssi, mx, mn, flat ? "true" : "false", (unsigned)recov);
         request->send(200, "application/json", buf);
     });
 
@@ -2892,24 +2922,44 @@ EEPROM:\n";
             led->on(50);
             return;
         }
+        _calDataServedMs = millis();   // a page — hold the live stream, see handleWebUpdate()
 
-        // Clamp limit to a sane upper bound to avoid huge responses
-        if (limit > 1000) limit = 1000;
+        // fmt=c selects the compact form (below).  Its per-sample cost is ~9
+        // bytes against ~38 for the object form, so the same heap budget
+        // carries a page 2.5x longer: the object form stays capped at 1000
+        // (a ~38 KB String), the compact form at 2500 (~23 KB).
+        const bool compact = request->hasParam("fmt") &&
+                             request->getParam("fmt")->value() == "c";
+        const uint32_t limitCap = compact ? 2500 : 1000;
+        if (limit > limitCap) limit = limitCap;
 
         const uint32_t end = (offset + limit > total) ? total : (offset + limit);
         const uint32_t count = (end > offset) ? (end - offset) : 0;
 
         // Build a paged JSON response
-        // Shape:
+        // Object form (default):
         // {
-        //   "total": 5000,
-        //   "offset": 0,
-        //   "limit": 500,
-        //   "count": 500,
-        //   "data":[{"rssi":58,"time":123}, ...]
+        //   "total": 5000, "offset": 0, "limit": 500, "count": 500,
+        //   "data":[{"rssi":58,"min":52,"time":123}, ...]
         // }
+        // Compact form (fmt=c) — what the wizard downloads:
+        // {
+        //   "total": 5000, "offset": 0, "limit": 1250, "count": 1250,
+        //   "t0": 123456,                      first sample's timestamp (ms)
+        //   "d":[max,min,dt, max,min,dt, ...]  dt = ms since the previous
+        //                                       sample (20 in steady state;
+        //                                       the first entry's dt is 0)
+        // }
+        // rssi/max is the slot MAX, min the slot MIN — the envelope of every
+        // filtered sample in that 20 ms slot, not one instantaneous value.
+        // See LapTimer::getCalibrationRssi().
+        //
+        // Why the delta timestamps: a 5000-sample recording was 190 KB of
+        // objects over ten requests, and on a phone at the far end of the AP's
+        // range that download was the slowest step of the whole wizard.  The
+        // same recording is ~45 KB in four requests this way.
         String json;
-        json.reserve(64 + (count * 28)); // rough reserve to reduce fragmentation
+        json.reserve(80 + (count * (compact ? 10 : 38))); // rough reserve to reduce fragmentation
 
         json += "{\"total\":";
         json += total;
@@ -2919,15 +2969,34 @@ EEPROM:\n";
         json += limit;
         json += ",\"count\":";
         json += count;
-        json += ",\"data\":[";
 
-        for (uint32_t i = offset; i < end; i++) {
-            if (i > offset) json += ",";
-            json += "{\"rssi\":";
-            json += timer->getCalibrationRssi((uint16_t)i);
-            json += ",\"time\":";
-            json += timer->getCalibrationTimestamp((uint16_t)i);
-            json += "}";
+        if (compact) {
+            json += ",\"t0\":";
+            json += (count > 0) ? timer->getCalibrationTimestamp((uint16_t)offset) : 0;
+            json += ",\"d\":[";
+            uint32_t prevT = (count > 0) ? timer->getCalibrationTimestamp((uint16_t)offset) : 0;
+            for (uint32_t i = offset; i < end; i++) {
+                if (i > offset) json += ",";
+                const uint32_t t = timer->getCalibrationTimestamp((uint16_t)i);
+                json += timer->getCalibrationRssi((uint16_t)i);
+                json += ",";
+                json += timer->getCalibrationRssiMin((uint16_t)i);
+                json += ",";
+                json += (t >= prevT) ? (t - prevT) : 0;
+                prevT = t;
+            }
+        } else {
+            json += ",\"data\":[";
+            for (uint32_t i = offset; i < end; i++) {
+                if (i > offset) json += ",";
+                json += "{\"rssi\":";
+                json += timer->getCalibrationRssi((uint16_t)i);
+                json += ",\"min\":";
+                json += timer->getCalibrationRssiMin((uint16_t)i);
+                json += ",\"time\":";
+                json += timer->getCalibrationTimestamp((uint16_t)i);
+                json += "}";
+            }
         }
 
         json += "]}";
@@ -4002,10 +4071,16 @@ EEPROM:\n";
         if (staIP.isEmpty()) {
             request->send(404, "application/json", "{\"error\":\"client offline\"}"); return;
         }
-        // Forward offset + limit if provided
+        // Forward offset + limit + fmt if provided
         String qs;
         if (request->hasParam("offset")) { qs += "offset="; qs += request->getParam("offset")->value(); }
         if (request->hasParam("limit"))  { if (qs.length()) qs += "&"; qs += "limit=";  qs += request->getParam("limit")->value(); }
+        if (request->hasParam("fmt"))    { if (qs.length()) qs += "&"; qs += "fmt=";    qs += request->getParam("fmt")->value(); }
+        // The master's own live stream competes with this relay just as it
+        // would with a local download.  Meta polls (limit=0) don't count.
+        if (!request->hasParam("limit") || request->getParam("limit")->value().toInt() != 0) {
+            _calDataServedMs = millis();
+        }
         String url = "http://" + staIP + "/calibration/data";
         if (qs.length()) { url += "?"; url += qs; }
         HTTPClient http;
