@@ -149,23 +149,32 @@ String wifi_ap_ssid;
 // Scoring: each nearby AP adds 1 point plus a RSSI weight (stronger = more interference).
 // Lower score = better channel. Called once per boot before starting the AP.
 //
-// MAC-derived fallback: when the scan sees nothing on any of {1,6,11}, the naive
-// "first minimum wins" pick always returns ch 1.  Multiple FPVRaceOne devices
-// cold-booting at the same moment in an otherwise-empty RF environment would all
-// converge on ch 1.  Hash the device's MAC into {0,1,2} → {ch 1, 6, 11} so
-// simultaneous boots deterministically spread across all three channels.  XOR
-// of all 6 MAC bytes is fine here: even sequential Espressif MAC allocations
-// hash to a uniform distribution mod 3.
+// Ties between candidates — including the three-way tie of an empty or failed
+// scan — are broken by hashing the device MAC over the TIED channels only.
+// Multiple FPVRaceOne devices cold-booting at the same moment therefore spread
+// across whichever channels are equally good, and none is pushed onto a busy
+// channel to achieve the spread.  XOR of all 6 MAC bytes is fine here: even
+// sequential Espressif MAC allocations hash to a uniform distribution mod 3.
 static uint8_t selectBestWifiChannel() {
     const uint8_t candidates[] = {1, 6, 11};
     int score[14] = {};  // index 1-13; 0 unused
 
     WiFi.mode(WIFI_STA);
+    const uint32_t scanStartMs = millis();
     int n = WiFi.scanNetworks(false, true, false, 120);  // 120ms per channel max
+    // The raw result, NOT just the verdict.  "no APs visible" was being logged
+    // on a bench with six 2.4 GHz networks in range (2026-09-22) and there was
+    // no way to tell a genuinely empty scan (0) from a failed one (-2,
+    // WIFI_SCAN_FAILED) or a stale in-progress one (-1).  Each AP is listed so
+    // the picker's arithmetic can be checked against a phone analyser.
+    DEBUG("WiFi channel scan: result %d in %u ms\n", n, (unsigned)(millis() - scanStartMs));
     if (n > 0) {
         for (int i = 0; i < n; i++) {
             int ch = WiFi.channel(i);
             int rssi = WiFi.RSSI(i);  // negative, e.g. -70
+            if (i < 12) {
+                DEBUG("  [%2d] ch%-2d %4d dBm  %s\n", i, ch, rssi, WiFi.SSID(i).c_str());
+            }
             if (ch >= 1 && ch <= 13) {
                 score[ch] += 1 + (rssi + 100) / 20;  // stronger signal = higher score
             }
@@ -174,19 +183,30 @@ static uint8_t selectBestWifiChannel() {
     WiFi.scanDelete();
     WiFi.mode(WIFI_OFF);
 
+    // Lowest score wins; ties go to a MAC hash over the tied set.
+    //
+    // History, because both halves of this went wrong once:
+    //   * The hash used to be a fallback that REPLACED the scan whenever
+    //     `bestScore == 0` — true whenever any of 1/6/11 was free, i.e. exactly
+    //     when the scan had found the answer.  Measured 2026-09-22: 16 APs
+    //     seen, ch1 and ch6 busy, ch11 empty, and the unit logged "no APs
+    //     visible" and hashed itself onto ch6.  From 2026-08-15 every unit in
+    //     a normal RF environment was placed by hash, never by the scan.
+    //   * The first repair keyed that fallback on `n <= 0` instead, which left
+    //     a plain "first minimum wins" for ties: every unit on ch1 whenever,
+    //     say, only ch6 had APs.  Hashing over the tied set fixes both.
     int bestScore = INT_MAX;
-    uint8_t best = candidates[0];
     for (uint8_t ch : candidates) {
-        if (score[ch] < bestScore) {
-            bestScore = score[ch];
-            best = ch;
-        }
+        if (score[ch] < bestScore) bestScore = score[ch];
     }
-
-    if (bestScore == 0) {
-        // Scan saw nothing on {1, 6, 11}.  Spread cold-booting nodes across
-        // channels deterministically using the device's MAC.
-        //
+    uint8_t tied[3];
+    uint8_t nTied = 0;
+    for (uint8_t ch : candidates) {
+        if (score[ch] == bestScore) tied[nTied++] = ch;
+    }
+    uint8_t best = tied[0];
+    uint8_t mac[6] = {};
+    if (nTied > 1) {
         // esp_read_mac(), NOT WiFi.macAddress().  The Arduino call goes through
         // the WiFi driver, which was stopped by the WIFI_OFF above, so it
         // returned 00:00:00:00:00:00 — hash 0, candidates[0], channel 1 on
@@ -195,7 +215,6 @@ static uint8_t selectBestWifiChannel() {
         // line looked normal unless you read the MAC it printed.  Confirmed in
         // a 2026-08-15 boot log.  esp_read_mac reads the eFuse directly and does
         // not care whether the radio is up.
-        uint8_t mac[6] = {};
         if (esp_read_mac(mac, ESP_MAC_WIFI_STA) != ESP_OK) {
             // eFuse read should never fail, but a zero MAC here would silently
             // reintroduce the bug — fall back to something still per-device.
@@ -205,14 +224,11 @@ static uint8_t selectBestWifiChannel() {
         }
         uint8_t hash = 0;
         for (uint8_t b : mac) hash ^= b;
-        best = candidates[hash % 3];
-        DEBUG("WiFi channel scan: no APs visible — MAC-fallback ch%d "
-              "(mac %02X:%02X:%02X:%02X:%02X:%02X)\n",
-              best, mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
-    } else {
-        DEBUG("WiFi channel scan: ch1=%d ch6=%d ch11=%d -> selected ch%d\n",
-              score[1], score[6], score[11], best);
+        best = tied[hash % nTied];
     }
+    DEBUG("WiFi channel scan: %d APs, ch1=%d ch6=%d ch11=%d -> selected ch%d%s\n",
+          n, score[1], score[6], score[11], best,
+          nTied > 1 ? " (MAC tie-break among equals)" : "");
     return best;
 }
 
@@ -1008,6 +1024,22 @@ void Webserver::handleWebUpdate(uint32_t currentTimeMs) {
             _rssiVerdictPublished = true;
         } else if (!done) {
             _rssiVerdictPublished = false;
+        }
+    }
+
+    // Receiver tuning → SSE "tune" (start / done).  This is what shows and
+    // hides the browser's "tuning…" banner.  It used to be inferred by the
+    // page polling /api/debuglog every 3 s for the "Setting frequency to" and
+    // "Tune done" log lines — several KB of JSON per poll, from every open
+    // browser, for the whole session, to catch an event that lasts ~130 ms.
+    // The receiver already tracks the state; publishing the edge costs one
+    // short SSE message per tune.  The poll now runs only while the serial
+    // monitor panel is open, which is the only other thing that read it.
+    if (rx && servicesStarted) {
+        const bool tuning = rx->isSettingFrequency();
+        if (tuning != _tunePublished) {
+            _tunePublished = tuning;
+            events.send(tuning ? "start" : "done", "tune");
         }
     }
 
@@ -2327,14 +2359,23 @@ EEPROM:\n";
     });
     
     // index.html: no-cache so the build timestamp always reflects the latest build.
-    // JS/CSS: immutable + 24h TTL. Use Ctrl+Shift+R to force a fresh fetch after an upload.
+    //
+    // JS/CSS: immutable for a year.  Safe because the build stamps every asset
+    // reference in index.html with a content hash (`script.js?v=1a2b3c4d`, see
+    // _stage_web_assets in scripts/extra_script.py) and index.html itself is
+    // never cached — so a changed asset gets a new URL and a fresh fetch, and
+    // an unchanged one is never re-downloaded.  This used to be 24 h with
+    // "Ctrl+Shift+R after an upload", which meant every phone re-fetched
+    // ~200 KB once a day for nothing and still showed a stale UI for up to a
+    // day after a filesystem upload.  The query string is ignored by the
+    // path match below, so the same handler serves every version.
     server.serveStatic("/index.html",       LittleFS, "/index.html")      .setCacheControl("no-cache, no-store, must-revalidate");
-    server.serveStatic("/script.js",        LittleFS, "/script.js")       .setCacheControl("max-age=86400, immutable");
-    server.serveStatic("/style.css",        LittleFS, "/style.css")       .setCacheControl("max-age=86400, immutable");
-    server.serveStatic("/audio-announcer.js", LittleFS, "/audio-announcer.js").setCacheControl("max-age=86400, immutable");
-    server.serveStatic("/smoothie.js",      LittleFS, "/smoothie.js")     .setCacheControl("max-age=86400, immutable");
-    server.serveStatic("/usb-transport.js", LittleFS, "/usb-transport.js").setCacheControl("max-age=86400, immutable");
-    server.serveStatic("/logo-white.svg",   LittleFS, "/logo-white.svg")  .setCacheControl("max-age=86400, immutable");
+    server.serveStatic("/script.js",        LittleFS, "/script.js")       .setCacheControl("max-age=31536000, immutable");
+    server.serveStatic("/style.css",        LittleFS, "/style.css")       .setCacheControl("max-age=31536000, immutable");
+    server.serveStatic("/audio-announcer.js", LittleFS, "/audio-announcer.js").setCacheControl("max-age=31536000, immutable");
+    server.serveStatic("/smoothie.js",      LittleFS, "/smoothie.js")     .setCacheControl("max-age=31536000, immutable");
+    server.serveStatic("/usb-transport.js", LittleFS, "/usb-transport.js").setCacheControl("max-age=31536000, immutable");
+    server.serveStatic("/logo-white.svg",   LittleFS, "/logo-white.svg")  .setCacheControl("max-age=31536000, immutable");
     server.serveStatic("/", LittleFS, "/").setCacheControl("no-cache, no-store, must-revalidate");
 
     events.onConnect([this](AsyncEventSourceClient *client) {
@@ -2351,6 +2392,14 @@ EEPROM:\n";
         if (rx && rx->rssiCheckDone() && rx->rssiInputFlat()) {
             client->send("flat", "rssiHealth", millis(), 1000);
         }
+
+        // Replay the receiver's tuning state.  The "tune" event is
+        // edge-triggered (handleWebUpdate), so a browser that connects — or
+        // reconnects — after the edge would never hear it.  Both states are
+        // sent, not just "start": a browser that saw "start" and then lost
+        // its stream before "done" is exactly the one whose banner needs
+        // clearing, and "done" to a fresh page is a no-op.
+        client->send(rx && rx->isSettingFrequency() ? "start" : "done", "tune", millis(), 1000);
 
         // Multi-tab sync: if a race is already running when this browser
         // connects (late-joiner scenario), replay raceState=started so the

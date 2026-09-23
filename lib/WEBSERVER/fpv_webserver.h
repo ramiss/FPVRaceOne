@@ -162,6 +162,9 @@ class Webserver : public TransportInterface {
     // whenever the window re-opens (serviceRearm), so a re-verdict after
     // a WiFi bring-up is published again.  See handleWebUpdate().
     bool _rssiVerdictPublished = false;
+    // Last receiver-tuning state sent as the SSE "tune" event, so only the
+    // edges (start / done) are published.  See handleWebUpdate().
+    bool _tunePublished = false;
 
     wifi_mode_t wifiMode = WIFI_OFF;
     wl_status_t lastStatus = WL_IDLE_STATUS;

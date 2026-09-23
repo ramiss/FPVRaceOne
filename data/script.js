@@ -240,6 +240,14 @@ var maxLaps = 0;
 
 // ── Splash screen ────────────────────────────────────────────────────────────
 let _splashHidden = false;
+let _resolveSplashHidden = null;
+// Resolves once the splash is gone — by init finishing or by the 6 s backstop.
+// Everything that is NOT needed to paint the first screen waits on this, so
+// the two requests that gate the splash have the unit's TCP listen backlog
+// (5, hard-coded in AsyncTCP) to themselves.  Measured 2026-09-22: with the
+// onload burst competing, two of its seven requests each waited ~1030 ms —
+// a dropped SYN and the client's 1 s retransmit — on a 4 KB total payload.
+const splashHidden = new Promise(res => { _resolveSplashHidden = res; });
 function setSplashStatus(text) {
   const el = document.getElementById('splash-status');
   if (el) el.textContent = text;
@@ -247,6 +255,7 @@ function setSplashStatus(text) {
 function hideSplash() {
   if (_splashHidden) return;
   _splashHidden = true;
+  if (_resolveSplashHidden) _resolveSplashHidden();
   const el = document.getElementById('splash');
   if (!el) return;
   setSplashStatus('Connected');
@@ -264,7 +273,11 @@ function loadScript(src) {
   if (_loadedScripts[src]) return _loadedScripts[src];
   _loadedScripts[src] = new Promise((resolve, reject) => {
     const s = document.createElement('script');
-    s.src = src;
+    // Cache-busting: the build stamps a combined asset hash into
+    // <meta name="build">, and these scripts are served with a one-year
+    // immutable cache.  Same version -> never re-fetched; new build -> new URL.
+    const build = document.querySelector('meta[name="build"]')?.content;
+    s.src = build ? `${src}?v=${build}` : src;
     s.onload  = resolve;
     s.onerror = () => reject(new Error('Failed to load ' + src));
     document.head.appendChild(s);
@@ -376,15 +389,18 @@ async function initializeTransport() {
   const hasUSB = (typeof window.electronAPI !== 'undefined') || ('serial' in navigator);
   console.log('[Init] USB available:', hasUSB, 'Mode:', currentConnectionMode);
   console.log('[Init] electronAPI:', typeof window.electronAPI);
-  
-  // run this to force the banner on the Race tab if no SD Card exists.
-  loadRaceHistory();
+
+  // loadRaceHistory() used to be fired here as well as awaited by onload a
+  // few lines later — two /races requests on every page load.  onload's
+  // awaited call is the one that matters; this one is gone.
 
   if (!hasUSB || currentConnectionMode === 'wifi') {
-    // WiFi-only mode — delay SSE so HTML/CSS/JS finish loading first before
-    // the persistent SSE connection opens (avoids hitting ESP32 TCP conn limit).
+    // WiFi-only mode — open the persistent SSE connection only once the
+    // splash is down.  A fixed 400 ms delay used to do this job; it now
+    // raced the splash-gating requests instead of following them (see the
+    // note on splashHidden), and the splash chain is what the pilot waits on.
     console.log('[Init] Initializing WiFi-only mode');
-    setTimeout(() => { setupWiFiEvents(); updateConnectionStatus('WiFi', true); }, 400);
+    splashHidden.then(() => { setupWiFiEvents(); updateConnectionStatus('WiFi', true); });
     return;
   }
   
@@ -672,6 +688,13 @@ function setupWiFiEvents() {
     connectionStatusUpdateInterval = setInterval(() => {
       updateConnectionStatus('WiFi', true);
     }, 5000);
+  }, false);
+
+  // Receiver tuning banner.  The firmware publishes the edge of its own
+  // tuning state; this replaces polling /api/debuglog every 3 s for the
+  // "Setting frequency to" / "Tune done" log lines (see pollDebugLogs).
+  eventSource.addEventListener("tune", function (e) {
+    if (e.data === 'start') showCalibrationBanner(); else hideCalibrationBanner();
   }, false);
 
   eventSource.addEventListener("error", function (e) {
@@ -1172,36 +1195,13 @@ async function selectComPort() {
   await connectUSB(portPath);
 }
 
-async function checkTuningStatusOnStartup() {
-  try {
-    const r = await fetch('/tuningstatus', { cache: 'no-store' });
-    if (!r.ok) {
-      console.warn('[Startup] /tuningstatus HTTP', r.status);
-      return;
-    }
-
-    const data = await r.json();
-    console.log('[Startup] tuningstatus:', data.tuningstatus);
-
-    if (data.tuningstatus === 'setting') {
-      if (typeof showCalibrationBanner === 'function') {
-        showCalibrationBanner();
-      } else {
-        console.warn('[Startup] showCalibrationBanner() not defined');
-      }
-    }
-  } catch (e) {
-    // Fail silently — startup should not break if this endpoint is unavailable
-    console.warn('[Startup] tuningstatus check failed:', e);
-  }
-}
-
 
 onload = async function (e) {
   // Load dark mode preference
   loadDarkMode();
 
-  loadFirmwareVersion();
+  // loadFirmwareVersion() used to be called here, before the splash was
+  // down.  It now runs after `await splashHidden` below — see there.
 
   config.style.display = "none";
   // '' not "block" — see the note in openTab(); .tabcontent is a flex column.
@@ -1216,7 +1216,25 @@ onload = async function (e) {
   attachConfigStagingListeners();
 
   // Initialize transport (USB/WiFi)
-  await initializeTransport(); 
+  await initializeTransport();
+
+  // Nothing from here on is needed to paint the first screen, so wait for the
+  // splash to come down before touching the network.  The unit accepts at
+  // most 5 pending connections (AsyncTCP's listen backlog); this burst used
+  // to run alongside the two splash-gating requests and the SSE connect, and
+  // the overflow cost a dropped SYN and a 1 s retransmit on every cold load.
+  // After the wait, at most four requests are in flight here at once:
+  // version + buildinfo (below, not awaited), /races, and /config — the
+  // /config fetch is started now so it overlaps the history load instead of
+  // following it.
+  await splashHidden;
+  loadFirmwareVersion();
+  const configPromise = (usbConnected && transportManager) ? null : fetch("/config");
+  // The await that consumes this sits behind loadRaceHistory()'s round trip.
+  // A rejection in that window would be reported as unhandled before the
+  // try/catch there ever sees it; this no-op handler marks it handled while
+  // leaving the original promise to reject into that catch as intended.
+  if (configPromise) configPromise.catch(() => {});
 
   // IMPORTANT: Load race history immediately so the Race tab banner + History tab label
   // can reflect SD vs RAM-only mode on first landing.
@@ -1234,13 +1252,12 @@ onload = async function (e) {
     console.error('[Script] Failed to load race history on startup:', err);
   }
 
-  console.log('[Script] Starting Debug Listener...');
-  try{
-    startDebugListener();
-    console.log('[Script] Debug Listener started OK');
-  } catch (err) {
-      console.error('[Script] Debug Listener failed:', err);
-  }
+  // startDebugListener() used to be started here, unconditionally, on every
+  // page load: a /api/debuglog poll every 3 s for the life of the session,
+  // whose only job outside the serial monitor was to spot the receiver's
+  // tuning log lines for the calibration banner.  The firmware now publishes
+  // that as an SSE "tune" event (see setupWiFiEvents), and the poll runs only
+  // while the serial monitor panel is open.
 
   // Dev mode: click pilot name display on single/client Race view to inject a
   // simulated lap.  This is the OTHER route into addManualLap() — it does not
@@ -1290,7 +1307,7 @@ onload = async function (e) {
     if (usbConnected && transportManager) {
       configData = await transportManager.sendCommand('config', 'GET');
     } else {
-      const response = await fetch("/config");
+      const response = configPromise ? await configPromise : await fetch("/config");
       configData = await response.json();
     }
     ledConnected = (configData.hasLed !== undefined) ? !!configData.hasLed : false;
@@ -1566,7 +1583,10 @@ onload = async function (e) {
   baselineConfig = (configData && Object.keys(configData).length) ? { ...configData } : {};
   settingsLoading = false;
 
-  checkTuningStatusOnStartup();
+  // checkTuningStatusOnStartup() — a /tuningstatus GET — used to run here to
+  // catch a page loaded mid-tune.  The SSE connect now replays the tuning
+  // state (events.onConnect sends "tune" start/done), which covers that case
+  // without a request in the post-splash burst.
 
 };
 
@@ -8678,7 +8698,6 @@ function runSelfTest() {
 let serialMonitorActive = false;
 let serialMonitorPollInterval = null;
 let serialMonitorBuffer = [];
-let lastSeenTimestampBanner = 0;   // advances always
 let lastSeenTimestampUI = 0;       // advances only when serial monitor is open
 const MAX_SERIAL_LINES = 500;
 
@@ -8694,25 +8713,6 @@ function startDebugListener(rateMs = 3000) {
   // Clear any existing interval before starting a new one
   stopDebugListener();
   serialMonitorPollInterval = setInterval(pollDebugLogs, rateMs);
-  // On the very first call, consume existing log entries to advance the timestamp
-  // cursor WITHOUT triggering the calibration banner — those entries are from boot
-  // and are no longer actionable. Only new entries (after this point) matter.
-  _pollDebugLogsInitial();
-}
-
-// Fetch existing log entries once to advance the timestamp cursor without
-// showing the calibration banner. Called once at page load so stale boot-time
-// "Setting frequency to" entries don't trigger the banner spuriously.
-function _pollDebugLogsInitial() {
-  fetch('/api/debuglog')
-    .then(r => r.json())
-    .then(data => {
-      if (data.logs && data.logs.length > 0) {
-        const latest = data.logs[data.logs.length - 1].timestamp;
-        if (latest > lastSeenTimestampBanner) lastSeenTimestampBanner = latest;
-      }
-    })
-    .catch(() => {});
 }
 
 function stopDebugListener() {
@@ -8738,39 +8738,21 @@ function startSerialMonitor() {
   monitor.innerHTML = '<div style="color: #4ade80;">[SYSTEM] Serial monitor started</div>';
 }
 
-// Call this on every incoming log line (cheap string checks)
-function handleLogForCalibrationBanner(line) {
-  if (!line) return;
+// The calibration banner used to be driven from here by string-matching the
+// receiver's "Setting frequency to" / "Tune done" log lines out of a 3 s
+// /api/debuglog poll.  The firmware publishes that state directly as the SSE
+// "tune" event now (setupWiFiEvents), replayed on every SSE connect, so this
+// poll exists only to feed the serial monitor panel.
 
-  if (line.includes('Setting frequency to')) {
-    showCalibrationBanner();
-  } else if (line.includes('RX5808 Tune done')) {
-    // "Tune done" is the only end-of-tune signal now.
-    //
-    // This used to also accept "RX5808 frequency verified properly", from a
-    // verifyFrequency() that read the tuning register back over SPI.  That
-    // never fired on real hardware — these modules do not drive the SPI data
-    // line — so the banner once hung indefinitely waiting for it, and the
-    // "Tune done" trigger was added to rescue it.  The firmware side has since
-    // been removed outright (RX5808.cpp), so the dead trigger goes with it.
-    hideCalibrationBanner();
-  }
-}
-
-function pollDebugLogs() {  
+function pollDebugLogs() {
   fetch('/api/debuglog')
     .then(response => response.json())
     .then(data => {
       if (data.logs && data.logs.length > 0) {
-        // Add new logs that we haven't seen yet
+        // Add new logs that we haven't seen yet.  This used to also drive the
+        // calibration banner from the tuning log lines; the SSE "tune" event
+        // owns that now, and two drivers would fight over one banner.
         data.logs.forEach(log => {
-          // 1) Always process for banner (real-time UX)
-          if (log.timestamp > lastSeenTimestampBanner) {
-            handleLogForCalibrationBanner(log.message);
-            lastSeenTimestampBanner = log.timestamp;
-          }
-
-          // 2) Only advance the UI pointer when the serial monitor is open
           if (serialMonitorActive && log.timestamp > lastSeenTimestampUI) {
             appendSerialLine(log.message, '#00ff00', log.timestamp);
             lastSeenTimestampUI = log.timestamp;
@@ -8793,8 +8775,10 @@ function stopSerialMonitor() {
   button.style.backgroundColor = '';
   serialMonitorActive = false;
 
-  // Drop back to slow background polling (calibration banner only)
-  startDebugListener(3000);
+  // Stop polling altogether.  This used to drop to a 3 s background poll so
+  // the calibration banner could keep watching the log; the banner is driven
+  // by the SSE "tune" event now, and nothing else reads the log.
+  stopDebugListener();
 
   const line = document.createElement('div');
   line.style.color = '#888';
@@ -9510,10 +9494,9 @@ function applyClientRaceLockUI() {
 // rather than two.
 //
 // Only the PANEL is hidden.  The log ring behind it keeps filling in every
-// build: the calibration banner reads that same stream through
-// startDebugListener() to know when a retune has finished, so the background
-// poll must survive being hidden.  stopSerialMonitor() drops the poll back to
-// its slow 3 s cadence rather than ending it, which is exactly what we want.
+// build, so opening the panel later shows history.  Nothing polls the log
+// while the panel is closed: the calibration banner, which used to read the
+// same stream, is driven by the SSE "tune" event now.
 function applySystemMonitorUI() {
   const section = document.getElementById('systemMonitorSection');
   if (!section) return;
@@ -13097,6 +13080,14 @@ document.addEventListener('DOMContentLoaded', () => {
   (async () => {
     try {
       setSplashStatus('Connecting to timer\u2026');
+      // Both splash-gating requests go out together.  They were serialised
+      // (mode, then laps), which put two full round trips \u2014 each behind a
+      // 3-attempt retry \u2014 between the pilot and a visible UI.  The laps
+      // request is issued unconditionally: it is 58 bytes, and its answer is
+      // only consumed once the mode is known.  A master ignores it and
+      // fetches its node list instead.
+      const lapsPromise = fetchWithRetry('/api/laps/current', {}, 3, 1500)
+        .then(lr => lr.json()).catch(() => null);
       const r = await fetchWithRetry('/api/mode', {}, 3, 1500);
       const data = await r.json();
       mnNodeMode        = data.nodeMode       || 0;
@@ -13140,9 +13131,8 @@ document.addEventListener('DOMContentLoaded', () => {
         try { await mnRefreshNodes(); } catch (_) {}
       } else {
         try {
-          const lr = await fetchWithRetry('/api/laps/current', {}, 3, 1500);
-          const ld = await lr.json();
-          if (ld.laps && ld.laps.length > 0) {
+          const ld = await lapsPromise;   // issued alongside /api/mode above
+          if (ld && ld.laps && ld.laps.length > 0) {
             _restoreInProgressLaps(ld.laps);
             // This is the PAGE LOAD path; the copy near the top of the file is
             // the SSE-reconnect path.  Both restore laps, so both have to
@@ -13152,7 +13142,7 @@ document.addEventListener('DOMContentLoaded', () => {
           }
           // See the SSE-reconnect copy above — outside the laps guard, and OR
           // rather than assign.
-          if (ld.simulatedLaps) { mnRaceSimulated = true; mnApplySimulatedBadge(); }
+          if (ld && ld.simulatedLaps) { mnRaceSimulated = true; mnApplySimulatedBadge(); }
         } catch (_) {}
       }
       onRaceTabOpen();
